@@ -138,16 +138,14 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		emit = func(Event) {}
 	}
 
-	provider := e.llm
-	if providerName != "" && e.providers != nil {
-		p, err := e.providers.GetLLM(providerName)
-		if err != nil {
-			return "", err
-		}
-		provider = p
+	ag, err := e.agents.Get(agentKey)
+	if err != nil {
+		return "", err
 	}
 
-	ag, err := e.agents.Get(agentKey)
+	// Provider precedence: per-request override > agent's configured provider
+	// > engine default.
+	provider, err := e.resolveProvider(ag, providerName)
 	if err != nil {
 		return "", err
 	}
@@ -192,10 +190,15 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 
 	for iter := 0; iter < e.cfg.MaxAgentIterations; iter++ {
 		req := llm.ChatRequest{
-			Model:    provider.Model(),
-			Messages: messages,
-			Tools:    specs,
-			Stream:   true,
+			Model:       provider.Model(),
+			Messages:    messages,
+			Tools:       specs,
+			Temperature: ag.Config.Temperature,
+			MaxTokens:   ag.Config.MaxTokens,
+			Stream:      true,
+		}
+		if ag.Config.Model != nil && *ag.Config.Model != "" {
+			req.Model = *ag.Config.Model
 		}
 
 		var turnText strings.Builder
@@ -260,6 +263,25 @@ func toolSpec(t tools.Tool) llm.ToolSpec {
 			Parameters:  t.Parameters(),
 		},
 	}
+}
+
+// resolveProvider picks the provider for a run: a per-request override wins,
+// then the agent's configured provider (if any), then the engine default.
+// If no named provider is requested and no provider lookup is configured,
+// the default engine provider is returned.
+func (e *Engine) resolveProvider(ag *agents.Agent, perRequest string) (llm.Provider, error) {
+	name := perRequest
+	if name == "" && ag.Config.Provider != nil {
+		name = *ag.Config.Provider
+	}
+	if name == "" || e.providers == nil {
+		return e.llm, nil
+	}
+	p, err := e.providers.GetLLM(name)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // docSearcher adapts store.SearchDocs into a tools.DocSearcher for an agent.

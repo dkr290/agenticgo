@@ -25,12 +25,13 @@ single static binary, in Docker, or on Kubernetes.
   Knowledge Base page. They're **full-text indexed over content** (SQLite FTS5) so the
   agent recalls them via the `search_docs` tool — not bulk-injected into prompts.
 - **Sidebar Web UI** — dark, GoClaw-inspired SPA (no build step): Overview, Chat,
-  Agents (with a per-agent Files/Skills/Knowledge editor), Skills (with ZIP upload),
+  Agents (with a per-agent Files/Skills/Knowledge/Config editor), Skills (with ZIP upload),
   Built-in Tools, MCP Servers, Cron, Memory, Knowledge Base, and Providers.
 - **Agent loop** — the model can call tools, observe results, and iterate until it
   answers (capped to prevent runaway loops).
 - **Providers** — manage multiple OpenAI-compatible endpoints (Ollama, LM Studio, vLLM,
-  OpenAI) from the UI; pick a default or override per chat. Configs persist to
+  OpenAI) from the UI; pick a default or override per chat. Each agent can also pin its
+  own provider, model, temperature, and max-tokens in `config.json`. Configs persist to
   `data/providers.json`.
 - **Built-in tools (allow-listed):**
   - `read_file` — read a file in the workspace
@@ -64,6 +65,7 @@ data/agents/
     USER_PREDEFINED.md   # canned user context injected into every session
     CAPABILITIES.md      # what the agent can and cannot do
     HEARTBEAT.md         # empty by default (reserved)
+    config.json          # per-agent LLM settings (optional; provider/model/temperature/max_tokens, nil = inherit)
     skills/
       web-research/
         SKILL.md         # front-matter (name, description) + instructions
@@ -153,8 +155,13 @@ Health check: `curl http://localhost:8080/healthz`
 ### Agents
 - `GET /api/agents` — list agents.
 - `POST /api/agents` — create. Body:
-  `{ "key": "researcher", "name": "...", "description": "...", "soul": "..." }`.
-- `GET /api/agents/{key}` — get one agent + its context files.
+  `{ "key": "researcher", "name": "...", "description": "...", "soul": "...",
+  "config": { "provider": "...", "model": "...", "temperature": 0.2, "max_tokens": 2048 } }`
+  (all `config` fields optional, nil = inherit).
+- `GET /api/agents/{key}` — get one agent + its context files + config.
+- `PUT /api/agents/{key}/config` — replace the agent's LLM config. Body:
+  `{ "provider": "...", "model": "...", "temperature": 0.9, "max_tokens": 4096 }`; omit
+  fields to reset them to inherit, send `{}` to clear everything.
 - `DELETE /api/agents/{key}` — delete an agent.
 
 ### Context files

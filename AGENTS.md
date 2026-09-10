@@ -16,8 +16,9 @@ The owner is building this to learn Go.
 - **Multiple agents**: each agent is a directory under `AgentsDir` with context
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
-  a `skills/` dir, and a per-agent `workspace/` (tool jail). Files that don't
-  exist yet are still listed (empty) in the UI so they can be created.
+  a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens,
+  nil = inherit), a `skills/` dir, and a per-agent `workspace/` (tool jail). Files
+  that don't exist yet are still listed (empty) in the UI so they can be created.
 - **Skills**: a skill is a folder with `SKILL.md` (optional YAML-ish front-matter
   with `name`/`description` + markdown instructions). Loaded per agent and injected
   into the system prompt. Skills can be installed from the UI as a ZIP upload
@@ -28,13 +29,15 @@ The owner is building this to learn Go.
   recalled via the `search_docs` tool — not bulk-injected. Titles are listed in the
   system prompt so the agent knows to search.
 - **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
-  Pages: Overview, Chat, Agents (per-agent Files/Skills/Knowledge tabs), Skills,
+  Pages: Overview, Chat, Agents (per-agent Files/Skills/Knowledge/Config tabs), Skills,
   Built-in Tools, MCP Servers (scaffold), Cron (scaffold), Providers.
 - **Agent loop**: LLM may call tools, observe results, iterate (capped).
 - **LLM providers**: OpenAI-compatible endpoints only (Ollama / LM Studio / vLLM /
   OpenAI), behind a `llm.Provider` interface. Named provider configs are managed
   from the UI, persisted to `data/providers.json`, and seeded from env on first
-  run. A chat request may override the provider (`wsMessage.Provider`);
+  run. A chat request may override the provider (`wsMessage.Provider`); each
+  agent's `config.json` may pin a provider/model/temperature/max_tokens too
+  (per-request override > agent config > default);
   `agent.ProviderLookup` (`providers.Store.GetLLM`) resolves names.
 - **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`.
 - **Security**: filesystem tools jailed to a workspace; `exec` runs only allow-listed
@@ -93,6 +96,7 @@ data/
     <key>/
       SOUL.md AGENTS.md IDENTITY.md
       USER.md USER_PREDEFINED.md CAPABILITIES.md HEARTBEAT.md
+      config.json                 # per-agent LLM settings (optional, nil = inherit)
       skills/<skill>/SKILL.md
       workspace/               # per-agent tool jail
 ```
@@ -116,7 +120,7 @@ data/
 
 Possible follow-ons the owner may ask for (not yet built): per-agent workspaces wired
 into the tool loop (tools currently use the global `WorkspaceDir`), skill enable/disable
-per agent, agent-specific model overrides.
+per agent.
 
 ## Tech choices (keep these)
 

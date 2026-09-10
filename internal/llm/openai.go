@@ -78,10 +78,12 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 
 // wire types for the OpenAI-compatible API.
 type oaiRequest struct {
-	Model    string     `json:"model"`
-	Messages []oaiMsg   `json:"messages"`
-	Tools    []ToolSpec `json:"tools,omitempty"`
-	Stream   bool       `json:"stream"`
+	Model       string     `json:"model"`
+	Messages    []oaiMsg   `json:"messages"`
+	Tools       []ToolSpec `json:"tools,omitempty"`
+	Temperature *float64   `json:"temperature,omitempty"`
+	MaxTokens   *int       `json:"max_tokens,omitempty"`
+	Stream      bool       `json:"stream"`
 }
 
 type oaiMsg struct {
@@ -137,10 +139,12 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 		model = p.model
 	}
 	body := oaiRequest{
-		Model:    model,
-		Messages: msgs,
-		Tools:    req.Tools,
-		Stream:   req.Stream,
+		Model:       model,
+		Messages:    msgs,
+		Tools:       req.Tools,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		Stream:      req.Stream,
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {

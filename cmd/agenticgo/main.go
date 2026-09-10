@@ -42,7 +42,7 @@ func main() {
 	// Seed a default agent if none exist so the UI has something to chat with.
 	if list, err := agentReg.List(); err == nil && len(list) == 0 {
 		if _, err := agentReg.Create("default", "AgenticGo",
-			"A helpful general-purpose agent.", ""); err != nil {
+			"A helpful general-purpose agent.", "", agents.AgentConfig{}); err != nil {
 			log.Printf("seed default agent: %v", err)
 		} else {
 			log.Printf("seeded default agent at %s/default", cfg.AgentsDir)
