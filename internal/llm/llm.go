@@ -76,5 +76,6 @@ type ChatRequest struct {
 	Messages    []Message  `json:"messages"`
 	Tools       []ToolSpec `json:"tools,omitempty"`
 	Temperature *float64   `json:"temperature,omitempty"`
+	MaxTokens   *int       `json:"max_tokens,omitempty"`
 	Stream      bool       `json:"stream"`
 }

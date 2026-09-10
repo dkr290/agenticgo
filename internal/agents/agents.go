@@ -15,6 +15,7 @@
 package agents
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,13 +31,28 @@ type ContextFile struct {
 	Exists  bool   `json:"exists"`  // false when the file is not on disk yet
 }
 
+// AgentConfig holds per-agent LLM settings. Fields are pointers so a nil
+// value means "inherit" (use the provider/default), letting agents share the
+// same defaults without duplicating them. Persisted as config.json in the
+// agent directory.
+type AgentConfig struct {
+	Provider    *string  `json:"provider,omitempty"`    // named provider override (see internal/providers)
+	Model       *string  `json:"model,omitempty"`       // model override (empty = provider default)
+	Temperature *float64 `json:"temperature,omitempty"` // sampling temperature (0.0-2.0)
+	MaxTokens   *int     `json:"max_tokens,omitempty"`  // max output tokens
+}
+
+// configFileName is where a per-agent LLM config is stored on disk.
+const configFileName = "config.json"
+
 // Agent is a loaded agent definition.
 type Agent struct {
 	Key         string        `json:"key"`
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
 	Dir         string        `json:"-"`
-	Files       []ContextFile `json:"files"` // ordered context files present on disk
+	Files       []ContextFile `json:"files"`  // ordered context files present on disk
+	Config      AgentConfig   `json:"config"` // per-agent LLM settings
 }
 
 // contextFileNames are the known context files, in the order they are composed
@@ -153,6 +169,7 @@ func (r *Registry) Get(key string) (*Agent, error) {
 	}
 
 	ag := &Agent{Key: key, Name: key, Dir: dir}
+	ag.Config = r.loadConfig(dir)
 	for _, name := range contextFileNames {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -169,8 +186,9 @@ func (r *Registry) Get(key string) (*Agent, error) {
 	return ag, nil
 }
 
-// Create scaffolds a new agent with template context files.
-func (r *Registry) Create(key, name, description, soul string) (*Agent, error) {
+// Create scaffolds a new agent with template context files and an initial
+// LLM config.
+func (r *Registry) Create(key, name, description, soul string, cfg AgentConfig) (*Agent, error) {
 	dir, err := r.dirFor(key)
 	if err != nil {
 		return nil, err
@@ -180,6 +198,9 @@ func (r *Registry) Create(key, name, description, soul string) (*Agent, error) {
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create agent dir: %w", err)
+	}
+	if err := r.saveConfig(dir, cfg); err != nil {
+		return nil, err
 	}
 
 	if strings.TrimSpace(name) == "" {
@@ -275,6 +296,47 @@ func validContextFile(name string) bool {
 		}
 	}
 	return false
+}
+
+// loadConfig reads the agent's config.json (if present). A missing or corrupt
+// file yields the zero-value config, meaning "inherit all defaults".
+func (r *Registry) loadConfig(dir string) AgentConfig {
+	data, err := os.ReadFile(filepath.Join(dir, configFileName))
+	if err != nil {
+		return AgentConfig{}
+	}
+	var cfg AgentConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return AgentConfig{}
+	}
+	return cfg
+}
+
+// saveConfig writes the agent's config.json into its directory.
+func (r *Registry) saveConfig(dir string, cfg AgentConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, configFileName), data, 0o644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
+}
+
+// UpdateConfig replaces an agent's LLM config and returns the refreshed agent.
+func (r *Registry) UpdateConfig(key string, cfg AgentConfig) (*Agent, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Exists(key) {
+		return nil, fmt.Errorf("agent %q not found", key)
+	}
+	if err := r.saveConfig(dir, cfg); err != nil {
+		return nil, err
+	}
+	return r.Get(key)
 }
 
 // SystemPrompt composes the system prompt for an agent from its context files.

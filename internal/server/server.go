@@ -61,6 +61,7 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Post("/agents", s.handleCreateAgent)
 		r.Get("/agents/{key}", s.handleGetAgent)
 		r.Delete("/agents/{key}", s.handleDeleteAgent)
+		r.Put("/agents/{key}/config", s.handleUpdateAgentConfig)
 		r.Get("/agents/{key}/files/{name}", s.handleReadFile)
 		r.Put("/agents/{key}/files/{name}", s.handleWriteFile)
 		r.Get("/agents/{key}/skills", s.handleListSkills)
@@ -154,10 +155,11 @@ func (s *Server) handleListAgents(w http.ResponseWriter, _ *http.Request) {
 }
 
 type createAgentRequest struct {
-	Key         string `json:"key"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Soul        string `json:"soul"`
+	Key         string              `json:"key"`
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Soul        string              `json:"soul"`
+	Config      *agents.AgentConfig `json:"config,omitempty"` // optional LLM settings
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
@@ -166,12 +168,31 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ag, err := s.agents.Create(req.Key, req.Name, req.Description, req.Soul)
+	var cfg agents.AgentConfig
+	if req.Config != nil {
+		cfg = *req.Config
+	}
+	ag, err := s.agents.Create(req.Key, req.Name, req.Description, req.Soul, cfg)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, ag)
+}
+
+// handleUpdateAgentConfig replaces an agent's per-agent LLM config.
+func (s *Server) handleUpdateAgentConfig(w http.ResponseWriter, r *http.Request) {
+	var cfg agents.AgentConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ag, err := s.agents.UpdateConfig(chi.URLParam(r, "key"), cfg)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ag)
 }
 
 func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {

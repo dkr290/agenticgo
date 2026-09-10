@@ -216,6 +216,7 @@
       <button class="tab active" data-atab="files">Files</button>
       <button class="tab" data-atab="skills">Skills</button>
       <button class="tab" data-atab="knowledge">Knowledge</button>
+      <button class="tab" data-atab="config">Config</button>
     </div>
     <div id="atab-files">
       <div id="files-wrap">
@@ -232,6 +233,25 @@
     </div>
     <div id="atab-skills" style="display:none" class="page-body"></div>
     <div id="atab-knowledge" style="display:none" class="page-body"></div>
+    <div id="atab-config" style="display:none" class="page-body">
+      <div class="card pform">
+        <h3 style="margin-top:0">LLM settings</h3>
+        <div class="sub" style="margin-bottom:12px">Applied to every chat with this agent. Leave a field empty to inherit from the provider / global defaults.</div>
+        <label>Provider</label>
+        <select id="cf-provider"><option value="">(default)</option></select>
+        <label>Model</label>
+        <input id="cf-model" placeholder="e.g. qwen2.5 — empty = provider default">
+        <div class="row2">
+          <div><label>Temperature (0.0–2.0)</label><input id="cf-temp" type="number" step="0.1" min="0" max="2" placeholder="provider default"></div>
+          <div><label>Max Tokens</label><input id="cf-maxtok" type="number" step="1" min="1" placeholder="provider default"></div>
+        </div>
+        <div class="toolbar" style="margin-top:16px; margin-bottom:0">
+          <button id="cf-save">Save</button>
+          <button class="ghost" id="cf-reset">Clear all (use defaults)</button>
+          <span id="cf-saved" style="font-size:12px; color:var(--muted)"></span>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Skills -->
@@ -553,8 +573,10 @@
     $('atab-files').style.display = tab === 'files' ? '' : 'none';
     $('atab-skills').style.display = tab === 'skills' ? '' : 'none';
     $('atab-knowledge').style.display = tab === 'knowledge' ? '' : 'none';
+    $('atab-config').style.display = tab === 'config' ? '' : 'none';
     if (tab === 'skills') renderAgentSkills();
     if (tab === 'knowledge') renderAgentKnowledge();
+    if (tab === 'config') renderAgentConfig();
   }
 
   function renderFilesList(){
@@ -614,6 +636,43 @@
         list.map(k => '<li style="margin:6px 0; font-size:13px">' + esc(k) + '</li>').join('') + '</ul></div>';
     }).catch(() => { el.innerHTML = '<div class="empty">Failed to load knowledge.</div>'; });
   }
+
+  function renderAgentConfig(){
+    const c = agentDetail.config || {};
+    api('/api/providers').then(list => {
+      const opts = (list || []).map(p => '<option value="' + esc(p.name) + '">' + esc(p.display_name || p.name) + '</option>').join('');
+      $('cf-provider').innerHTML = '<option value="">(default)</option>' + opts;
+      $('cf-provider').value = c.provider || '';
+    }).catch(() => { $('cf-provider').innerHTML = '<option value="">(default)</option>'; });
+    $('cf-model').value = c.model || '';
+    $('cf-temp').value = c.temperature != null ? c.temperature : '';
+    $('cf-maxtok').value = c.max_tokens != null ? c.max_tokens : '';
+    $('cf-saved').textContent = '';
+  }
+  $('cf-save').addEventListener('click', () => {
+    if (!detailAgent) return;
+    const body = {};
+    const prov = $('cf-provider').value.trim();
+    const model = $('cf-model').value.trim();
+    const temp = $('cf-temp').value;
+    const maxtok = $('cf-maxtok').value;
+    if (prov) body.provider = prov;
+    if (model) body.model = model;
+    if (temp !== '') body.temperature = parseFloat(temp);
+    if (maxtok !== '') body.max_tokens = parseInt(maxtok, 10);
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/config', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    }).then(a => {
+      agentDetail = a; $('cf-saved').textContent = 'Saved ✓'; setTimeout(() => $('cf-saved').textContent = '', 2000);
+    }).catch(e => toast('Save failed: ' + e.message));
+  });
+  $('cf-reset').addEventListener('click', () => {
+    if (!detailAgent || !confirm('Clear all LLM settings for this agent and use defaults?')) return;
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/config', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}'
+    }).then(a => { agentDetail = a; renderAgentConfig(); })
+      .catch(e => toast('Reset failed: ' + e.message));
+  });
 
   // ---------- skills page ----------
   function loadSkills(){
