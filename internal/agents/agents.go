@@ -27,6 +27,7 @@ import (
 type ContextFile struct {
 	Name    string `json:"name"`    // e.g. SOUL.md
 	Content string `json:"content"` // raw markdown
+	Exists  bool   `json:"exists"`  // false when the file is not on disk yet
 }
 
 // Agent is a loaded agent definition.
@@ -38,9 +39,18 @@ type Agent struct {
 	Files       []ContextFile `json:"files"` // ordered context files present on disk
 }
 
-// contextFileNames are the files we compose into the system prompt, in order.
-// SOUL.md (persona) leads, then AGENTS.md (instructions), then IDENTITY.md.
-var contextFileNames = []string{"SOUL.md", "AGENTS.md", "IDENTITY.md"}
+// contextFileNames are the known context files, in the order they are composed
+// into the system prompt. Files that don't exist on disk are still listed in
+// the UI (as empty) so they can be created.
+var contextFileNames = []string{
+	"AGENTS.md",
+	"SOUL.md",
+	"IDENTITY.md",
+	"USER.md",
+	"USER_PREDEFINED.md",
+	"CAPABILITIES.md",
+	"HEARTBEAT.md",
+}
 
 // keyRE validates agent keys: lowercase alphanumeric, dash, underscore.
 var keyRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
@@ -146,10 +156,12 @@ func (r *Registry) Get(key string) (*Agent, error) {
 	for _, name := range contextFileNames {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
-			continue // file optional
+			// File optional: still list it (empty) so the UI can create it.
+			ag.Files = append(ag.Files, ContextFile{Name: name})
+			continue
 		}
 		content := string(data)
-		ag.Files = append(ag.Files, ContextFile{Name: name, Content: content})
+		ag.Files = append(ag.Files, ContextFile{Name: name, Content: content, Exists: true})
 		if name == "IDENTITY.md" {
 			ag.Name, ag.Description = parseIdentity(content, key)
 		}
@@ -182,6 +194,11 @@ func (r *Registry) Create(key, name, description, soul string) (*Agent, error) {
 		"SOUL.md":     soul,
 		"IDENTITY.md": identity,
 		"AGENTS.md":   defaultAgents(),
+		// Scaffolded empty; fill in via the Files tab in the UI.
+		"USER.md":            "# User\n\nNotes about the user this agent serves.\n",
+		"USER_PREDEFINED.md": "# Predefined User Context\n\nCanned user context injected into every session.\n",
+		"CAPABILITIES.md":    "# Capabilities\n\nWhat this agent can and cannot do.\n",
+		"HEARTBEAT.md":       "",
 	}
 	for fname, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, fname), []byte(content), 0o644); err != nil {

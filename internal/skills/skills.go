@@ -13,20 +13,25 @@
 package skills
 
 import (
+	"archive/zip"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
 
 // Skill is a single loaded skill.
 type Skill struct {
-	Key         string   `json:"key"`         // directory name
-	Name        string   `json:"name"`        // from front-matter, defaults to key
-	Description string   `json:"description"` // from front-matter
-	Body        string   `json:"body"`        // instructions (markdown after front-matter)
-	Files       []string `json:"files"`       // supporting files in the skill dir
+	Key         string   `json:"key"`             // directory name
+	Name        string   `json:"name"`            // from front-matter, defaults to key
+	Description string   `json:"description"`     // from front-matter
+	Body        string   `json:"body"`            // instructions (markdown after front-matter)
+	Files       []string `json:"files"`           // supporting files in the skill dir
+	Agent       string   `json:"agent,omitempty"` // owning agent key (set when listing across agents)
 }
 
 // Load reads all skills under a skills directory.
@@ -112,6 +117,166 @@ func parseSKILL(content, key string) (name, description, body string) {
 		body = strings.TrimSpace(strings.Join(lines[bodyStart:], "\n"))
 	}
 	return name, description, body
+}
+
+// slugRE validates skill slugs (used as directory names).
+var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// slugify derives a filesystem-safe slug from a display name.
+func slugify(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ', r == '_', r == '-':
+			b.WriteByte('-')
+		}
+	}
+	// Collapse repeats and trim.
+	slug := slugRE.FindString(strings.Trim(b.String(), "-"))
+	for strings.Contains(slug, "--") {
+		slug = strings.ReplaceAll(slug, "--", "-")
+	}
+	return slug
+}
+
+// systemArtifacts are filenames never extracted from an uploaded ZIP.
+var systemArtifacts = map[string]bool{
+	".ds_store": true, "__macosx": true, "thumbs.db": true, ".git": true,
+}
+
+// InstallZip installs a skill from a ZIP archive into destDir/<slug>/.
+//
+// The archive must contain a SKILL.md (at the root or inside a single
+// top-level folder). SKILL.md must have a `name` in its front-matter; the slug
+// is derived from it (or the `slug` field). Extraction is path-traversal-safe
+// and skips symlinks and OS artifacts. Returns the parsed skill.
+func InstallZip(destDir string, data []byte) (*Skill, error) {
+	const maxUncompressed = 50 << 20 // 50 MB safety cap
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("read zip: %w", err)
+	}
+
+	// Find SKILL.md, allowing a single top-level wrapper folder.
+	var skillEntry *zip.File
+	prefix := ""
+	for _, f := range zr.File {
+		name := strings.TrimPrefix(filepath.ToSlash(f.Name), "./")
+		if systemArtifacts[strings.ToLower(base(name))] {
+			continue
+		}
+		base := base(name)
+		if strings.EqualFold(base, "SKILL.md") {
+			skillEntry = f
+			prefix = strings.TrimSuffix(name, base) // "" or "folder/"
+			break
+		}
+	}
+	if skillEntry == nil {
+		return nil, fmt.Errorf("zip does not contain a SKILL.md")
+	}
+
+	// Parse SKILL.md to get name/slug before writing anything.
+	skillData, err := readZipFile(skillEntry, maxUncompressed)
+	if err != nil {
+		return nil, err
+	}
+	name, description, _ := parseSKILL(string(skillData), "")
+	slug := slugify(frontMatterValue(string(skillData), "slug"))
+	if slug == "" {
+		slug = slugify(name)
+	}
+	if slug == "" || !slugRE.MatchString(slug) {
+		return nil, fmt.Errorf("SKILL.md needs a valid 'name' (or 'slug') in front-matter")
+	}
+
+	target := filepath.Join(destDir, slug)
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return nil, fmt.Errorf("create skill dir: %w", err)
+	}
+
+	// Extract all files under the SKILL.md's folder, safely.
+	for _, f := range zr.File {
+		name := strings.TrimPrefix(filepath.ToSlash(f.Name), "./")
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(name, prefix)
+		if rel == "" || strings.HasPrefix(rel, "/") || strings.Contains(rel, "..") {
+			continue // path traversal guard
+		}
+		if systemArtifacts[strings.ToLower(base(rel))] {
+			continue
+		}
+		dest := filepath.Join(target, filepath.FromSlash(rel))
+		if !strings.HasPrefix(dest, filepath.Clean(target)+string(os.PathSeparator)) && dest != target {
+			continue // outside target
+		}
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(dest, 0o755); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		// Skip symlinks.
+		if f.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return nil, err
+		}
+		content, err := readZipFile(f, maxUncompressed)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(dest, content, 0o644); err != nil {
+			return nil, fmt.Errorf("write %s: %w", rel, err)
+		}
+	}
+
+	sk := &Skill{Key: slug, Name: name, Description: description}
+	return sk, nil
+}
+
+func base(p string) string {
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+func readZipFile(f *zip.File, max int64) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", f.Name, err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, max))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", f.Name, err)
+	}
+	return data, nil
+}
+
+// frontMatterValue returns a single front-matter value by key.
+func frontMatterValue(content, key string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return ""
+	}
+	for i := 1; i < len(lines); i++ {
+		l := strings.TrimSpace(lines[i])
+		if l == "---" {
+			break
+		}
+		if k, v, ok := strings.Cut(l, ":"); ok && strings.EqualFold(strings.TrimSpace(k), key) {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // Prompt renders skills as a system-prompt section. If enabled is empty, all

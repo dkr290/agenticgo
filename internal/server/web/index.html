@@ -6,178 +6,393 @@
 <title>agenticgo</title>
 <style>
   :root {
-    --bg: #0f1115; --panel: #161a22; --panel2: #1c2230; --border: #262c3a;
-    --text: #e6e9ef; --muted: #8a93a6; --accent: #4f8cff; --tool: #b478ff;
-    --user: #2ea043; --danger: #c93c37;
+    --bg: #171210; --bg2: #0f0c0a; --panel: #201914; --panel2: #2a211a;
+    --border: #332a21; --text: #ece5dd; --muted: #9a8d80;
+    --accent: #ff6a00; --accent-dim: #b34c00; --tool: #c9a25e;
+    --ok: #3fb950; --danger: #e5534b;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-         background: var(--bg); color: var(--text); height: 100vh; display: flex; overflow: hidden; }
-  button { background: var(--accent); color: #fff; border: none; border-radius: 7px; padding: 7px 13px;
+         background: var(--bg2); color: var(--text); display: flex; overflow: hidden; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 7px 14px;
            font-size: 13px; cursor: pointer; }
+  button:hover { background: var(--accent-dim); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
-  button.danger { background: var(--danger); }
-  input, textarea, select { background: var(--bg); border: 1px solid var(--border); color: var(--text);
-    border-radius: 7px; padding: 8px 10px; font-size: 13px; font-family: inherit; width: 100%; }
-  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
-  label { font-size: 12px; color: var(--muted); display: block; margin: 10px 0 4px; }
+  button.ghost:hover { background: var(--panel2); }
+  button.danger { background: transparent; border: 1px solid var(--border); color: var(--danger); }
+  button.danger:hover { background: rgba(229,83,75,.12); }
+  input, textarea, select { background: var(--bg2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; width: 100%; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  label { font-size: 12px; color: var(--muted); display: block; margin: 12px 0 4px; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 
-  /* Sidebar */
-  #sidebar { width: 280px; min-width: 280px; background: var(--panel); border-right: 1px solid var(--border);
+  /* ---------- Sidebar ---------- */
+  #sidebar { width: 232px; min-width: 232px; background: var(--bg); border-right: 1px solid var(--border);
              display: flex; flex-direction: column; }
-  #sidebar header { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
-  #sidebar header h1 { font-size: 15px; margin: 0; font-weight: 600; flex: 1; }
-  #agents { flex: 1; overflow-y: auto; padding: 8px; }
-  .agent-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; }
-  .agent-item:hover { background: var(--panel2); }
-  .agent-item.active { background: var(--panel2); border-color: var(--accent); }
-  .agent-item .name { font-weight: 600; font-size: 14px; }
-  .agent-item .desc { font-size: 12px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #sidebar footer { padding: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
-  #status { display: flex; align-items: center; gap: 6px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #777; }
-  .dot.on { background: var(--user); } .dot.off { background: var(--danger); }
+  #sidebar .brand { padding: 16px; font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  #sidebar .brand .logo { width: 22px; height: 22px; border-radius: 6px; background: var(--accent);
+    display: inline-flex; align-items: center; justify-content: center; font-size: 13px; color: #fff; }
+  .nav { flex: 1; overflow-y: auto; padding: 4px 10px 10px; }
+  .nav .section { font-size: 10.5px; letter-spacing: .1em; color: var(--muted); text-transform: uppercase;
+                  margin: 18px 6px 6px; }
+  .nav .item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 8px;
+               cursor: pointer; font-size: 13.5px; color: var(--text); margin-bottom: 1px; }
+  .nav .item:hover { background: var(--panel2); }
+  .nav .item.active { background: var(--panel2); color: var(--accent); }
+  .nav .item .icon { width: 16px; text-align: center; opacity: .85; font-size: 13px; }
+  #sidebar footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #777; margin-right: 6px; }
+  .dot.on { background: var(--ok); } .dot.off { background: var(--danger); }
 
-  /* Main */
+  /* ---------- Main ---------- */
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #tabs { display: flex; gap: 4px; padding: 8px 16px 0; border-bottom: 1px solid var(--border); background: var(--panel); }
-  .tab { padding: 8px 14px; cursor: pointer; font-size: 13px; color: var(--muted); border: none; background: transparent;
-         border-bottom: 2px solid transparent; border-radius: 0; }
-  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
-  .view { flex: 1; display: none; flex-direction: column; min-height: 0; }
-  .view.active { display: flex; }
+  .page { flex: 1; display: none; flex-direction: column; min-height: 0; }
+  .page.active { display: flex; }
+  .page-head { padding: 22px 28px 0; }
+  .page-head h1 { margin: 0; font-size: 21px; font-weight: 650; }
+  .page-head .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .page-body { flex: 1; overflow-y: auto; padding: 18px 28px; min-height: 0; }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .toolbar .spacer { flex: 1; }
 
-  /* Chat */
-  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  .msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; white-space: pre-wrap; word-wrap: break-word;
-         line-height: 1.45; font-size: 14px; }
-  .msg.user { align-self: flex-end; background: var(--user); color: #fff; border-bottom-right-radius: 2px; }
-  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 40px; text-align: center; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 11px;
+          border: 1px solid var(--border); color: var(--muted); }
+  .pill.ok { color: var(--ok); border-color: rgba(63,185,80,.4); }
+  .pill.accent { color: var(--accent); border-color: rgba(255,106,0,.4); }
+
+  table.list { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border);
+               border-radius: 12px; overflow: hidden; }
+  table.list th, table.list td { text-align: left; padding: 11px 14px; font-size: 13px;
+                                 border-bottom: 1px solid var(--border); }
+  table.list th { color: var(--muted); font-weight: 500; font-size: 12px; background: var(--bg); }
+  table.list tr:last-child td { border-bottom: none; }
+  table.list tr:hover td { background: var(--panel2); }
+  .namecell { font-weight: 600; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+
+  /* ---------- Chat ---------- */
+  #chat-wrap { flex: 1; display: flex; min-height: 0; }
+  #chat { flex: 1; overflow-y: auto; padding: 20px 28px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 78%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word;
+         line-height: 1.5; font-size: 14px; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
   .msg.tool { align-self: flex-start; background: transparent; border: 1px dashed var(--tool); color: var(--tool);
               font-family: ui-monospace, Menlo, monospace; font-size: 12px; max-width: 90%; }
   .msg.system { align-self: center; color: var(--muted); font-size: 12px; }
-  #composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); }
+  #composer { display: flex; gap: 8px; padding: 14px 28px; border-top: 1px solid var(--border); background: var(--bg); }
   #input { flex: 1; resize: none; }
-  #evolve { background: var(--tool); }
+  .chat-meta { display: flex; gap: 10px; align-items: center; padding: 12px 28px 0; flex-wrap: wrap; }
+  .chat-meta select { width: auto; min-width: 150px; }
 
-  /* Context editor */
-  #ctxwrap { flex: 1; display: flex; min-height: 0; }
-  #ctxfiles { width: 180px; border-right: 1px solid var(--border); padding: 12px; background: var(--panel); }
-  .ctxfile { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-bottom: 4px; font-family: ui-monospace, Menlo, monospace; }
-  .ctxfile:hover { background: var(--panel2); }
-  .ctxfile.active { background: var(--panel2); color: var(--accent); }
-  #ctxedit { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #ctxarea { flex: 1; margin: 12px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; resize: none; }
-  #ctxbar { display: flex; gap: 8px; padding: 0 12px 12px; align-items: center; }
-  #ctxsaved { font-size: 12px; color: var(--user); }
+  /* ---------- Agents page ---------- */
+  #agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+  .agent-card { cursor: pointer; }
+  .agent-card:hover { border-color: var(--accent); }
+  .agent-card .aicon { width: 34px; height: 34px; border-radius: 9px; background: var(--panel2);
+    display: flex; align-items: center; justify-content: center; font-size: 16px; margin-bottom: 10px; color: var(--accent); }
+  .agent-card h3 { margin: 0 0 3px; font-size: 15px; }
+  .agent-card .adesc { color: var(--muted); font-size: 12.5px; min-height: 16px; }
+  .agent-card .akey { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, Menlo, monospace; margin-top: 8px; }
 
-  /* Skills */
-  #skillslist { flex: 1; overflow-y: auto; padding: 16px; }
-  .skill { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
-  .skill h3 { margin: 0 0 4px; font-size: 14px; }
-  .skill .sdesc { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-  .skill pre { background: var(--bg); padding: 10px; border-radius: 6px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
-  .empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+  /* Agent detail */
+  .detail-head { display: flex; align-items: center; gap: 14px; padding: 20px 28px 0; }
+  .detail-head .aicon { width: 46px; height: 46px; border-radius: 11px; background: var(--panel2);
+    display: flex; align-items: center; justify-content: center; font-size: 21px; color: var(--accent); }
+  .detail-head h1 { margin: 0; font-size: 20px; }
+  .detail-head .sub { color: var(--muted); font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; }
+  .tabs { display: flex; gap: 6px; padding: 16px 28px 0; }
+  .tab { padding: 7px 16px; cursor: pointer; font-size: 13px; color: var(--muted); border: none;
+         background: var(--panel); border-radius: 8px; }
+  .tab.active { color: var(--text); background: var(--panel2); }
+  #files-wrap { flex: 1; display: flex; min-height: 0; padding: 16px 28px 20px; gap: 16px; }
+  #files-list { width: 250px; min-width: 250px; background: var(--panel); border: 1px solid var(--border);
+                border-radius: 12px; padding: 12px; overflow-y: auto; }
+  .file-item { padding: 9px 11px; border-radius: 8px; cursor: pointer; font-size: 13px;
+               font-family: ui-monospace, Menlo, monospace; margin-bottom: 2px; }
+  .file-item:hover { background: var(--panel2); }
+  .file-item.active { background: var(--panel2); color: var(--accent); }
+  .file-item .est { display: block; font-size: 10.5px; color: var(--muted); font-family: inherit; }
+  #file-edit { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--panel);
+               border: 1px solid var(--border); border-radius: 12px; }
+  #file-area { flex: 1; margin: 14px; font-family: ui-monospace, Menlo, monospace; font-size: 13px;
+               resize: none; background: var(--bg2); }
+  #file-bar { display: flex; gap: 10px; padding: 0 14px 14px; align-items: center; }
+  #file-saved { font-size: 12px; color: var(--ok); }
+  .file-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; }
 
-  /* Modal */
-  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 50; }
+  /* ---------- Providers ---------- */
+  .pform { max-width: 720px; }
+  .pform .row2 { display: flex; gap: 12px; }
+  .pform .row2 > div { flex: 1; }
+  .checkrow { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 13px; }
+  .checkrow input { width: auto; }
+
+  /* ---------- Modal ---------- */
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center;
+             justify-content: center; z-index: 50; }
   #overlay.open { display: flex; }
-  #modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; width: 440px; max-width: 92vw; }
-  #modal h2 { margin: 0 0 8px; font-size: 16px; }
-  #modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  #modal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px;
+           width: 460px; max-width: 92vw; max-height: 88vh; overflow-y: auto; }
+  #modal h2 { margin: 0 0 4px; font-size: 17px; }
+  #modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel2); border: 1px solid var(--border);
+           border-radius: 10px; padding: 11px 16px; font-size: 13px; z-index: 100; display: none; }
 </style>
 </head>
 <body>
 
 <div id="sidebar">
-  <header>
-    <h1>agenticgo</h1>
-    <button id="newagent" title="New agent">+ New</button>
-  </header>
-  <div id="agents"></div>
-  <footer>
-    <div id="status"><span class="dot" id="dot"></span><span id="statustext">connecting…</span></div>
-  </footer>
+  <div class="brand"><span class="logo">◆</span> agenticgo</div>
+  <div class="nav">
+    <div class="section">Core</div>
+    <div class="item" data-page="overview"><span class="icon">▦</span> Overview</div>
+    <div class="item" data-page="chat"><span class="icon">💬</span> Chat</div>
+    <div class="item" data-page="agents"><span class="icon">🤖</span> Agents</div>
+    <div class="section">Capabilities</div>
+    <div class="item" data-page="skills"><span class="icon">⚡</span> Skills</div>
+    <div class="item" data-page="tools"><span class="icon">🧰</span> Built-in Tools</div>
+    <div class="item" data-page="mcp"><span class="icon">🔌</span> MCP Servers</div>
+    <div class="item" data-page="cron"><span class="icon">🕒</span> Cron</div>
+    <div class="section">Data</div>
+    <div class="item" data-page="memory"><span class="icon">🧠</span> Memory</div>
+    <div class="item" data-page="kb"><span class="icon">📚</span> Knowledge Base</div>
+    <div class="section">System</div>
+    <div class="item" data-page="providers"><span class="icon">🧠</span> Providers</div>
+  </div>
+  <footer><span class="dot" id="dot"></span><span id="statustext">connecting…</span></footer>
 </div>
 
 <div id="main">
-  <div id="tabs">
-    <button class="tab active" data-view="chat">Chat</button>
-    <button class="tab" data-view="context">Context</button>
-    <button class="tab" data-view="skills">Skills</button>
+
+  <!-- Overview -->
+  <div class="page" id="page-overview">
+    <div class="page-head"><h1>Overview</h1><div class="sub">What this agenticgo instance is running.</div></div>
+    <div class="page-body"><div id="overview-body"></div></div>
   </div>
 
-  <!-- Chat view -->
-  <div class="view active" id="view-chat">
-    <div id="chat"></div>
+  <!-- Chat -->
+  <div class="page" id="page-chat">
+    <div class="chat-meta">
+      <select id="chat-agent" title="Agent"></select>
+      <select id="chat-provider" title="Provider"><option value="">Default provider</option></select>
+      <input id="chat-session" placeholder="session" value="default" style="width:130px">
+      <button class="ghost" id="chat-load">Load history</button>
+      <div class="spacer" style="flex:1"></div>
+      <button class="ghost" id="chat-evolve" title="Extract learnings from this session">Evolve</button>
+      <button class="ghost" id="chat-clear">Clear</button>
+    </div>
+    <div id="chat-wrap"><div id="chat"></div></div>
     <div id="composer">
       <textarea id="input" rows="1" placeholder="Message the agent… (Enter to send)"></textarea>
       <button id="send">Send</button>
-      <button id="evolve" title="Extract learnings from this session">Evolve</button>
     </div>
   </div>
 
-  <!-- Context view -->
-  <div class="view" id="view-context">
-    <div id="ctxwrap">
-      <div id="ctxfiles"></div>
-      <div id="ctxedit">
-        <textarea id="ctxarea" placeholder="Select a context file…"></textarea>
-        <div id="ctxbar">
-          <button id="ctxsave">Save</button>
-          <span id="ctxsaved"></span>
+  <!-- Agents list -->
+  <div class="page" id="page-agents">
+    <div class="page-head"><h1>Agents</h1><div class="sub">Each agent is a directory of context files, skills, and a jailed workspace.</div></div>
+    <div class="page-body">
+      <div class="toolbar"><button id="agent-new">+ New Agent</button></div>
+      <div id="agents-grid"></div>
+    </div>
+  </div>
+
+  <!-- Agent detail -->
+  <div class="page" id="page-agent-detail">
+    <div class="detail-head">
+      <button class="ghost" id="agent-back">←</button>
+      <div class="aicon">🤖</div>
+      <div><h1 id="ad-name"></h1><div class="sub" id="ad-key"></div></div>
+      <div style="flex:1"></div>
+      <button class="danger" id="agent-delete">Delete</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-atab="files">Files</button>
+      <button class="tab" data-atab="skills">Skills</button>
+      <button class="tab" data-atab="knowledge">Knowledge</button>
+    </div>
+    <div id="atab-files">
+      <div id="files-wrap">
+        <div id="files-list"></div>
+        <div id="file-edit">
+          <div class="file-empty" id="file-empty">Select a file to edit</div>
+          <textarea id="file-area" style="display:none"></textarea>
+          <div id="file-bar" style="display:none">
+            <button id="file-save">Save</button>
+            <span id="file-saved"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="atab-skills" style="display:none" class="page-body"></div>
+    <div id="atab-knowledge" style="display:none" class="page-body"></div>
+  </div>
+
+  <!-- Skills -->
+  <div class="page" id="page-skills">
+    <div class="page-head"><h1>Skills</h1><div class="sub">Skills are folders with a SKILL.md under an agent's skills/ directory, injected into its system prompt.</div></div>
+    <div class="page-body">
+      <div class="toolbar">
+        <input id="skill-search" placeholder="Search skills…" style="max-width:280px">
+        <div class="spacer"></div>
+        <button id="skills-upload">⬆ Upload</button>
+        <button class="ghost" id="skills-refresh">Refresh</button>
+      </div>
+      <table class="list"><thead><tr><th>Name</th><th>Description</th><th>Agent</th><th>Files</th></tr></thead>
+      <tbody id="skills-tbody"></tbody></table>
+      <div class="empty" id="skills-empty" style="display:none">No skills yet. Upload a ZIP or create <code>data/agents/&lt;agent&gt;/skills/&lt;name&gt;/SKILL.md</code>.</div>
+    </div>
+  </div>
+
+  <!-- Built-in tools -->
+  <div class="page" id="page-tools">
+    <div class="page-head"><h1>Built-in Tools</h1><div class="sub">System tools available to agents, gated by the global allow-list (AGENTICGO_TOOL_ALLOWLIST).</div></div>
+    <div class="page-body">
+      <table class="list"><thead><tr><th>Name</th><th>Description</th></tr></thead>
+      <tbody id="tools-tbody"></tbody></table>
+    </div>
+  </div>
+
+  <!-- MCP servers (scaffolding) -->
+  <div class="page" id="page-mcp">
+    <div class="page-head"><h1>MCP Servers</h1><div class="sub">Attach external tools over the Model Context Protocol. <span class="pill accent">Scaffolding — not connected yet (Phase 3)</span></div></div>
+    <div class="page-body">
+      <div class="toolbar"><button id="mcp-new">+ Add MCP Server</button></div>
+      <table class="list"><thead><tr><th>Name</th><th>Transport</th><th>Endpoint / Command</th><th></th></tr></thead>
+      <tbody id="mcp-tbody"></tbody></table>
+      <div class="empty" id="mcp-empty" style="display:none">No MCP servers configured yet.</div>
+    </div>
+  </div>
+
+  <!-- Cron (scaffolding) -->
+  <div class="page" id="page-cron">
+    <div class="page-head"><h1>Cron</h1><div class="sub">Schedule agents to run on a timer. <span class="pill accent">Scaffolding — jobs are stored but not executed yet</span></div></div>
+    <div class="page-body">
+      <div class="toolbar"><button id="cron-new">+ New Cron Job</button></div>
+      <table class="list"><thead><tr><th>Name</th><th>Schedule</th><th>Agent</th><th>Prompt</th><th></th></tr></thead>
+      <tbody id="cron-tbody"></tbody></table>
+      <div class="empty" id="cron-empty" style="display:none">No cron jobs yet.</div>
+    </div>
+  </div>
+
+  <!-- Memory -->
+  <div class="page" id="page-memory">
+    <div class="page-head"><h1>Memory</h1><div class="sub">Curated long-term knowledge (searchable) and time-bound observations per agent. Observations auto-expire so stale state doesn't mislead the agent.</div></div>
+    <div class="page-body">
+      <div class="toolbar">
+        <select id="mem-agent" style="max-width:220px"></select>
+        <input id="mem-search" placeholder="Search knowledge… (Enter)" style="max-width:280px">
+        <div class="spacer"></div>
+        <button class="ghost" id="mem-refresh">Refresh</button>
+      </div>
+      <div id="mem-results"></div>
+      <h3 style="margin:20px 0 8px; font-size:14px">Curated knowledge</h3>
+      <div id="mem-knowledge"></div>
+      <h3 style="margin:20px 0 8px; font-size:14px">Recent observations <span class="pill" title="Pruned by retention; only the latest is injected into prompts">time-bound</span></h3>
+      <div id="mem-observations"></div>
+    </div>
+  </div>
+
+  <!-- Knowledge Base -->
+  <div class="page" id="page-kb">
+    <div class="page-head"><h1>Knowledge Base</h1><div class="sub">Upload reference documents for an agent. Full-text indexed over content — agents recall them via the search_docs tool.</div></div>
+    <div class="page-body">
+      <div class="toolbar">
+        <select id="kb-agent" style="max-width:220px"></select>
+        <input id="kb-search" placeholder="Search documents… (Enter)" style="max-width:280px">
+        <div class="spacer"></div>
+        <button id="kb-upload">⬆ Upload Document</button>
+        <button class="ghost" id="kb-refresh">Refresh</button>
+      </div>
+      <div id="kb-results"></div>
+      <div id="kb-list"></div>
+      <div class="empty" id="kb-empty" style="display:none">No documents yet. Upload a text/markdown file or paste content.</div>
+    </div>
+  </div>
+
+  <!-- Providers -->
+  <div class="page" id="page-providers">
+    <div class="page-head"><h1>Providers</h1><div class="sub">OpenAI-compatible endpoints (Ollama, LM Studio, vLLM, OpenAI). The default provider backs chats unless one is picked.</div></div>
+    <div class="page-body">
+      <div class="toolbar"><button id="provider-new">+ New Provider</button></div>
+      <table class="list"><thead><tr><th>Name</th><th>Type</th><th>Base URL</th><th>Model</th><th></th><th></th></tr></thead>
+      <tbody id="providers-tbody"></tbody></table>
+      <div class="card pform" id="provider-form" style="display:none; margin-top:18px">
+        <h3 style="margin-top:0" id="pf-title">New provider</h3>
+        <label>Display Name</label><input id="pf-display" placeholder="Local Ollama">
+        <label>Provider Type</label><input id="pf-type" value="OpenAI Compatible" disabled>
+        <div class="row2">
+          <div><label>Name (key) *</label><input id="pf-name" placeholder="ollama-local"></div>
+          <div><label>Model *</label><input id="pf-model" placeholder="qwen2.5"></div>
+        </div>
+        <label>Base URL *</label><input id="pf-baseurl" placeholder="http://localhost:11434/v1">
+        <label>API Key</label><input id="pf-apikey" placeholder="(often unused for local servers)">
+        <div class="checkrow"><input type="checkbox" id="pf-default"><label for="pf-default" style="margin:0">Make default provider</label></div>
+        <div class="toolbar" style="margin-top:16px; margin-bottom:0">
+          <button id="pf-save">Save</button>
+          <button class="ghost" id="pf-test">Test connection</button>
+          <button class="ghost" id="pf-cancel">Cancel</button>
+          <span id="pf-status" style="font-size:12px; color:var(--muted)"></span>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Skills view -->
-  <div class="view" id="view-skills">
-    <div id="skillslist"></div>
-  </div>
 </div>
 
-<!-- New agent modal -->
-<div id="overlay">
-  <div id="modal">
-    <h2>New agent</h2>
-    <label>Key (a-z, 0-9, -, _)</label>
-    <input id="na-key" placeholder="researcher">
-    <label>Name</label>
-    <input id="na-name" placeholder="Researcher">
-    <label>Description</label>
-    <input id="na-desc" placeholder="Finds and synthesizes information">
-    <label>Soul (persona) — optional, has a default</label>
-    <textarea id="na-soul" rows="5" placeholder="# Soul&#10;You are…"></textarea>
-    <div class="row">
-      <button class="ghost" id="na-cancel">Cancel</button>
-      <button id="na-create">Create</button>
-    </div>
-  </div>
-</div>
+<!-- Generic modal -->
+<div id="overlay"><div id="modal"><div id="modal-body"></div></div></div>
+<div class="toast" id="toast"></div>
 
 <script>
 (function() {
-  // ---- state ----
-  let ws = null;
-  let agents = [];
-  let currentAgent = null;
-  let currentAssistant = null;
-  let busy = false;
-  let ctxFile = null;
-  const session = 'default';
-  const CTX_FILES = ['SOUL.md', 'AGENTS.md', 'IDENTITY.md'];
-
-  // ---- dom ----
+  // ---------- helpers ----------
   const $ = id => document.getElementById(id);
-  const chat = $('chat'), input = $('input'), sendBtn = $('send'), evolveBtn = $('evolve');
-  const dot = $('dot'), statustext = $('statustext');
+  function esc(s){ const d=document.createElement('div'); d.textContent=s==null?'':s; return d.innerHTML; }
+  function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block';
+    clearTimeout(t._tm); t._tm=setTimeout(()=>t.style.display='none', 2600); }
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (!r.ok) { let msg = r.statusText; try { msg = (await r.json()).error || msg; } catch(e){}
+      throw new Error(msg); }
+    return r.json();
+  }
+  function estTokens(s){ return Math.max(1, Math.round((s||'').length / 4)); }
 
-  function setStatus(on, text) { dot.className = 'dot ' + (on ? 'on' : 'off'); statustext.textContent = text; }
-  function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+  // ---------- modal ----------
+  function openModal(html){ $('modal-body').innerHTML = html; $('overlay').classList.add('open'); }
+  function closeModal(){ $('overlay').classList.remove('open'); }
+  $('overlay').addEventListener('click', e => { if (e.target === $('overlay')) closeModal(); });
 
-  // ---- websocket ----
+  // ---------- navigation ----------
+  let currentAgent = null;
+  const pages = ['overview','chat','agents','agent-detail','skills','tools','mcp','cron','memory','kb','providers'];
+  function show(page) {
+    pages.forEach(p => $('page-' + p).classList.toggle('active', p === page));
+    document.querySelectorAll('.nav .item').forEach(i => i.classList.toggle('active', i.dataset.page === page));
+    if (page === 'overview') loadOverview();
+    if (page === 'agents') loadAgents();
+    if (page === 'skills') loadSkills();
+    if (page === 'tools') loadTools();
+    if (page === 'mcp') loadMCP();
+    if (page === 'cron') loadCron();
+    if (page === 'memory') loadMemoryPage();
+    if (page === 'kb') loadKBPage();
+    if (page === 'providers') loadProviders();
+    if (page === 'chat') { fillChatAgents(); fillChatProviders(); }
+  }
+  document.querySelectorAll('.nav .item').forEach(i =>
+    i.addEventListener('click', () => show(i.dataset.page)));
+
+  // ---------- websocket chat ----------
+  let ws = null, currentAssistant = null, busy = false;
+  function setStatus(on, text){ $('dot').className = 'dot ' + (on?'on':'off'); $('statustext').textContent = text; }
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(proto + '://' + location.host + '/ws');
@@ -189,11 +404,11 @@
       if (ev.kind === 'text') {
         if (!currentAssistant) currentAssistant = addMsg('assistant', '');
         currentAssistant.textContent += ev.text;
-        chat.scrollTop = chat.scrollHeight;
+        $('chat').scrollTop = $('chat').scrollHeight;
       } else if (ev.kind === 'tool_call') {
         addMsg('tool', '⚙ ' + ev.tool_name + '(' + (ev.tool_args || '') + ')');
       } else if (ev.kind === 'tool_result') {
-        addMsg('tool', '→ ' + (ev.tool_result || '').slice(0, 600));
+        addMsg('tool', '→ ' + (ev.tool_result || '').slice(0, 800));
       } else if (ev.kind === 'done') {
         currentAssistant = null; setBusy(false);
       } else if (ev.kind === 'error') {
@@ -202,139 +417,534 @@
       }
     };
   }
-
-  function addMsg(cls, text) {
-    const el = document.createElement('div');
-    el.className = 'msg ' + cls; el.textContent = text;
-    chat.appendChild(el); chat.scrollTop = chat.scrollHeight; return el;
+  function addMsg(cls, text){
+    const el = document.createElement('div'); el.className = 'msg ' + cls; el.textContent = text;
+    $('chat').appendChild(el); $('chat').scrollTop = $('chat').scrollHeight; return el;
   }
-  function setBusy(b){ busy=b; sendBtn.disabled=b; input.disabled=b; if(!b) input.focus(); }
-
-  function send() {
-    const text = input.value.trim();
-    if (!text || !currentAgent || !ws || ws.readyState !== WebSocket.OPEN || busy) return;
-    addMsg('user', text); input.value = ''; setBusy(true); currentAssistant = null;
-    ws.send(JSON.stringify({ agent: currentAgent, session, message: text }));
+  function setBusy(b){ busy=b; $('send').disabled=b; $('input').disabled=b; if(!b) $('input').focus(); }
+  function send(){
+    const text = $('input').value.trim();
+    const agent = $('chat-agent').value;
+    if (!text || !agent || !ws || ws.readyState !== WebSocket.OPEN || busy) return;
+    addMsg('user', text); $('input').value=''; setBusy(true); currentAssistant = null;
+    ws.send(JSON.stringify({ agent, session: $('chat-session').value || 'default',
+      message: text, provider: $('chat-provider').value }));
   }
-  sendBtn.addEventListener('click', send);
-  input.addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
-
-  evolveBtn.addEventListener('click', () => {
-    if (!currentAgent) return;
-    fetch('/api/evolve', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ agent: currentAgent, session }) })
-      .then(r => addMsg('system', r.ok ? '✓ Evolution complete — learnings saved.' : '⚠ Evolution failed.'))
-      .catch(() => addMsg('system', '⚠ Evolution request failed.'));
+  $('send').addEventListener('click', send);
+  $('input').addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+  $('chat-clear').addEventListener('click', () => { $('chat').innerHTML=''; currentAssistant=null; });
+  $('chat-evolve').addEventListener('click', () => {
+    const agent = $('chat-agent').value; if (!agent) return;
+    api('/api/evolve', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ agent, session: $('chat-session').value || 'default' }) })
+      .then(() => addMsg('system', '✓ Evolution complete — learnings saved.'))
+      .catch(e => addMsg('system', '⚠ Evolution failed: ' + e.message));
+  });
+  $('chat-load').addEventListener('click', () => {
+    const agent = $('chat-agent').value, session = $('chat-session').value || 'default';
+    if (!agent) return;
+    $('chat').innerHTML='';
+    api('/api/sessions/' + encodeURIComponent(agent) + '/' + encodeURIComponent(session) + '/messages')
+      .then(msgs => { (msgs||[]).forEach(m => addMsg(m.role === 'user' ? 'user' : m.role === 'assistant' ? 'assistant' : 'system', m.content)); })
+      .catch(e => toast('Load failed: ' + e.message));
   });
 
-  // ---- tabs ----
-  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    $('view-' + t.dataset.view).classList.add('active');
-    if (t.dataset.view === 'context') loadCtxFiles();
-    if (t.dataset.view === 'skills') loadSkills();
-  }));
+  function fillChatAgents(){
+    api('/api/agents').then(list => {
+      const sel = $('chat-agent'); const prev = sel.value || currentAgent;
+      sel.innerHTML = '';
+      (list||[]).forEach(a => {
+        const o = document.createElement('option'); o.value = a.key; o.textContent = a.name + ' (' + a.key + ')';
+        sel.appendChild(o);
+      });
+      if (prev) sel.value = prev;
+    }).catch(()=>{});
+  }
+  function fillChatProviders(){
+    api('/api/providers').then(list => {
+      const sel = $('chat-provider'); const prev = sel.value;
+      sel.innerHTML = '<option value="">Default provider</option>';
+      (list||[]).forEach(p => {
+        const o = document.createElement('option'); o.value = p.name;
+        o.textContent = (p.display_name || p.name) + (p.default ? ' ★' : '');
+        sel.appendChild(o);
+      });
+      sel.value = prev;
+    }).catch(()=>{});
+  }
 
-  // ---- agents ----
-  function loadAgents() {
-    fetch('/api/agents').then(r => r.json()).then(list => {
-      agents = list || [];
-      if (!currentAgent && agents.length) currentAgent = agents[0].key;
-      if (currentAgent && !agents.find(a => a.key === currentAgent)) {
-        currentAgent = agents.length ? agents[0].key : null;
+  // ---------- overview ----------
+  function loadOverview(){
+    const el = $('overview-body');
+    Promise.all([
+      api('/api/agents').catch(()=>[]), api('/api/providers').catch(()=>[]),
+      api('/api/tools').catch(()=>[]), api('/api/sessions').catch(()=>[]),
+    ]).then(([agents, providers, tools, sessions]) => {
+      const def = (providers||[]).find(p => p.default);
+      el.innerHTML =
+        '<div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:14px">' +
+        stat('Agents', (agents||[]).length) + stat('Providers', (providers||[]).length) +
+        stat('Built-in tools', (tools||[]).length) + stat('Sessions', (sessions||[]).length) +
+        '</div>' +
+        '<div class="card" style="margin-top:16px"><b>Default provider:</b> ' +
+          (def ? esc(def.display_name || def.name) + ' — <code>' + esc(def.base_url) + '</code> model <code>' + esc(def.model) + '</code>'
+               : '<span style="color:var(--muted)">none configured</span>') + '</div>' +
+        '<div class="card" style="margin-top:14px"><b>Chat history sessions</b>' +
+          ((sessions||[]).length ? '<table class="list" style="margin-top:10px"><thead><tr><th>Agent</th><th>Session</th><th>Messages</th><th>Updated</th></tr></thead><tbody>' +
+            sessions.map(s => '<tr><td>'+esc(s.agent)+'</td><td>'+esc(s.session)+'</td><td>'+s.messages+'</td><td>'+new Date(s.updated_at*1000).toLocaleString()+'</td></tr>').join('') +
+            '</tbody></table>' : '<div class="empty">No conversations yet.</div>') + '</div>';
+    });
+    function stat(label, n){ return '<div class="card"><div style="font-size:26px; font-weight:650">'+n+'</div><div style="color:var(--muted); font-size:12.5px">'+label+'</div></div>'; }
+  }
+
+  // ---------- agents ----------
+  function loadAgents(){
+    api('/api/agents').then(list => {
+      const grid = $('agents-grid'); grid.innerHTML = '';
+      if (!list || !list.length) { grid.innerHTML = '<div class="empty">No agents. Create one.</div>'; return; }
+      list.forEach(a => {
+        const d = document.createElement('div'); d.className = 'card agent-card';
+        d.innerHTML = '<div class="aicon">🤖</div><h3>' + esc(a.name) + '</h3>' +
+          '<div class="adesc">' + esc(a.description || '') + '</div>' +
+          '<div class="akey">' + esc(a.key) + '</div>';
+        d.addEventListener('click', () => openAgent(a.key));
+        grid.appendChild(d);
+      });
+    }).catch(e => toast('Load agents failed: ' + e.message));
+  }
+
+  $('agent-new').addEventListener('click', () => {
+    openModal('<h2>New agent</h2>' +
+      '<label>Key (a-z, 0-9, -, _)</label><input id="na-key" placeholder="researcher">' +
+      '<label>Name</label><input id="na-name" placeholder="Researcher">' +
+      '<label>Description</label><input id="na-desc" placeholder="Finds and synthesizes information">' +
+      '<div class="row"><button class="ghost" onclick="document.getElementById(\'overlay\').classList.remove(\'open\')">Cancel</button>' +
+      '<button id="na-create">Create</button></div>');
+    $('na-create').addEventListener('click', () => {
+      const body = { key: $('na-key').value.trim(), name: $('na-name').value.trim(), description: $('na-desc').value.trim() };
+      if (!body.key) { toast('Key is required'); return; }
+      api('/api/agents', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+        .then(a => { closeModal(); openAgent(a.key); })
+        .catch(e => toast('Create failed: ' + e.message));
+    });
+  });
+
+  // ---------- agent detail ----------
+  let detailAgent = null, detailFile = null, agentDetail = null;
+  function openAgent(key){
+    api('/api/agents/' + encodeURIComponent(key)).then(a => {
+      agentDetail = a; detailAgent = key; detailFile = null;
+      $('ad-name').textContent = a.name; $('ad-key').textContent = a.key + (a.description ? ' · ' + a.description : '');
+      renderFilesList(); setAgentTab('files');
+      show('agent-detail');
+    }).catch(e => toast('Load agent failed: ' + e.message));
+  }
+  $('agent-back').addEventListener('click', () => show('agents'));
+  $('agent-delete').addEventListener('click', () => {
+    if (!detailAgent || !confirm('Delete agent "' + detailAgent + '" and all its files?')) return;
+    api('/api/agents/' + encodeURIComponent(detailAgent), { method:'DELETE' })
+      .then(() => { if (currentAgent === detailAgent) currentAgent = null; detailAgent = null; show('agents'); })
+      .catch(e => toast('Delete failed: ' + e.message));
+  });
+
+  document.querySelectorAll('[data-atab]').forEach(t => t.addEventListener('click', () => setAgentTab(t.dataset.atab)));
+  function setAgentTab(tab){
+    document.querySelectorAll('[data-atab]').forEach(x => x.classList.toggle('active', x.dataset.atab === tab));
+    $('atab-files').style.display = tab === 'files' ? '' : 'none';
+    $('atab-skills').style.display = tab === 'skills' ? '' : 'none';
+    $('atab-knowledge').style.display = tab === 'knowledge' ? '' : 'none';
+    if (tab === 'skills') renderAgentSkills();
+    if (tab === 'knowledge') renderAgentKnowledge();
+  }
+
+  function renderFilesList(){
+    const el = $('files-list'); el.innerHTML = '';
+    (agentDetail.files || []).forEach(f => {
+      const d = document.createElement('div');
+      d.className = 'file-item' + (f.name === detailFile ? ' active' : '');
+      d.innerHTML = esc(f.name) + '<span class="est">' + (f.exists ? 'est ' + estTokens(f.content) + ' tokens' : 'empty') + '</span>';
+      d.addEventListener('click', () => { detailFile = f.name; renderFilesList(); loadFileContent(); });
+      el.appendChild(d);
+    });
+    if (!detailFile && agentDetail.files && agentDetail.files.length) {
+      detailFile = agentDetail.files[0].name; renderFilesList(); return;
+    }
+    loadFileContent();
+  }
+  function loadFileContent(){
+    if (!detailAgent || !detailFile) return;
+    $('file-empty').style.display = 'none'; $('file-area').style.display = ''; $('file-bar').style.display = '';
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/files/' + detailFile)
+      .then(d => { $('file-area').value = d.content || ''; $('file-saved').textContent = ''; })
+      .catch(() => { $('file-area').value = ''; });
+  }
+  $('file-save').addEventListener('click', () => {
+    if (!detailAgent || !detailFile) return;
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/files/' + detailFile, {
+      method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ content: $('file-area').value })
+    }).then(() => {
+      $('file-saved').textContent = 'Saved ✓'; setTimeout(() => $('file-saved').textContent = '', 2000);
+      api('/api/agents/' + encodeURIComponent(detailAgent)).then(a => { agentDetail = a; renderFilesList(); });
+    }).catch(e => toast('Save failed: ' + e.message));
+  });
+
+  function renderAgentSkills(){
+    const el = $('atab-skills');
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/skills').then(list => {
+      el.innerHTML = '';
+      if (!list || !list.length) {
+        el.innerHTML = '<div class="empty">No skills yet. Add <code>data/agents/' + esc(detailAgent) + '/skills/&lt;name&gt;/SKILL.md</code>.</div>';
+        return;
       }
-      renderAgents();
-    }).catch(() => {});
+      list.forEach(sk => {
+        const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
+        d.innerHTML = '<h3 style="margin:0 0 4px; font-size:14px">' + esc(sk.name) + ' <span class="pill">' + esc(sk.key) + '</span></h3>' +
+          (sk.description ? '<div style="color:var(--muted); font-size:12.5px; margin-bottom:8px">' + esc(sk.description) + '</div>' : '') +
+          (sk.body ? '<pre style="background:var(--bg2); padding:10px; border-radius:8px; font-size:12px; white-space:pre-wrap">' + esc(sk.body) + '</pre>' : '');
+        el.appendChild(d);
+      });
+    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load skills.</div>'; });
   }
 
-  function renderAgents() {
-    const el = $('agents'); el.innerHTML = '';
-    if (!agents.length) { el.innerHTML = '<div class="empty">No agents. Create one.</div>'; return; }
-    agents.forEach(a => {
-      const d = document.createElement('div');
-      d.className = 'agent-item' + (a.key === currentAgent ? ' active' : '');
-      d.innerHTML = '<div class="name">' + esc(a.name) + '</div>' +
-                    '<div class="desc">' + esc(a.description || a.key) + '</div>';
-      d.addEventListener('click', () => { currentAgent = a.key; renderAgents(); clearChat(); loadCtxFiles(); });
-      el.appendChild(d);
-    });
+  function renderAgentKnowledge(){
+    const el = $('atab-knowledge');
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/knowledge').then(list => {
+      if (!list || !list.length) { el.innerHTML = '<div class="empty">No accumulated knowledge yet. Use Evolve after a chat session.</div>'; return; }
+      el.innerHTML = '<div class="card"><ul style="margin:0; padding-left:18px">' +
+        list.map(k => '<li style="margin:6px 0; font-size:13px">' + esc(k) + '</li>').join('') + '</ul></div>';
+    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load knowledge.</div>'; });
   }
 
-  function clearChat(){ chat.innerHTML=''; currentAssistant=null; }
+  // ---------- skills page ----------
+  function loadSkills(){
+    api('/api/skills').then(list => {
+      const tbody = $('skills-tbody'); tbody.innerHTML = '';
+      $('skills-empty').style.display = (list && list.length) ? 'none' : '';
+      (list||[]).forEach(sk => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="namecell">⚡ ' + esc(sk.key) + '</td><td>' + esc(sk.description || sk.name) + '</td>' +
+          '<td><span class="pill">' + esc(sk.agent) + '</span></td><td>' + (sk.files||[]).length + '</td>';
+        tbody.appendChild(tr);
+      });
+      $('skill-search').oninput = () => {
+        const q = $('skill-search').value.toLowerCase();
+        tbody.querySelectorAll('tr').forEach(tr => tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none');
+      };
+    }).catch(e => toast('Load skills failed: ' + e.message));
+  }
+  $('skills-refresh').addEventListener('click', loadSkills);
 
-  // ---- new agent modal ----
-  const overlay = $('overlay');
-  $('newagent').addEventListener('click', () => overlay.classList.add('open'));
-  $('na-cancel').addEventListener('click', () => overlay.classList.remove('open'));
-  $('na-create').addEventListener('click', () => {
-    const body = { key: $('na-key').value.trim(), name: $('na-name').value.trim(),
-                   description: $('na-desc').value.trim(), soul: $('na-soul').value };
-    if (!body.key) { alert('Key is required'); return; }
-    fetch('/api/agents', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
-      .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
-      .then(a => { overlay.classList.remove('open'); $('na-key').value=''; $('na-name').value='';
-                   $('na-desc').value=''; $('na-soul').value=''; currentAgent = a.key; loadAgents(); })
-      .catch(e => alert('Create failed: ' + e.message));
+  // ---------- skill upload (ZIP) ----------
+  $('skills-upload').addEventListener('click', () => {
+    api('/api/agents').then(list => {
+      const opts = (list||[]).map(a => '<option value="'+esc(a.key)+'">'+esc(a.name)+' ('+esc(a.key)+')</option>').join('');
+      openModal('<h2>Upload Skill</h2>' +
+        '<div style="color:var(--muted); font-size:12.5px; margin:4px 0 10px">ZIP containing a SKILL.md with front-matter (name, description). Max 25 MB.</div>' +
+        '<label>Install into agent</label><select id="su-agent">'+opts+'</select>' +
+        '<label>ZIP file</label>' +
+        '<div id="su-drop" style="border:2px dashed var(--border); border-radius:10px; padding:34px; text-align:center; color:var(--muted); cursor:pointer">Click or drag &amp; drop a .zip file</div>' +
+        '<input type="file" id="su-file" accept=".zip" style="display:none">' +
+        '<div class="row"><button class="ghost" id="su-cancel">Cancel</button><button id="su-go">Upload</button></div>');
+      const drop = $('su-drop'), fileIn = $('su-file'); let picked = null;
+      drop.addEventListener('click', () => fileIn.click());
+      drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
+      drop.addEventListener('dragleave', () => drop.style.borderColor = 'var(--border)');
+      drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor='var(--border)';
+        if (e.dataTransfer.files.length) { picked = e.dataTransfer.files[0]; drop.textContent = picked.name; } });
+      fileIn.addEventListener('change', () => { if (fileIn.files.length) { picked = fileIn.files[0]; drop.textContent = picked.name; } });
+      $('su-cancel').addEventListener('click', closeModal);
+      $('su-go').addEventListener('click', () => {
+        if (!picked) { toast('Pick a .zip file first'); return; }
+        const fd = new FormData(); fd.append('file', picked);
+        toast('Uploading…');
+        fetch('/api/agents/' + encodeURIComponent($('su-agent').value) + '/skills/upload', { method:'POST', body: fd })
+          .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+          .then(sk => { closeModal(); toast('✓ Installed skill "' + (sk.name||sk.key) + '"'); loadSkills(); })
+          .catch(e => toast('Upload failed: ' + e.message));
+      });
+    }).catch(e => toast('Load agents failed: ' + e.message));
   });
 
-  // ---- context files ----
-  function loadCtxFiles() {
-    const el = $('ctxfiles'); el.innerHTML = '';
-    if (!currentAgent) { el.innerHTML = '<div class="empty">No agent selected</div>'; return; }
-    CTX_FILES.forEach(name => {
-      const d = document.createElement('div');
-      d.className = 'ctxfile' + (name === ctxFile ? ' active' : '');
-      d.textContent = name;
-      d.addEventListener('click', () => { ctxFile = name; loadCtxFiles(); loadCtxContent(); });
-      el.appendChild(d);
+  // ---------- tools page ----------
+  function loadTools(){
+    api('/api/tools').then(list => {
+      const tbody = $('tools-tbody'); tbody.innerHTML = '';
+      (list||[]).forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="namecell">' + esc(t.name) + '</td><td>' + esc(t.description) + '</td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(e => toast('Load tools failed: ' + e.message));
+  }
+
+  // ---------- MCP servers (scaffolding) ----------
+  function loadMCP(){
+    api('/api/mcp-servers').then(list => {
+      const tbody = $('mcp-tbody'); tbody.innerHTML = '';
+      $('mcp-empty').style.display = (list && list.length) ? 'none' : '';
+      (list||[]).forEach(srv => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="namecell">' + esc(srv.name) + '</td><td><span class="pill">' + esc(srv.transport) + '</span></td>' +
+          '<td>' + esc(srv.transport === 'stdio' ? (srv.command + ' ' + (srv.args||[]).join(' ')) : srv.url) + '</td>' +
+          '<td><button class="danger" data-id="' + esc(srv.id) + '">Delete</button></td>';
+        tr.querySelector('button').addEventListener('click', () =>
+          api('/api/mcp-servers/' + srv.id, { method:'DELETE' }).then(loadMCP).catch(e => toast(e.message)));
+        tbody.appendChild(tr);
+      });
+    }).catch(e => toast('Load failed: ' + e.message));
+  }
+  $('mcp-new').addEventListener('click', () => {
+    openModal('<h2>Add MCP server</h2>' +
+      '<label>Name</label><input id="mcp-name" placeholder="filesystem">' +
+      '<label>Transport</label><select id="mcp-transport"><option value="stdio">stdio</option><option value="http">http</option></select>' +
+      '<div id="mcp-stdio-fields"><label>Command</label><input id="mcp-command" placeholder="npx -y @modelcontextprotocol/server-filesystem">' +
+      '<label>Args (comma separated)</label><input id="mcp-args" placeholder="/path/to/dir"></div>' +
+      '<div id="mcp-http-fields" style="display:none"><label>URL</label><input id="mcp-url" placeholder="http://localhost:3001/mcp"></div>' +
+      '<div class="row"><button class="ghost" id="mcp-cancel">Cancel</button><button id="mcp-save">Add</button></div>');
+    $('mcp-transport').addEventListener('change', () => {
+      $('mcp-stdio-fields').style.display = $('mcp-transport').value === 'stdio' ? '' : 'none';
+      $('mcp-http-fields').style.display = $('mcp-transport').value === 'http' ? '' : 'none';
     });
-    if (!ctxFile) { ctxFile = CTX_FILES[0]; loadCtxFiles(); return; }
-    loadCtxContent();
-  }
-
-  function loadCtxContent() {
-    if (!currentAgent || !ctxFile) return;
-    fetch('/api/agents/' + encodeURIComponent(currentAgent) + '/files/' + ctxFile)
-      .then(r => r.json()).then(d => { $('ctxarea').value = d.content || ''; $('ctxsaved').textContent=''; })
-      .catch(() => { $('ctxarea').value=''; });
-  }
-
-  $('ctxsave').addEventListener('click', () => {
-    if (!currentAgent || !ctxFile) return;
-    fetch('/api/agents/' + encodeURIComponent(currentAgent) + '/files/' + ctxFile, {
-      method:'PUT', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ content: $('ctxarea').value })
-    }).then(r => { $('ctxsaved').textContent = r.ok ? 'Saved ✓' : 'Save failed';
-                   setTimeout(()=> $('ctxsaved').textContent='', 2000); });
+    $('mcp-cancel').addEventListener('click', closeModal);
+    $('mcp-save').addEventListener('click', () => {
+      const body = { name: $('mcp-name').value.trim(), transport: $('mcp-transport').value,
+        command: $('mcp-command').value.trim(), url: $('mcp-url').value.trim(),
+        args: $('mcp-args').value.split(',').map(s => s.trim()).filter(Boolean) };
+      api('/api/mcp-servers', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+        .then(() => { closeModal(); loadMCP(); })
+        .catch(e => toast('Add failed: ' + e.message));
+    });
   });
 
-  // ---- skills ----
-  function loadSkills() {
-    const el = $('skillslist');
-    if (!currentAgent) { el.innerHTML = '<div class="empty">No agent selected</div>'; return; }
-    fetch('/api/agents/' + encodeURIComponent(currentAgent) + '/skills')
-      .then(r => r.json()).then(list => {
-        el.innerHTML = '';
-        if (!list || !list.length) {
-          el.innerHTML = '<div class="empty">No skills yet. Add a folder under ' +
-            '<code>data/agents/' + esc(currentAgent) + '/skills/&lt;name&gt;/SKILL.md</code>.</div>';
-          return;
-        }
-        list.forEach(sk => {
-          const d = document.createElement('div'); d.className = 'skill';
-          d.innerHTML = '<h3>' + esc(sk.name) + '</h3>' +
-            (sk.description ? '<div class="sdesc">' + esc(sk.description) + '</div>' : '') +
-            (sk.body ? '<pre>' + esc(sk.body) + '</pre>' : '');
-          el.appendChild(d);
+  // ---------- cron (scaffolding) ----------
+  function loadCron(){
+    api('/api/cron').then(list => {
+      const tbody = $('cron-tbody'); tbody.innerHTML = '';
+      $('cron-empty').style.display = (list && list.length) ? 'none' : '';
+      (list||[]).forEach(j => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="namecell">' + esc(j.name) + '</td><td><code>' + esc(j.schedule) + '</code></td>' +
+          '<td>' + esc(j.agent) + '</td><td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">' + esc(j.prompt) + '</td>' +
+          '<td><button class="danger">Delete</button></td>';
+        tr.querySelector('button').addEventListener('click', () =>
+          api('/api/cron/' + j.id, { method:'DELETE' }).then(loadCron).catch(e => toast(e.message)));
+        tbody.appendChild(tr);
+      });
+    }).catch(e => toast('Load failed: ' + e.message));
+  }
+  $('cron-new').addEventListener('click', () => {
+    openModal('<h2>New cron job</h2>' +
+      '<label>Name</label><input id="cj-name" placeholder="nightly-summary">' +
+      '<label>Schedule (cron expression)</label><input id="cj-schedule" placeholder="0 3 * * *">' +
+      '<label>Agent key</label><input id="cj-agent" placeholder="default">' +
+      '<label>Prompt</label><textarea id="cj-prompt" rows="3" placeholder="Summarize the workspace and save a report."></textarea>' +
+      '<div class="checkrow"><input type="checkbox" id="cj-enabled" checked><label for="cj-enabled" style="margin:0">Enabled</label></div>' +
+      '<div class="row"><button class="ghost" id="cj-cancel">Cancel</button><button id="cj-save">Create</button></div>');
+    $('cj-cancel').addEventListener('click', closeModal);
+    $('cj-save').addEventListener('click', () => {
+      const body = { name: $('cj-name').value.trim(), schedule: $('cj-schedule').value.trim(),
+        agent: $('cj-agent').value.trim() || 'default', prompt: $('cj-prompt').value, enabled: $('cj-enabled').checked };
+      api('/api/cron', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+        .then(() => { closeModal(); loadCron(); })
+        .catch(e => toast('Create failed: ' + e.message));
+    });
+  });
+
+  // ---------- memory page ----------
+  function loadMemoryPage(){
+    api('/api/agents').then(list => {
+      const sel = $('mem-agent'); const prev = sel.value || currentAgent;
+      sel.innerHTML = '';
+      (list||[]).forEach(a => { const o=document.createElement('option'); o.value=a.key; o.textContent=a.name+' ('+a.key+')'; sel.appendChild(o); });
+      if (prev) sel.value = prev;
+      if (sel.value) loadMemory();
+    }).catch(()=>{});
+  }
+  $('mem-agent').addEventListener('change', loadMemory);
+  $('mem-refresh').addEventListener('click', loadMemory);
+  $('mem-search').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const agent = $('mem-agent').value, q = $('mem-search').value.trim();
+    if (!agent || !q) return;
+    api('/api/agents/' + encodeURIComponent(agent) + '/knowledge/search?q=' + encodeURIComponent(q))
+      .then(hits => {
+        $('mem-results').innerHTML = '<div class="card"><b>Search results for "' + esc(q) + '":</b>' +
+          ((hits && hits.length) ? '<ul style="margin:8px 0 0; padding-left:18px">' + hits.map(h => '<li style="margin:4px 0; font-size:13px">' + esc(h) + '</li>').join('') + '</ul>'
+                                  : '<div style="color:var(--muted); margin-top:6px">No matches.</div>') + '</div>';
+      }).catch(e => toast('Search failed: ' + e.message));
+  });
+  function loadMemory(){
+    const agent = $('mem-agent').value; if (!agent) return;
+    $('mem-results').innerHTML = '';
+    api('/api/agents/' + encodeURIComponent(agent) + '/knowledge').then(list => {
+      $('mem-knowledge').innerHTML = (list && list.length)
+        ? '<div class="card"><ul style="margin:0; padding-left:18px">' + list.map(k => '<li style="margin:5px 0; font-size:13px">' + esc(k) + '</li>').join('') + '</ul></div>'
+        : '<div class="empty">No curated knowledge yet. Use Evolve after a chat, or the agent can store learnings.</div>';
+    }).catch(()=>{});
+    api('/api/agents/' + encodeURIComponent(agent) + '/observations').then(list => {
+      $('mem-observations').innerHTML = (list && list.length)
+        ? '<table class="list"><thead><tr><th style="width:150px">When</th><th>Observation</th></tr></thead><tbody>' +
+          list.map(o => '<tr><td style="color:var(--muted); font-size:12px">' + new Date(o.created_at*1000).toLocaleString() + '</td><td style="font-size:13px">' + esc(o.content) + '</td></tr>').join('') +
+          '</tbody></table>'
+        : '<div class="empty">No observations recorded yet. A recurring agent records these via record_observation.</div>';
+    }).catch(()=>{});
+  }
+
+  // ---------- knowledge base page ----------
+  function loadKBPage(){
+    api('/api/agents').then(list => {
+      const sel = $('kb-agent'); const prev = sel.value || currentAgent;
+      sel.innerHTML = '';
+      (list||[]).forEach(a => { const o=document.createElement('option'); o.value=a.key; o.textContent=a.name+' ('+a.key+')'; sel.appendChild(o); });
+      if (prev) sel.value = prev;
+      if (sel.value) loadKB();
+    }).catch(()=>{});
+  }
+  $('kb-agent').addEventListener('change', loadKB);
+  $('kb-refresh').addEventListener('click', loadKB);
+  function loadKB(){
+    const agent = $('kb-agent').value; if (!agent) return;
+    $('kb-results').innerHTML = '';
+    api('/api/agents/' + encodeURIComponent(agent) + '/docs').then(list => {
+      const el = $('kb-list');
+      $('kb-empty').style.display = (list && list.length) ? 'none' : '';
+      el.innerHTML = '';
+      (list||[]).forEach(d => {
+        const card = document.createElement('div'); card.className='card'; card.style.marginBottom='10px';
+        card.innerHTML = '<div style="display:flex; align-items:center; gap:10px">' +
+          '<span style="font-size:16px">📄</span>' +
+          '<div style="flex:1"><b>' + esc(d.title) + '</b>' +
+          '<div style="color:var(--muted); font-size:11.5px">' + new Date(d.created_at*1000).toLocaleString() + '</div></div>' +
+          '<button class="ghost" data-act="view">View</button>' +
+          '<button class="danger" data-act="del">Delete</button></div>' +
+          '<div data-act="body" style="display:none; margin-top:10px"><pre style="background:var(--bg2); padding:10px; border-radius:8px; font-size:12px; white-space:pre-wrap; max-height:300px; overflow:auto"></pre></div>';
+        card.querySelector('[data-act=view]').addEventListener('click', () => {
+          const body = card.querySelector('[data-act=body]');
+          if (body.style.display === 'none') {
+            api('/api/agents/' + encodeURIComponent(agent) + '/docs/' + d.id).then(full => {
+              body.querySelector('pre').textContent = full.content || ''; body.style.display='';
+            });
+          } else { body.style.display = 'none'; }
         });
-      }).catch(() => { el.innerHTML = '<div class="empty">Failed to load skills.</div>'; });
+        card.querySelector('[data-act=del]').addEventListener('click', () => {
+          if (!confirm('Delete document "' + d.title + '"?')) return;
+          api('/api/agents/' + encodeURIComponent(agent) + '/docs/' + d.id, { method:'DELETE' }).then(loadKB).catch(e => toast(e.message));
+        });
+        el.appendChild(card);
+      });
+    }).catch(e => toast('Load docs failed: ' + e.message));
   }
+  $('kb-search').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const agent = $('kb-agent').value, q = $('kb-search').value.trim();
+    if (!agent || !q) return;
+    api('/api/agents/' + encodeURIComponent(agent) + '/docs/search/query?q=' + encodeURIComponent(q))
+      .then(hits => {
+        $('kb-results').innerHTML = '<div class="card"><b>Matches for "' + esc(q) + '":</b>' +
+          ((hits && hits.length) ? '<ul style="margin:8px 0 0; padding-left:18px">' + hits.map(h => '<li style="margin:4px 0; font-size:13px">' + esc(h.title) + '</li>').join('') + '</ul>'
+                                  : '<div style="color:var(--muted); margin-top:6px">No matches.</div>') + '</div>';
+      }).catch(e => toast('Search failed: ' + e.message));
+  });
+  $('kb-upload').addEventListener('click', () => {
+    openModal('<h2>Upload Document</h2>' +
+      '<div style="color:var(--muted); font-size:12.5px; margin:4px 0 10px">Add a reference document to the knowledge base (text / markdown). It is full-text indexed so the agent can search it.</div>' +
+      '<label>File (optional — or paste below)</label>' +
+      '<div id="kb-drop" style="border:2px dashed var(--border); border-radius:10px; padding:26px; text-align:center; color:var(--muted); cursor:pointer">Click or drag &amp; drop a .md / .txt file</div>' +
+      '<input type="file" id="kb-file" accept=".md,.txt,.markdown,text/*" style="display:none">' +
+      '<div style="text-align:center; color:var(--muted); font-size:12px; margin:12px 0">— or —</div>' +
+      '<label>Title</label><input id="kb-title" placeholder="Runbook: payments-api">' +
+      '<label>Content</label><textarea id="kb-content" rows="6" placeholder="Paste reference text…"></textarea>' +
+      '<div class="row"><button class="ghost" id="kb-cancel">Cancel</button><button id="kb-save">Save</button></div>');
+    const drop = $('kb-drop'), fileIn = $('kb-file');
+    const agent = $('kb-agent').value;
+    function sendFile(f){
+      const fd = new FormData(); fd.append('file', f);
+      toast('Uploading…');
+      fetch('/api/agents/' + encodeURIComponent(agent) + '/docs', { method:'POST', body: fd })
+        .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+        .then(() => { closeModal(); toast('✓ Document added'); loadKB(); })
+        .catch(e => toast('Upload failed: ' + e.message));
+    }
+    drop.addEventListener('click', () => fileIn.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor='var(--accent)'; });
+    drop.addEventListener('dragleave', () => drop.style.borderColor='var(--border)');
+    drop.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files.length) sendFile(e.dataTransfer.files[0]); });
+    fileIn.addEventListener('change', () => { if (fileIn.files.length) sendFile(fileIn.files[0]); });
+    $('kb-cancel').addEventListener('click', closeModal);
+    $('kb-save').addEventListener('click', () => {
+      const title = $('kb-title').value.trim(), content = $('kb-content').value;
+      if (!title || !content.trim()) { toast('Title and content are required'); return; }
+      api('/api/agents/' + encodeURIComponent(agent) + '/docs', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ title, content }) })
+        .then(() => { closeModal(); toast('✓ Document added'); loadKB(); })
+        .catch(e => toast('Save failed: ' + e.message));
+    });
+  });
 
-  // ---- init ----
+  // ---------- providers ----------
+  let editingProvider = null;
+  function loadProviders(){
+    api('/api/providers').then(list => {
+      const tbody = $('providers-tbody'); tbody.innerHTML = '';
+      (list||[]).forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="namecell">' + esc(p.display_name || p.name) + (p.default ? ' <span class="pill accent">default</span>' : '') + '</td>' +
+          '<td><span class="pill ok">' + esc(p.type) + '</span></td>' +
+          '<td><code>' + esc(p.base_url) + '</code></td><td><code>' + esc(p.model) + '</code></td>' +
+          '<td><button class="ghost" data-act="test">Test</button> <button class="ghost" data-act="edit">Edit</button></td>' +
+          '<td><button class="danger" data-act="del">Delete</button></td>';
+        tr.querySelector('[data-act=test]').addEventListener('click', () => {
+          toast('Testing ' + p.name + '…');
+          api('/api/providers/' + encodeURIComponent(p.name) + '/test', { method:'POST' })
+            .then(r => toast('✓ ' + p.name + ' OK — ' + (r.models||[]).length + ' models'))
+            .catch(e => toast('✗ ' + p.name + ': ' + e.message));
+        });
+        tr.querySelector('[data-act=edit]').addEventListener('click', () => editProvider(p));
+        tr.querySelector('[data-act=del]').addEventListener('click', () => {
+          if (!confirm('Delete provider "' + p.name + '"?')) return;
+          api('/api/providers/' + encodeURIComponent(p.name), { method:'DELETE' }).then(loadProviders).catch(e => toast(e.message));
+        });
+        tbody.appendChild(tr);
+      });
+    }).catch(e => toast('Load providers failed: ' + e.message));
+  }
+  function editProvider(p){
+    editingProvider = p;
+    $('pf-title').textContent = 'Edit provider';
+    $('pf-display').value = p.display_name || ''; $('pf-name').value = p.name; $('pf-name').disabled = true;
+    $('pf-model').value = p.model; $('pf-baseurl').value = p.base_url; $('pf-apikey').value = p.api_key || '';
+    $('pf-default').checked = !!p.default; $('pf-status').textContent = '';
+    $('provider-form').style.display = '';
+  }
+  $('provider-new').addEventListener('click', () => {
+    editingProvider = null;
+    $('pf-title').textContent = 'New provider';
+    ['pf-display','pf-name','pf-model','pf-baseurl','pf-apikey'].forEach(id => { $(id).value=''; $(id).disabled=false; });
+    $('pf-default').checked = false; $('pf-status').textContent = '';
+    $('provider-form').style.display = '';
+  });
+  $('pf-cancel').addEventListener('click', () => { $('provider-form').style.display = 'none'; });
+  $('pf-save').addEventListener('click', () => {
+    const body = { name: $('pf-name').value.trim(), display_name: $('pf-display').value.trim(),
+      type: 'openai-compatible', base_url: $('pf-baseurl').value.trim(), api_key: $('pf-apikey').value,
+      model: $('pf-model').value.trim(), default: $('pf-default').checked };
+    if (!body.name || !body.base_url || !body.model) { toast('Name, base URL and model are required'); return; }
+    api('/api/providers', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+      .then(() => { $('provider-form').style.display = 'none'; loadProviders(); fillChatProviders(); toast('Provider saved'); })
+      .catch(e => toast('Save failed: ' + e.message));
+  });
+  $('pf-test').addEventListener('click', () => {
+    const name = $('pf-name').value.trim();
+    if (!name) { toast('Save the provider first, then test'); return; }
+    $('pf-status').textContent = 'testing…';
+    api('/api/providers/' + encodeURIComponent(name) + '/test', { method:'POST' })
+      .then(r => { $('pf-status').textContent = '✓ OK — models: ' + (r.models||[]).slice(0,5).join(', '); })
+      .catch(e => { $('pf-status').textContent = '✗ ' + e.message; });
+  });
+
+  // ---------- init ----------
   connect();
-  loadAgents();
+  show('chat');
 })();
 </script>
 </body>
