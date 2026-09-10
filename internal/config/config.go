@@ -43,6 +43,12 @@ type Config struct {
 	// MaxAgentIterations bounds the tool-use loop to avoid runaway agents.
 	MaxAgentIterations int
 
+	// Observation retention: observations older than ObservationTTLDays are
+	// pruned, and each agent keeps at most ObservationKeepLatest. This is the
+	// anti-hallucination control for recurring monitoring agents.
+	ObservationTTLDays    int
+	ObservationKeepLatest int
+
 	// SystemPrompt is the base system prompt; knowledge is appended to it.
 	SystemPrompt string
 }
@@ -74,6 +80,8 @@ func Load() (*Config, error) {
 	cfg.ToolAllowList = splitList(getEnv("AGENTICGO_TOOL_ALLOWLIST", ""))
 
 	cfg.MaxAgentIterations = getEnvInt("AGENTICGO_MAX_ITERATIONS", 12)
+	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
+	cfg.ObservationKeepLatest = getEnvInt("AGENTICGO_OBSERVATION_KEEP", 200)
 
 	if cfg.LLMBaseURL == "" {
 		return nil, fmt.Errorf("AGENTICGO_LLM_BASE_URL must not be empty")

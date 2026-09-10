@@ -66,6 +66,8 @@ type Provider interface {
 	ChatCompletion(ctx context.Context, req ChatRequest, onDelta StreamFunc) (Message, error)
 	// Name identifies the provider for logging.
 	Name() string
+	// Model returns the model identifier requests are sent with.
+	Model() string
 }
 
 // ChatRequest is a single completion request.

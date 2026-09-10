@@ -14,51 +14,85 @@ The owner is building this to learn Go.
 ## Scope (what it does)
 
 - **Multiple agents**: each agent is a directory under `AgentsDir` with context
-  files `SOUL.md` (persona), `AGENTS.md` (operating instructions), `IDENTITY.md`
-  (name/role), a `skills/` dir, and a per-agent `workspace/` (tool jail).
+  files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
+  (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
+  a `skills/` dir, and a per-agent `workspace/` (tool jail). Files that don't
+  exist yet are still listed (empty) in the UI so they can be created.
 - **Skills**: a skill is a folder with `SKILL.md` (optional YAML-ish front-matter
   with `name`/`description` + markdown instructions). Loaded per agent and injected
-  into the system prompt.
-- **Chat Web UI** (embedded HTML/JS, no build step) + **WebSocket** API, with agent
-  picker, context-file editor, and skills view.
+  into the system prompt. Skills can be installed from the UI as a ZIP upload
+  (`skills.InstallZip` validates the `SKILL.md`/`name`, derives a slug, and extracts
+  path-traversal-safe).
+- **Knowledge base**: per-agent reference documents (`knowledge_docs` table) uploaded
+  from the UI. **Full-text indexed over content** (FTS5, `knowledge_docs_fts`) and
+  recalled via the `search_docs` tool — not bulk-injected. Titles are listed in the
+  system prompt so the agent knows to search.
+- **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
+  Pages: Overview, Chat, Agents (per-agent Files/Skills/Knowledge tabs), Skills,
+  Built-in Tools, MCP Servers (scaffold), Cron (scaffold), Providers.
 - **Agent loop**: LLM may call tools, observe results, iterate (capped).
-- **LLM provider**: OpenAI-compatible endpoint only (Ollama / LM Studio / vLLM /
-  OpenAI), behind a `llm.Provider` interface.
+- **LLM providers**: OpenAI-compatible endpoints only (Ollama / LM Studio / vLLM /
+  OpenAI), behind a `llm.Provider` interface. Named provider configs are managed
+  from the UI, persisted to `data/providers.json`, and seeded from env on first
+  run. A chat request may override the provider (`wsMessage.Provider`);
+  `agent.ProviderLookup` (`providers.Store.GetLLM`) resolves names.
 - **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`.
 - **Security**: filesystem tools jailed to a workspace; `exec` runs only allow-listed
   commands; tools gated by a global allow-list. Context-file names are validated
   against an allow-list (`validContextFile`) to prevent path traversal; agent keys are
   validated (`ValidKey`) since they're used as directory names.
-- **Memory**: SQLite (`modernc.org/sqlite`, no cgo), conversations + knowledge scoped
-  **per agent** (the `agent` column).
+- **Memory**: SQLite (`modernc.org/sqlite`, no cgo). Two kinds, scoped **per agent**:
+  - `knowledge` — curated durable learnings. Full-text searchable via an FTS5
+    virtual table (`knowledge_fts`, kept in sync by triggers) and the
+    `memory_search` tool; selectively recalled, not bulk-injected.
+  - `observations` — high-churn, timestamped findings from recurring agents (e.g. a
+    k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`)
+    and only the *latest* is injected into prompts, so stale state doesn't mislead the
+    model. Recorded via the `record_observation` tool.
+  Both memory tools are built per-run in `Engine.callTool` (scoped to the agent), not
+  registered in the shared `tools.Registry`. The same per-run pattern is used for
+  `search_docs` (knowledge-base documents).
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
+- **Scaffolding**: `internal/scaffold` holds in-memory MCP-server and cron-job
+  registries backing the UI/API shape only — nothing connects or executes yet.
 
 ## Architecture map (how it fits together)
 
 - `cmd/agenticgo/main.go` — wiring: config → agents.Registry (seeds a `default`
-  agent) → store → llm.Provider → tools.Registry → agent.Engine → server.
+  agent) → store → llm.Provider → providers.Store (seeded from env) →
+  scaffold.Store → tools.Registry → agent.Engine → server.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
   `AgentsDir`. `Agent.SystemPrompt()` composes context files.
 - `internal/skills` — `Load(skillsDir)` → `[]Skill`; `Prompt(skills, enabled)` →
   system-prompt section.
+- `internal/providers` — named OpenAI-compatible provider configs in
+  `data/providers.json`; `GetLLM(name)` resolves names (empty = default).
+- `internal/scaffold` — in-memory MCP-server and cron-job registries (not
+  persisted, not executed — API/UI shape only).
 - `internal/agent` — `Engine` resolves an agent, builds the system prompt
   (base + context files + skills + per-agent knowledge) and runs the tool loop,
-  persisting turns under `(agent, session)`.
-- `internal/server` — chi routes for agent CRUD / context files / skills / evolve,
-  plus `/ws` streaming chat. The agent key flows through WS messages and API paths.
-- `internal/store` — SQLite. `messages` and `knowledge` tables both have an `agent`
-  column; `migrate` adds it idempotently for older DBs.
+  persisting turns under `(agent, session)`. `SetProviderLookup` enables
+  per-request provider overrides.
+- `internal/server` — chi routes for agent CRUD / context files / skills /
+  providers / tools / sessions / MCP / cron / evolve, plus `/ws` streaming chat.
+  The agent key (and optional provider name) flows through WS messages and API
+  paths.
+- `internal/store` — SQLite. `messages`, `knowledge`, and `observations` tables all
+  have an `agent` column; `knowledge_fts` is an FTS5 virtual table kept in sync by
+  triggers; `migrate` is idempotent for older DBs.
 
 ## Data layout on disk
 
 ```
 data/
   agenticgo.db                 # SQLite (messages + knowledge, per-agent)
+  providers.json               # named OpenAI-compatible provider configs
   workspace/                   # fallback tool jail
   agents/
     <key>/
       SOUL.md AGENTS.md IDENTITY.md
+      USER.md USER_PREDEFINED.md CAPABILITIES.md HEARTBEAT.md
       skills/<skill>/SKILL.md
       workspace/               # per-agent tool jail
 ```
@@ -121,7 +155,12 @@ curl localhost:18099/api/agents             # list agents
 - `internal/agent/agent.go` — `Engine` tool loop + `Evolve` (self-evolution)
 - `internal/agents/agents.go` — agent registry + context files
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition
+- `internal/providers/providers.go` — named provider configs (JSON store)
+- `internal/scaffold/scaffold.go` — in-memory MCP-server + cron-job scaffolding
 - `internal/llm/openai.go` — OpenAI-compatible streaming client (SSE + tool calls)
-- `internal/tools/{tools,fs,exec}.go` — registry, filesystem jail, allow-listed exec
-- `internal/store/store.go` — SQLite schema + queries (per-agent)
-- `internal/server/server.go` — chi routes, `/ws` streaming, embedded UI
+- `internal/tools/{tools,fs,exec,memory}.go` — registry, filesystem jail,
+  allow-listed exec, memory tools (`memory_search`, `record_observation`)
+- `internal/store/store.go` — SQLite schema + queries (per-agent; FTS5 knowledge +
+  observations)
+- `internal/server/server.go` — chi routes, `/ws` streaming, embedded SPA
+- `internal/server/web/index.html` — the whole UI (single file, no build step)

@@ -16,6 +16,8 @@ import (
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
 	"github.com/dkr290/agenticgo/internal/llm"
+	"github.com/dkr290/agenticgo/internal/providers"
+	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/server"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
@@ -57,6 +59,16 @@ func main() {
 	// LLM provider (OpenAI-compatible: Ollama / LM Studio / vLLM / OpenAI).
 	provider := llm.NewOpenAI(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 
+	// Named provider store (editable from the Providers UI). Seeded from env.
+	providerStore, err := providers.Open(filepath.Join(cfg.DataDir, "providers.json"))
+	if err != nil {
+		log.Fatalf("providers: %v", err)
+	}
+	providerStore.SeedDefault(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
+
+	// Scaffolding for not-yet-implemented features (MCP servers, cron).
+	scaff := scaffold.New()
+
 	// Tool registry with built-ins, gated by the tool allow-list.
 	reg := tools.NewRegistry(cfg.ToolAllowList)
 	mustRegister(reg, func() (tools.Tool, error) { return tools.NewReadFile(cfg.WorkspaceDir) })
@@ -65,7 +77,8 @@ func main() {
 	reg.Register(tools.NewExec(cfg.WorkspaceDir, cfg.ExecAllowList))
 
 	engine := agent.New(cfg, provider, reg, st, agentReg)
-	srv := server.New(cfg, engine, agentReg)
+	engine.SetProviderLookup(providerStore)
+	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, scaff)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

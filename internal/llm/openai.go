@@ -37,6 +37,45 @@ func NewOpenAI(baseURL, apiKey, model string) *OpenAIProvider {
 // Name returns the provider name.
 func (p *OpenAIProvider) Name() string { return "openai-compatible" }
 
+// Model returns the configured model identifier.
+func (p *OpenAIProvider) Model() string { return p.model }
+
+// ListModels queries the provider's /models endpoint and returns model IDs.
+// It works against any OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenAI).
+func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("list models: %s: %s", resp.Status, strings.TrimSpace(string(slurp)))
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	models := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+	return models, nil
+}
+
 // wire types for the OpenAI-compatible API.
 type oaiRequest struct {
 	Model    string     `json:"model"`
@@ -93,11 +132,15 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 		msgs = append(msgs, om)
 	}
 
+	model := req.Model
+	if model == "" {
+		model = p.model
+	}
 	body := oaiRequest{
-		Model:    p.model,
+		Model:    model,
 		Messages: msgs,
 		Tools:    req.Tools,
-		Stream:   true,
+		Stream:   req.Stream,
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -109,7 +152,9 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 		return Message{}, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
+	if req.Stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
 	if p.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
@@ -123,6 +168,10 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Message{}, fmt.Errorf("llm returned %s: %s", resp.Status, strings.TrimSpace(string(slurp)))
+	}
+
+	if !req.Stream {
+		return parseNonStream(resp.Body, onDelta)
 	}
 
 	var (
@@ -207,5 +256,41 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 		return Message{}, err
 	}
 
+	return msg, nil
+}
+
+// parseNonStream handles a regular (non-SSE) chat completion response.
+func parseNonStream(body io.Reader, onDelta StreamFunc) (Message, error) {
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content   string        `json:"content"`
+				ToolCalls []oaiToolCall `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+		return Message{}, fmt.Errorf("decode response: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return Message{}, fmt.Errorf("llm returned no choices")
+	}
+	c := resp.Choices[0].Message
+	msg := Message{Role: RoleAssistant, Content: c.Content}
+	for _, tc := range c.ToolCalls {
+		msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+	if msg.Content != "" {
+		if err := onDelta(Delta{Content: msg.Content}); err != nil {
+			return Message{}, err
+		}
+	}
+	if err := onDelta(Delta{ToolCalls: msg.ToolCalls, Done: true}); err != nil {
+		return Message{}, err
+	}
 	return msg, nil
 }
