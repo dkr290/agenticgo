@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>agenticgo</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a22; --panel2: #1c2230; --border: #262c3a;
+    --text: #e6e9ef; --muted: #8a93a6; --accent: #4f8cff; --tool: #b478ff;
+    --user: #2ea043; --danger: #c93c37;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh; display: flex; overflow: hidden; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 7px; padding: 7px 13px;
+           font-size: 13px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button.danger { background: var(--danger); }
+  input, textarea, select { background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 8px 10px; font-size: 13px; font-family: inherit; width: 100%; }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  label { font-size: 12px; color: var(--muted); display: block; margin: 10px 0 4px; }
+
+  /* Sidebar */
+  #sidebar { width: 280px; min-width: 280px; background: var(--panel); border-right: 1px solid var(--border);
+             display: flex; flex-direction: column; }
+  #sidebar header { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  #sidebar header h1 { font-size: 15px; margin: 0; font-weight: 600; flex: 1; }
+  #agents { flex: 1; overflow-y: auto; padding: 8px; }
+  .agent-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; }
+  .agent-item:hover { background: var(--panel2); }
+  .agent-item.active { background: var(--panel2); border-color: var(--accent); }
+  .agent-item .name { font-weight: 600; font-size: 14px; }
+  .agent-item .desc { font-size: 12px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sidebar footer { padding: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+  #status { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #777; }
+  .dot.on { background: var(--user); } .dot.off { background: var(--danger); }
+
+  /* Main */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #tabs { display: flex; gap: 4px; padding: 8px 16px 0; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .tab { padding: 8px 14px; cursor: pointer; font-size: 13px; color: var(--muted); border: none; background: transparent;
+         border-bottom: 2px solid transparent; border-radius: 0; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .view { flex: 1; display: none; flex-direction: column; min-height: 0; }
+  .view.active { display: flex; }
+
+  /* Chat */
+  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; white-space: pre-wrap; word-wrap: break-word;
+         line-height: 1.45; font-size: 14px; }
+  .msg.user { align-self: flex-end; background: var(--user); color: #fff; border-bottom-right-radius: 2px; }
+  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
+  .msg.tool { align-self: flex-start; background: transparent; border: 1px dashed var(--tool); color: var(--tool);
+              font-family: ui-monospace, Menlo, monospace; font-size: 12px; max-width: 90%; }
+  .msg.system { align-self: center; color: var(--muted); font-size: 12px; }
+  #composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); }
+  #input { flex: 1; resize: none; }
+  #evolve { background: var(--tool); }
+
+  /* Context editor */
+  #ctxwrap { flex: 1; display: flex; min-height: 0; }
+  #ctxfiles { width: 180px; border-right: 1px solid var(--border); padding: 12px; background: var(--panel); }
+  .ctxfile { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-bottom: 4px; font-family: ui-monospace, Menlo, monospace; }
+  .ctxfile:hover { background: var(--panel2); }
+  .ctxfile.active { background: var(--panel2); color: var(--accent); }
+  #ctxedit { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #ctxarea { flex: 1; margin: 12px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; resize: none; }
+  #ctxbar { display: flex; gap: 8px; padding: 0 12px 12px; align-items: center; }
+  #ctxsaved { font-size: 12px; color: var(--user); }
+
+  /* Skills */
+  #skillslist { flex: 1; overflow-y: auto; padding: 16px; }
+  .skill { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .skill h3 { margin: 0 0 4px; font-size: 14px; }
+  .skill .sdesc { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .skill pre { background: var(--bg); padding: 10px; border-radius: 6px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
+  .empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+
+  /* Modal */
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 50; }
+  #overlay.open { display: flex; }
+  #modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; width: 440px; max-width: 92vw; }
+  #modal h2 { margin: 0 0 8px; font-size: 16px; }
+  #modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <header>
+    <h1>agenticgo</h1>
+    <button id="newagent" title="New agent">+ New</button>
+  </header>
+  <div id="agents"></div>
+  <footer>
+    <div id="status"><span class="dot" id="dot"></span><span id="statustext">connecting…</span></div>
+  </footer>
+</div>
+
+<div id="main">
+  <div id="tabs">
+    <button class="tab active" data-view="chat">Chat</button>
+    <button class="tab" data-view="context">Context</button>
+    <button class="tab" data-view="skills">Skills</button>
+  </div>
+
+  <!-- Chat view -->
+  <div class="view active" id="view-chat">
+    <div id="chat"></div>
+    <div id="composer">
+      <textarea id="input" rows="1" placeholder="Message the agent… (Enter to send)"></textarea>
+      <button id="send">Send</button>
+      <button id="evolve" title="Extract learnings from this session">Evolve</button>
+    </div>
+  </div>
+
+  <!-- Context view -->
+  <div class="view" id="view-context">
+    <div id="ctxwrap">
+      <div id="ctxfiles"></div>
+      <div id="ctxedit">
+        <textarea id="ctxarea" placeholder="Select a context file…"></textarea>
+        <div id="ctxbar">
+          <button id="ctxsave">Save</button>
+          <span id="ctxsaved"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Skills view -->
+  <div class="view" id="view-skills">
+    <div id="skillslist"></div>
+  </div>
+</div>
+
+<!-- New agent modal -->
+<div id="overlay">
+  <div id="modal">
+    <h2>New agent</h2>
+    <label>Key (a-z, 0-9, -, _)</label>
+    <input id="na-key" placeholder="researcher">
+    <label>Name</label>
+    <input id="na-name" placeholder="Researcher">
+    <label>Description</label>
+    <input id="na-desc" placeholder="Finds and synthesizes information">
+    <label>Soul (persona) — optional, has a default</label>
+    <textarea id="na-soul" rows="5" placeholder="# Soul&#10;You are…"></textarea>
+    <div class="row">
+      <button class="ghost" id="na-cancel">Cancel</button>
+      <button id="na-create">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  // ---- state ----
+  let ws = null;
+  let agents = [];
+  let currentAgent = null;
+  let currentAssistant = null;
+  let busy = false;
+  let ctxFile = null;
+  const session = 'default';
+  const CTX_FILES = ['SOUL.md', 'AGENTS.md', 'IDENTITY.md'];
+
+  // ---- dom ----
+  const $ = id => document.getElementById(id);
+  const chat = $('chat'), input = $('input'), sendBtn = $('send'), evolveBtn = $('evolve');
+  const dot = $('dot'), statustext = $('statustext');
+
+  function setStatus(on, text) { dot.className = 'dot ' + (on ? 'on' : 'off'); statustext.textContent = text; }
+  function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+  // ---- websocket ----
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(proto + '://' + location.host + '/ws');
+    ws.onopen = () => setStatus(true, 'connected');
+    ws.onclose = () => { setStatus(false, 'disconnected — retrying…'); setTimeout(connect, 1500); };
+    ws.onerror = () => setStatus(false, 'error');
+    ws.onmessage = e => {
+      let ev; try { ev = JSON.parse(e.data); } catch { return; }
+      if (ev.kind === 'text') {
+        if (!currentAssistant) currentAssistant = addMsg('assistant', '');
+        currentAssistant.textContent += ev.text;
+        chat.scrollTop = chat.scrollHeight;
+      } else if (ev.kind === 'tool_call') {
+        addMsg('tool', '⚙ ' + ev.tool_name + '(' + (ev.tool_args || '') + ')');
+      } else if (ev.kind === 'tool_result') {
+        addMsg('tool', '→ ' + (ev.tool_result || '').slice(0, 600));
+      } else if (ev.kind === 'done') {
+        currentAssistant = null; setBusy(false);
+      } else if (ev.kind === 'error') {
+        addMsg('system', '⚠ ' + (ev.error || 'unknown error'));
+        currentAssistant = null; setBusy(false);
+      }
+    };
+  }
+
+  function addMsg(cls, text) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + cls; el.textContent = text;
+    chat.appendChild(el); chat.scrollTop = chat.scrollHeight; return el;
+  }
+  function setBusy(b){ busy=b; sendBtn.disabled=b; input.disabled=b; if(!b) input.focus(); }
+
+  function send() {
+    const text = input.value.trim();
+    if (!text || !currentAgent || !ws || ws.readyState !== WebSocket.OPEN || busy) return;
+    addMsg('user', text); input.value = ''; setBusy(true); currentAssistant = null;
+    ws.send(JSON.stringify({ agent: currentAgent, session, message: text }));
+  }
+  sendBtn.addEventListener('click', send);
+  input.addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+
+  evolveBtn.addEventListener('click', () => {
+    if (!currentAgent) return;
+    fetch('/api/evolve', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ agent: currentAgent, session }) })
+      .then(r => addMsg('system', r.ok ? '✓ Evolution complete — learnings saved.' : '⚠ Evolution failed.'))
+      .catch(() => addMsg('system', '⚠ Evolution request failed.'));
+  });
+
+  // ---- tabs ----
+  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $('view-' + t.dataset.view).classList.add('active');
+    if (t.dataset.view === 'context') loadCtxFiles();
+    if (t.dataset.view === 'skills') loadSkills();
+  }));
+
+  // ---- agents ----
+  function loadAgents() {
+    fetch('/api/agents').then(r => r.json()).then(list => {
+      agents = list || [];
+      if (!currentAgent && agents.length) currentAgent = agents[0].key;
+      if (currentAgent && !agents.find(a => a.key === currentAgent)) {
+        currentAgent = agents.length ? agents[0].key : null;
+      }
+      renderAgents();
+    }).catch(() => {});
+  }
+
+  function renderAgents() {
+    const el = $('agents'); el.innerHTML = '';
+    if (!agents.length) { el.innerHTML = '<div class="empty">No agents. Create one.</div>'; return; }
+    agents.forEach(a => {
+      const d = document.createElement('div');
+      d.className = 'agent-item' + (a.key === currentAgent ? ' active' : '');
+      d.innerHTML = '<div class="name">' + esc(a.name) + '</div>' +
+                    '<div class="desc">' + esc(a.description || a.key) + '</div>';
+      d.addEventListener('click', () => { currentAgent = a.key; renderAgents(); clearChat(); loadCtxFiles(); });
+      el.appendChild(d);
+    });
+  }
+
+  function clearChat(){ chat.innerHTML=''; currentAssistant=null; }
+
+  // ---- new agent modal ----
+  const overlay = $('overlay');
+  $('newagent').addEventListener('click', () => overlay.classList.add('open'));
+  $('na-cancel').addEventListener('click', () => overlay.classList.remove('open'));
+  $('na-create').addEventListener('click', () => {
+    const body = { key: $('na-key').value.trim(), name: $('na-name').value.trim(),
+                   description: $('na-desc').value.trim(), soul: $('na-soul').value };
+    if (!body.key) { alert('Key is required'); return; }
+    fetch('/api/agents', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+      .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+      .then(a => { overlay.classList.remove('open'); $('na-key').value=''; $('na-name').value='';
+                   $('na-desc').value=''; $('na-soul').value=''; currentAgent = a.key; loadAgents(); })
+      .catch(e => alert('Create failed: ' + e.message));
+  });
+
+  // ---- context files ----
+  function loadCtxFiles() {
+    const el = $('ctxfiles'); el.innerHTML = '';
+    if (!currentAgent) { el.innerHTML = '<div class="empty">No agent selected</div>'; return; }
+    CTX_FILES.forEach(name => {
+      const d = document.createElement('div');
+      d.className = 'ctxfile' + (name === ctxFile ? ' active' : '');
+      d.textContent = name;
+      d.addEventListener('click', () => { ctxFile = name; loadCtxFiles(); loadCtxContent(); });
+      el.appendChild(d);
+    });
+    if (!ctxFile) { ctxFile = CTX_FILES[0]; loadCtxFiles(); return; }
+    loadCtxContent();
+  }
+
+  function loadCtxContent() {
+    if (!currentAgent || !ctxFile) return;
+    fetch('/api/agents/' + encodeURIComponent(currentAgent) + '/files/' + ctxFile)
+      .then(r => r.json()).then(d => { $('ctxarea').value = d.content || ''; $('ctxsaved').textContent=''; })
+      .catch(() => { $('ctxarea').value=''; });
+  }
+
+  $('ctxsave').addEventListener('click', () => {
+    if (!currentAgent || !ctxFile) return;
+    fetch('/api/agents/' + encodeURIComponent(currentAgent) + '/files/' + ctxFile, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ content: $('ctxarea').value })
+    }).then(r => { $('ctxsaved').textContent = r.ok ? 'Saved ✓' : 'Save failed';
+                   setTimeout(()=> $('ctxsaved').textContent='', 2000); });
+  });
+
+  // ---- skills ----
+  function loadSkills() {
+    const el = $('skillslist');
+    if (!currentAgent) { el.innerHTML = '<div class="empty">No agent selected</div>'; return; }
+    fetch('/api/agents/' + encodeURIComponent(currentAgent) + '/skills')
+      .then(r => r.json()).then(list => {
+        el.innerHTML = '';
+        if (!list || !list.length) {
+          el.innerHTML = '<div class="empty">No skills yet. Add a folder under ' +
+            '<code>data/agents/' + esc(currentAgent) + '/skills/&lt;name&gt;/SKILL.md</code>.</div>';
+          return;
+        }
+        list.forEach(sk => {
+          const d = document.createElement('div'); d.className = 'skill';
+          d.innerHTML = '<h3>' + esc(sk.name) + '</h3>' +
+            (sk.description ? '<div class="sdesc">' + esc(sk.description) + '</div>' : '') +
+            (sk.body ? '<pre>' + esc(sk.body) + '</pre>' : '');
+          el.appendChild(d);
+        });
+      }).catch(() => { el.innerHTML = '<div class="empty">Failed to load skills.</div>'; });
+  }
+
+  // ---- init ----
+  connect();
+  loadAgents();
+})();
+</script>
+</body>
+</html>

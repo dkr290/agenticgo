@@ -1,0 +1,333 @@
+// Package agents manages agent definitions stored on the filesystem.
+//
+// Each agent is a directory under the agents root, named by its key:
+//
+//	agents/
+//	  researcher/
+//	    SOUL.md        # persona: tone, values, behavioral guidelines (required-ish)
+//	    AGENTS.md      # operating instructions: how to approach tasks, use tools
+//	    IDENTITY.md    # name, role, short description
+//	    skills/        # SKILL.md files (see internal/skills)
+//	    workspace/     # per-agent file jail for tools
+//
+// The idea mirrors GoClaw/OpenClaw context files, but stored as plain files and
+// composed into the system prompt at run time. No database, no tenancy.
+package agents
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// ContextFile is a single markdown file that shapes an agent.
+type ContextFile struct {
+	Name    string `json:"name"`    // e.g. SOUL.md
+	Content string `json:"content"` // raw markdown
+}
+
+// Agent is a loaded agent definition.
+type Agent struct {
+	Key         string        `json:"key"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Dir         string        `json:"-"`
+	Files       []ContextFile `json:"files"` // ordered context files present on disk
+}
+
+// contextFileNames are the files we compose into the system prompt, in order.
+// SOUL.md (persona) leads, then AGENTS.md (instructions), then IDENTITY.md.
+var contextFileNames = []string{"SOUL.md", "AGENTS.md", "IDENTITY.md"}
+
+// keyRE validates agent keys: lowercase alphanumeric, dash, underscore.
+var keyRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
+
+// ValidKey reports whether key is a safe agent key (used as a dir name).
+func ValidKey(key string) bool {
+	return key != "" && len(key) <= 64 && keyRE.MatchString(key)
+}
+
+// Registry loads and saves agents under a root directory.
+type Registry struct {
+	root string
+}
+
+// NewRegistry creates a registry rooted at dir, ensuring it exists.
+func NewRegistry(root string) (*Registry, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("create agents dir: %w", err)
+	}
+	return &Registry{root: root}, nil
+}
+
+// Root returns the agents root directory.
+func (r *Registry) Root() string { return r.root }
+
+// dirFor returns the directory for an agent key, validating the key.
+func (r *Registry) dirFor(key string) (string, error) {
+	if !ValidKey(key) {
+		return "", fmt.Errorf("invalid agent key %q (use a-z, 0-9, -, _)", key)
+	}
+	return filepath.Join(r.root, key), nil
+}
+
+// WorkspaceDir returns (creating if needed) the per-agent workspace dir used
+// to jail filesystem/exec tools.
+func (r *Registry) WorkspaceDir(key string) (string, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return "", err
+	}
+	ws := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		return "", fmt.Errorf("create agent workspace: %w", err)
+	}
+	return ws, nil
+}
+
+// SkillsDir returns (creating if needed) the per-agent skills dir.
+func (r *Registry) SkillsDir(key string) (string, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return "", err
+	}
+	sd := filepath.Join(dir, "skills")
+	if err := os.MkdirAll(sd, 0o755); err != nil {
+		return "", fmt.Errorf("create agent skills dir: %w", err)
+	}
+	return sd, nil
+}
+
+// List returns all agents present on disk, sorted by key.
+func (r *Registry) List() ([]Agent, error) {
+	entries, err := os.ReadDir(r.root)
+	if err != nil {
+		return nil, fmt.Errorf("read agents dir: %w", err)
+	}
+	var out []Agent
+	for _, e := range entries {
+		if !e.IsDir() || !ValidKey(e.Name()) {
+			continue
+		}
+		ag, err := r.Get(e.Name())
+		if err != nil {
+			continue
+		}
+		out = append(out, *ag)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// Exists reports whether an agent exists.
+func (r *Registry) Exists(key string) bool {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return false
+	}
+	st, err := os.Stat(dir)
+	return err == nil && st.IsDir()
+}
+
+// Get loads a single agent and its context files.
+func (r *Registry) Get(key string) (*Agent, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("agent %q not found", key)
+	}
+
+	ag := &Agent{Key: key, Name: key, Dir: dir}
+	for _, name := range contextFileNames {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue // file optional
+		}
+		content := string(data)
+		ag.Files = append(ag.Files, ContextFile{Name: name, Content: content})
+		if name == "IDENTITY.md" {
+			ag.Name, ag.Description = parseIdentity(content, key)
+		}
+	}
+	return ag, nil
+}
+
+// Create scaffolds a new agent with template context files.
+func (r *Registry) Create(key, name, description, soul string) (*Agent, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if r.Exists(key) {
+		return nil, fmt.Errorf("agent %q already exists", key)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create agent dir: %w", err)
+	}
+
+	if strings.TrimSpace(name) == "" {
+		name = key
+	}
+	if strings.TrimSpace(soul) == "" {
+		soul = defaultSoul(name)
+	}
+	identity := fmt.Sprintf("# Identity\n\n**Name:** %s\n\n**Role:** %s\n", name, strings.TrimSpace(description))
+
+	files := map[string]string{
+		"SOUL.md":     soul,
+		"IDENTITY.md": identity,
+		"AGENTS.md":   defaultAgents(),
+	}
+	for fname, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, fname), []byte(content), 0o644); err != nil {
+			return nil, fmt.Errorf("write %s: %w", fname, err)
+		}
+	}
+	// Create workspace + skills subdirs so tools and skills have a home.
+	if _, err := r.WorkspaceDir(key); err != nil {
+		return nil, err
+	}
+	if _, err := r.SkillsDir(key); err != nil {
+		return nil, err
+	}
+	return r.Get(key)
+}
+
+// Delete removes an agent directory entirely.
+func (r *Registry) Delete(key string) error {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return err
+	}
+	if !r.Exists(key) {
+		return fmt.Errorf("agent %q not found", key)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("delete agent: %w", err)
+	}
+	return nil
+}
+
+// ReadFile returns the content of a context file for an agent.
+func (r *Registry) ReadFile(key, name string) (string, error) {
+	if !validContextFile(name) {
+		return "", fmt.Errorf("invalid context file %q", name)
+	}
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // treat missing as empty so the UI can create it
+		}
+		return "", fmt.Errorf("read %s: %w", name, err)
+	}
+	return string(data), nil
+}
+
+// WriteFile writes a context file for an agent.
+func (r *Registry) WriteFile(key, name, content string) error {
+	if !validContextFile(name) {
+		return fmt.Errorf("invalid context file %q", name)
+	}
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return err
+	}
+	if !r.Exists(key) {
+		return fmt.Errorf("agent %q not found", key)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", name, err)
+	}
+	return nil
+}
+
+// validContextFile guards against path traversal on context file names.
+func validContextFile(name string) bool {
+	for _, n := range contextFileNames {
+		if name == n {
+			return true
+		}
+	}
+	return false
+}
+
+// SystemPrompt composes the system prompt for an agent from its context files.
+func (a *Agent) SystemPrompt() string {
+	var b strings.Builder
+	for _, f := range a.Files {
+		content := strings.TrimSpace(f.Content)
+		if content == "" {
+			continue
+		}
+		b.WriteString(content)
+		b.WriteString("\n\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// parseIdentity extracts a display name and role from IDENTITY.md.
+// It looks for "**Name:** X" and "**Role:** Y" lines; falls back to key.
+func parseIdentity(content, key string) (name, desc string) {
+	name, desc = key, ""
+	for _, line := range strings.Split(content, "\n") {
+		l := strings.TrimSpace(line)
+		l = strings.Trim(l, "*") // strip bold markers at edges
+		if strings.HasPrefix(l, "Name:") {
+			if v := strings.TrimSpace(strings.TrimPrefix(l, "Name:")); v != "" {
+				name = strings.Trim(v, "* ")
+			}
+		}
+		if strings.HasPrefix(l, "Role:") {
+			if v := strings.TrimSpace(strings.TrimPrefix(l, "Role:")); v != "" {
+				desc = strings.Trim(v, "* ")
+			}
+		}
+	}
+	return name, desc
+}
+
+func defaultSoul(name string) string {
+	return fmt.Sprintf(`# Soul
+
+You are %s, an AI agent built with agenticgo.
+
+## Personality
+- Clear, direct, and helpful.
+- Curious and methodical when solving problems.
+
+## Values
+- Be honest about uncertainty.
+- Prefer doing over describing when tools can help.
+
+## Behavior
+- Think step by step.
+- Use tools when they help accomplish the user's task.
+`, name)
+}
+
+func defaultAgents() string {
+	return `# Operating Instructions
+
+## How you work
+- Read the user's task carefully.
+- Break it into steps.
+- Use your tools to read/write files and run allow-listed commands in your workspace.
+
+## Tool use
+- Prefer read_file/list_files to understand context before changing things.
+- Use write_file to create or update files.
+- Use exec only for allow-listed commands.
+
+## Output
+- Be concise. Show your reasoning briefly, then the result.
+`
+}

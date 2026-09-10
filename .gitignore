@@ -1,0 +1,5 @@
+# Build output
+/agenticgo
+
+# Runtime data (SQLite DB, workspaces, agent files)
+/data/
