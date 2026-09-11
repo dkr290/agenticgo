@@ -14,8 +14,25 @@ this lists what's still needed to make the project fully functional).
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
   registered against the global `cfg.WorkspaceDir` (`cmd/agenticgo/main.go:74`). Wire per-agent
-  workspaces into the tool loop (construct fs/exec tools scoped to the agent's `WorkspaceDir`).
-  This is the "per-agent tool jail" the README promises.
+  workspaces into the tool loop: construct fs/exec tools scoped to the agent's `WorkspaceDir`
+  per run. This is the "per-agent tool jail" the README promises. This requires the per-run
+  registry refactor below.
+
+- **Per-run tool registry instead of the `callTool` switch.**
+  `Engine.callTool` hardcodes a 3-case switch (`internal/agent/agent.go:304`) and per-agent
+  memory tools are constructed per call, while built-ins live in one shared global registry.
+  This does not scale: per-agent workspaces (above), per-agent tool allow-lists (below) and
+  MCP tools (§3) all need per-run composition. Refactor: build a per-run `tools.Registry`
+  (global built-ins + agent-scoped fs/exec + memory/docs tools + MCP tools), expose it via
+  a single `Specs()`/`Call()` and drop the switch entirely. MCP tool-lifecycle note from the
+  k8s-mcp-server analysis: failure of one source must not break the rest (soft-fail per tool).
+
+- **Per-agent tool allow-list.**
+  `cfg.ToolAllowList` is global-only (`internal/config/config.go:41`). With per-agent
+  workspaces and MCP tools, agents need individual gating (the k8s-mcp-server "toolsets"
+  idea, but per agent): add an allow-list field to the agent's `config.json` (nil = inherit
+  global), and apply it in the per-run registry. Also consider a `read_only`-style mode per
+  agent (no `write_file`/`exec`) — k8s-mcp-server's `--read-only` is the same concept.
 
 - **Conversation history loses the tool trace.**
   `messages` only persists role+content (`internal/store/store.go:44`); intermediate
@@ -31,7 +48,9 @@ this lists what's still needed to make the project fully functional).
 - **Chat bypasses the providers store's "default" marker.**
   Empty provider name falls back to the env-built `e.llm` (`internal/agent/agent.go:277`), so
   marking a provider as default in the UI has no effect until you pick one. Route empty-name
-  requests through `providers.Store.GetLLM("")`.
+  requests through `providers.Store.GetLLM("")`. After this lands, the `engine.llm` env-built
+  fallback becomes redundant — fold its removal into this item (keep `llm.NewOpenAI` only as
+  the seed for the providers store).
 
 - **Streaming tool-call accumulation drops sparse tool indexes.**
   `internal/llm/openai.go:243` iterates `len(toolArgs)` over a map; tool calls that stream
@@ -44,23 +63,57 @@ this lists what's still needed to make the project fully functional).
 
 ## 2. HUMA REST API (new — `docs` endpoint)
 
+- **Add `POST /api/chat` (non-streaming REST chat) first.**
+  Today chat is WebSocket-only (`/ws`), so the HUMA layer would have no chat endpoint to
+  document. Add a thin REST endpoint that wraps `Engine.Run` (+ optional `Evolve`) and
+  returns the final reply; keep `/ws` for streaming. This is what makes the API usable for
+  curl/scripts/CI.
+
 - **Add HUMA (github.com/danielgtaylor/huma/v2) and build a `/docs` API layer** covering the
   existing endpoints so there's a machine-readable API alongside the GUI — do NOT reimplement
   the GUI or remove the WebSocket chat.
   - Scaffold huma routers (API + docs) and register current routes: agents CRUD + config,
     context files, skills (+ upload), providers (+ test), sessions/messages, memory
-    (knowledge/observations), knowledge-base docs, tools list, MCP + cron scaffolds, evolve.
+    (knowledge/observations), knowledge-base docs, tools list, MCP + cron scaffolds, evolve,
+    and the new `/api/chat`.
   - Decide the mount/versioning scheme (e.g. `/openapi.json`, `/api/v1/...`) — keep it
     harmonized with the existing chi router and the WS endpoint.
+  - While redesigning routes, normalize the odd docs search path
+    `/agents/{k}/docs/search/query` → `/agents/{k}/docs/search?q=...`.
   - Add examples/manual for the chat req/resp shapes if feasible.
   - This is the single "easy API" the project needs for non-UI clients. Priority after §1.
 
 ## 3. Scaffolded features (UI + API shape only — nothing executes)
 
-- **MCP client (Phase 3).** In-memory only now (`internal/scaffold/scaffold.go:60`); not
-  persisted, no SDK. Integrate `github.com/modelcontextprotocol/go-sdk/mcp`, allow stdio and
-  HTTP/SSE servers, merge tools into `tools.Registry` as `mcp_<server>_<tool>`, gate by the
-  allow-list. Persist config (JSON or new SQLite tables) so servers survive restarts.
+- **MCP client (Phase 3) — make GUI-registered servers actually usable by agents.**
+  Today `POST /api/mcp-servers` only writes to an in-memory map
+  (`internal/scaffold/scaffold.go:60`); nothing connects, discovers, or registers tools, so
+  the agent cannot use any registered server. The full chain:
+  - **Persist config** (JSON file like providers, or new SQLite tables) so servers survive
+    restarts. The in-memory scaffold store loses everything.
+  - **Connect** with `github.com/modelcontextprotocol/go-sdk/mcp`: stdio transport (spawn
+    `command`+`args`) and HTTP/SSE transport (`url`). Connect (or reconnect) when a server is
+    added via the GUI/API, not only at startup.
+  - **Discover tools**: call `tools/list`; each MCP tool already carries name, description
+    and a JSON Schema — pass it through ~1:1 into `llm.ToolSpec` (no reflection/generics
+    needed for MCP tools; that go-harness pattern is only for hand-written Go tools).
+  - **Adapter**: wrap each discovered tool as a `tools.Tool` whose `Call(ctx, args)` forwards
+    to the MCP client's `CallTool` and returns the text content; errors come back as strings
+    the model can read.
+  - **Merge into the per-run registry** (see §1) namespaced as `mcp_<server>_<tool>` and
+    gated by the same allow-list (global + per-agent).
+  - **Soft-fail**: an unreachable/dead server must not break chat — its tools return error
+    strings; tool-list refresh on reconnect (tools can change between runs).
+  - First dogfood target: `containers/kubernetes-mcp-server` via stdio (it is a plain MCP
+    server; its own `--toolsets`/`--read-only` flags go into the server `args`, not into
+    agenticgo).
+
+- **Optional: generics-based tool registration for hand-written Go tools.**
+  Borrow the `RegisterTool[T, R]` + `invopop/jsonschema` pattern from
+  `go-harness-coding-agent/tools/registry.go` to generate `Parameters()` JSON Schemas from
+  structs instead of hand-writing them. Keep agenticgo's `Call(ctx, json.RawMessage)`
+  signature (harness's `map[string]any` dispatch has no context — do not regress
+  cancellation). Pure ergonomics; do after the per-run registry refactor in §1.
 
 - **Cron scheduler.** Jobs stored in-memory only (`internal/scaffold/scaffold.go:101`);
   `Enabled` is serialized but unused. Add a scheduler (e.g. robfig/cron or a simple ticker),
@@ -71,9 +124,16 @@ this lists what's still needed to make the project fully functional).
 
 - **Skill delete & knowledge delete endpoints** (and UI buttons): Skills tab and Memory page are
   read-only today (no DELETE for skills/knowledge).
+- **Skill enable/disable per agent**: `buildSystemPrompt` calls `skills.Prompt(sks, nil)` with a
+  hardcoded nil enabled-list (`internal/agent/agent.go:83`); there is no `agent_skills` table.
+  Add the table + UI checkboxes per agent and pass the enabled list through.
 - **Agent-scoped session listing**: `GET /api/sessions` returns everything; filter by agent.
 - **Observation creation in the UI**: `POST /api/agents/{k}/observations` exists; the Memory
   page has no control that calls it.
+- **WebSocket hardening**: the SPA has no client-side reconnect/backoff when the socket drops,
+  and no way to abort a running chat turn (a stuck tool loop burns tokens until
+  `MaxAgentIterations`). Add reconnect in the UI and a cancel message that propagates
+  `ctx` cancellation into `Engine.Run`.
 
 ## 5. Real-deployment items
 
@@ -81,7 +141,9 @@ this lists what's still needed to make the project fully functional).
   `modernc.org/sqlite`) and **Kubernetes manifests** (Deployment + PVC for the data dir +
   Service + optional Ingress). This is Phase 5 of the README roadmap.
 - **Test coverage**: only `internal/store/memory_smoke_test.go` exists. Add tests for the agent
-  loop, server handlers, providers, skills, tools, and llm request marshaling.
+  loop, server handlers, providers, skills, tools, and llm request marshaling. If the generics
+  registrar (§3) is adopted, cover schema generation + dispatch too (see
+  `go-harness-coding-agent/tools/registry_test.go` for the table-driven pattern).
 
 ## 6. Housekeeping
 
