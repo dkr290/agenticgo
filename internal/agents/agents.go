@@ -122,22 +122,6 @@ func (r *Registry) WorkspaceDir(key string) (string, error) {
 	return ws, nil
 }
 
-// SkillsDir returns (creating if needed) the legacy per-agent skills dir.
-// Deprecated: skills live in the shared library (SkillsLibraryDir) and are
-// enabled per agent via AgentConfig.EnabledSkills. This stays so old
-// on-disk layouts keep working and can be migrated.
-func (r *Registry) SkillsDir(key string) (string, error) {
-	dir, err := r.dirFor(key)
-	if err != nil {
-		return "", err
-	}
-	sd := filepath.Join(dir, "skills")
-	if err := os.MkdirAll(sd, 0o755); err != nil {
-		return "", fmt.Errorf("create agent skills dir: %w", err)
-	}
-	return sd, nil
-}
-
 // SkillsLibraryDir returns (creating if needed) the global skills library:
 // one shared directory where skills are uploaded once and from which agents
 // enable them individually. Lives at <agentsRoot>/../skills (data/skills).
@@ -404,11 +388,8 @@ func (r *Registry) Create(key, name, description, soul string, cfg AgentConfig) 
 			return nil, fmt.Errorf("write %s: %w", fname, err)
 		}
 	}
-	// Create workspace + skills subdirs so tools and skills have a home.
+	// Create the workspace subdir so tools have a jail.
 	if _, err := r.WorkspaceDir(key); err != nil {
-		return nil, err
-	}
-	if _, err := r.SkillsDir(key); err != nil {
 		return nil, err
 	}
 	return r.Get(key)
