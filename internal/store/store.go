@@ -374,6 +374,24 @@ func (s *Store) GetKnowledgeDoc(ctx context.Context, id int64) (*KnowledgeDoc, e
 	return &d, nil
 }
 
+// GetKnowledgeDocForAgent returns one document with content, but only if it
+// belongs to the given agent — so the read_doc tool can never leak another
+// agent's documents by guessing IDs.
+func (s *Store) GetKnowledgeDocForAgent(ctx context.Context, id int64, agent string) (*KnowledgeDoc, error) {
+	var d KnowledgeDoc
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, agent, title, content, created_at FROM knowledge_docs WHERE id = ? AND agent = ?`,
+		id, agent).
+		Scan(&d.ID, &d.Agent, &d.Title, &d.Content, &d.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("document %d not found", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get knowledge doc: %w", err)
+	}
+	return &d, nil
+}
+
 // DeleteKnowledgeDoc removes a document.
 func (s *Store) DeleteKnowledgeDoc(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM knowledge_docs WHERE id = ?`, id)

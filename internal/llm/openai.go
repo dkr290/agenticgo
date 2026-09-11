@@ -87,11 +87,23 @@ type oaiRequest struct {
 }
 
 type oaiMsg struct {
-	Role       string        `json:"role"`
-	Content    string        `json:"content"`
+	Role string `json:"role"`
+	// Content is a plain string for text-only messages, or an array of content
+	// parts (text + image_url) when the message carries images for a
+	// vision-capable model. Typed as any to hold both shapes.
+	Content    any           `json:"content"`
 	ToolCalls  []oaiToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	Name       string        `json:"name,omitempty"`
+}
+
+// oaiContentPart is one element of a multimodal message's content array.
+type oaiContentPart struct {
+	Type     string `json:"type"` // "text" | "image_url"
+	Text     string `json:"text,omitempty"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url,omitempty"`
 }
 
 type oaiToolCall struct {
@@ -122,6 +134,23 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
+		}
+		// Multimodal: a user message carrying images becomes an array of
+		// content parts (text + one image_url per image), the OpenAI vision shape.
+		if len(m.Images) > 0 {
+			parts := make([]oaiContentPart, 0, len(m.Images)+1)
+			if m.Content != "" {
+				parts = append(parts, oaiContentPart{Type: "text", Text: m.Content})
+			}
+			for _, img := range m.Images {
+				var p oaiContentPart
+				p.Type = "image_url"
+				p.ImageURL = &struct {
+					URL string `json:"url"`
+				}{URL: img}
+				parts = append(parts, p)
+			}
+			om.Content = parts
 		}
 		for _, tc := range m.ToolCalls {
 			var out oaiToolCall

@@ -26,6 +26,10 @@ type Provider struct {
 	APIKey      string `json:"api_key"`      // often unused for local servers
 	Model       string `json:"model"`        // default model for this provider
 	Default     bool   `json:"default"`      // exactly one should be default
+	// Vision marks this provider's model as able to understand images
+	// (screenshots, pictures). There is no reliable API to detect this, so it
+	// is set manually. An agent's config may override it (agents.AgentConfig.Vision).
+	Vision bool `json:"vision"`
 }
 
 // LLM builds an llm.Provider for this configuration.
@@ -137,6 +141,23 @@ func (s *Store) GetLLM(name string) (llm.Provider, error) {
 		}
 	}
 	return p.LLM(), nil
+}
+
+// VisionCapable reports whether the named provider ("" = default) is marked
+// as supporting images. It implements agent.VisionLookup. Unknown names and
+// an empty store report false.
+func (s *Store) VisionCapable(name string) bool {
+	var p *Provider
+	if name == "" {
+		p = s.Default()
+	} else {
+		var err error
+		p, err = s.Get(name)
+		if err != nil {
+			return false
+		}
+	}
+	return p != nil && p.Vision
 }
 
 // Upsert creates or updates a provider. If p.Default is set, all other

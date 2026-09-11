@@ -5,11 +5,11 @@ this lists what's still needed to make the project fully functional).
 
 ## 1. Functional gaps — things that claim to work but don't fully
 
-- **Agents cannot read knowledge-base document content.**
-  `search_docs` returns titles only (`internal/store/store.go:403`, `internal/tools/memory.go:168`),
-  and the system prompt advertises content that no tool delivers (`internal/agent/agent.go:92`).
-  Add a `get_doc`/`read_doc` tool (or return content snippets from `search_docs`) so uploaded
-  documents are actually usable by agents.
+- ~~**Agents cannot read knowledge-base document content.**~~ **DONE**: `search_docs`
+  now returns `id — title` lines and a new agent-scoped `read_doc` tool returns the full
+  content (`tools.NewReadDoc` → `store.GetKnowledgeDocForAgent`, which filters by the
+  calling agent so one agent can never read another's docs by guessing IDs). System prompt
+  updated to tell agents to search then read.
 
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
@@ -122,11 +122,13 @@ this lists what's still needed to make the project fully functional).
 
 ## 4. API / UI hardening gaps
 
-- **Skill delete & knowledge delete endpoints** (and UI buttons): Skills tab and Memory page are
-  read-only today (no DELETE for skills/knowledge).
-- **Skill enable/disable per agent**: `buildSystemPrompt` calls `skills.Prompt(sks, nil)` with a
-  hardcoded nil enabled-list (`internal/agent/agent.go:83`); there is no `agent_skills` table.
-  Add the table + UI checkboxes per agent and pass the enabled list through.
+- **Knowledge delete endpoint + UI button**: the Memory page is read-only today
+  (no DELETE for knowledge entries). (Skill delete is done: `DELETE /api/skills/{key}`.)
+- ~~**Skill enable/disable per agent**~~ **DONE**: skills now live in a global library
+  (`data/skills/`, upload via `POST /api/skills/upload`) and are enabled per agent via
+  `config.json` `enabled_skills` (`PUT/DELETE /api/agents/{k}/skills/{skill}`, Agents →
+  Skills tab checkboxes). Legacy per-agent `skills/` dirs are migrated + kept enabled on
+  first startup.
 - **Agent-scoped session listing**: `GET /api/sessions` returns everything; filter by agent.
 - **Observation creation in the UI**: `POST /api/agents/{k}/observations` exists; the Memory
   page has no control that calls it.
@@ -147,10 +149,15 @@ this lists what's still needed to make the project fully functional).
 
 ## 6. Housekeeping
 
+- **Vision flag is per-provider, not per-model**: a provider marked `vision` assumes its
+  model sees images. If you switch that provider's model to a non-vision one, untick the
+  box or override per agent (Config → Vision). There is no reliable API to auto-detect
+  vision support, so it stays manual.
 - *Where things live (answers for on-boarding):*
   - Agent definitions + context files: `data/agents/<key>/*.md` (`AgentsDir`)
-  - Per-agent LLM config: `data/agents/<key>/config.json`
-  - Per-agent skills: `data/agents/<key>/skills/<skill>/SKILL.md`
+  - Per-agent LLM config + enabled skills: `data/agents/<key>/config.json`
+  - Global skills library (upload once, enable per agent): `data/skills/<skill>/SKILL.md`
+  - Legacy per-agent skills (auto-migrated into the library): `data/agents/<key>/skills/`
   - Per-agent workspace jail: `data/agents/<key>/workspace/` (currently unused — see §1)
   - Provider configs: `data/providers.json`
   - Messages / knowledge / observations / knowledge-base docs: `data/agenticgo.db` (SQLite)

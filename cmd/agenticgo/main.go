@@ -19,6 +19,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/providers"
 	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/server"
+	"github.com/dkr290/agenticgo/internal/skills"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
 )
@@ -55,6 +56,14 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 	defer st.Close()
+
+	// Global skills library: skills are uploaded once here and enabled per
+	// agent (config.json enabled_skills) — never inherited implicitly.
+	skillsLib, err := agentReg.SkillsLibraryDir()
+	if err != nil {
+		log.Fatalf("skills library: %v", err)
+	}
+	migrateLegacySkills(agentReg, skillsLib)
 
 	// LLM provider (OpenAI-compatible: Ollama / LM Studio / vLLM / OpenAI).
 	provider := llm.NewOpenAI(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
@@ -101,4 +110,74 @@ func mustRegister(reg *tools.Registry, make func() (tools.Tool, error)) {
 		log.Fatalf("tool init: %v", err)
 	}
 	reg.Register(t)
+}
+
+// migrateLegacySkills carries skills from the old per-agent skills/ dirs into
+// the global library and records them as enabled for that agent (once), so
+// existing installs keep working after the move to a shared library. Skills
+// are then enabled per agent only; nothing is inherited implicitly anymore.
+// The migration marker is config.json enabled_skills: agents that already have
+// an explicit list are skipped.
+func migrateLegacySkills(agentReg *agents.Registry, lib string) {
+	list, err := agentReg.List()
+	if err != nil {
+		log.Printf("legacy skills: list agents: %v", err)
+		return
+	}
+	for _, ag := range list {
+		// Skip agents that already have an explicit enabled_skills list.
+		if ag.Config.EnabledSkills != nil {
+			continue
+		}
+		sd, err := agentReg.SkillsDir(ag.Key)
+		if err != nil {
+			continue
+		}
+		sks, err := skills.Load(sd)
+		if err != nil || len(sks) == 0 {
+			continue
+		}
+		keys := make([]string, 0, len(sks))
+		for _, sk := range sks {
+			keys = append(keys, sk.Key)
+			// Copy the skill into the shared library if it isn't there yet.
+			dst := filepath.Join(lib, sk.Key)
+			if _, err := os.Stat(dst); os.IsNotExist(err) {
+				if err := copyDir(filepath.Join(sd, sk.Key), dst); err != nil {
+					log.Printf("legacy skills: copy %s/%s: %v", ag.Key, sk.Key, err)
+					continue
+				}
+			}
+		}
+		if _, err := agentReg.SetEnabledSkills(ag.Key, keys); err != nil {
+			log.Printf("legacy skills: enable for %s: %v", ag.Key, err)
+			continue
+		}
+		log.Printf("legacy skills: migrated %d skill(s) for agent %q into the library", len(keys), ag.Key)
+	}
+}
+
+// copyDir recursively copies a directory tree (regular files only).
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !info.Mode().IsRegular() {
+			return nil // skip symlinks etc.
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
 }

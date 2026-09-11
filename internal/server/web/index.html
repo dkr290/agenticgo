@@ -6,9 +6,9 @@
 <title>agenticgo</title>
 <style>
   :root {
-    --bg: #171210; --bg2: #0f0c0a; --panel: #201914; --panel2: #2a211a;
-    --border: #332a21; --text: #ece5dd; --muted: #9a8d80;
-    --accent: #ff6a00; --accent-dim: #b34c00; --tool: #c9a25e;
+    --bg: #101826; --bg2: #0b111d; --panel: #16202f; --panel2: #1e2b40;
+    --border: #263650; --text: #dde6f2; --muted: #8698b0;
+    --accent: #3d7bfd; --accent-dim: #2b5cc4; --tool: #5ea0c9;
     --ok: #3fb950; --danger: #e5534b;
   }
   * { box-sizing: border-box; }
@@ -25,6 +25,7 @@
   button.danger:hover { background: rgba(229,83,75,.12); }
   input, textarea, select { background: var(--bg2); border: 1px solid var(--border); color: var(--text);
     border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; width: 100%; }
+  input[type=checkbox], input[type=radio], input[type=file] { width: auto; }
   input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
   label { font-size: 12px; color: var(--muted); display: block; margin: 12px 0 4px; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
@@ -189,9 +190,12 @@
     </div>
     <div id="chat-wrap"><div id="chat"></div></div>
     <div id="composer">
+      <button class="ghost" id="attach" title="Attach an image" style="padding:7px 10px" disabled>📎</button>
+      <input type="file" id="attach-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
       <textarea id="input" rows="1" placeholder="Message the agent… (Enter to send)"></textarea>
       <button id="send">Send</button>
     </div>
+    <div id="attach-bar" style="display:none; padding:6px 28px; background:var(--bg); border-top:1px solid var(--border); font-size:12px"></div>
   </div>
 
   <!-- Agents list -->
@@ -215,7 +219,8 @@
     <div class="tabs">
       <button class="tab active" data-atab="files">Files</button>
       <button class="tab" data-atab="skills">Skills</button>
-      <button class="tab" data-atab="knowledge">Knowledge</button>
+      <button class="tab" data-atab="knowledge">Learnings</button>
+      <button class="tab" data-atab="images">Images</button>
       <button class="tab" data-atab="config">Config</button>
     </div>
     <div id="atab-files">
@@ -233,6 +238,18 @@
     </div>
     <div id="atab-skills" style="display:none" class="page-body"></div>
     <div id="atab-knowledge" style="display:none" class="page-body"></div>
+    <div id="atab-images" style="display:none" class="page-body">
+      <div id="img-novision" class="empty" style="display:none">The selected provider's model does not support images. Enable "Vision" on the provider or this agent's Config to use reference images.</div>
+      <div id="img-wrap">
+        <div class="toolbar">
+          <input type="file" id="img-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
+          <button id="img-upload">⬆ Upload Image</button>
+          <button class="ghost" id="img-refresh">Refresh</button>
+        </div>
+        <div id="img-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px"></div>
+        <div class="empty" id="img-empty" style="display:none">No images yet. Upload screenshots or pictures the agent can look at (vision models only).</div>
+      </div>
+    </div>
     <div id="atab-config" style="display:none" class="page-body">
       <div class="card pform">
         <h3 style="margin-top:0">LLM settings</h3>
@@ -245,6 +262,13 @@
           <div><label>Temperature (0.0–2.0)</label><input id="cf-temp" type="number" step="0.1" min="0" max="2" placeholder="provider default"></div>
           <div><label>Max Tokens</label><input id="cf-maxtok" type="number" step="1" min="1" placeholder="provider default"></div>
         </div>
+        <label>Vision (images)</label>
+        <select id="cf-vision">
+          <option value="">Inherit from provider</option>
+          <option value="true">Force on — model supports images</option>
+          <option value="false">Force off — no images</option>
+        </select>
+        <div style="color:var(--muted); font-size:11.5px; margin-top:4px">Override the provider's vision flag when this agent pins a different model. Controls whether the Images tab and chat attach are enabled.</div>
         <div class="toolbar" style="margin-top:16px; margin-bottom:0">
           <button id="cf-save">Save</button>
           <button class="ghost" id="cf-reset">Clear all (use defaults)</button>
@@ -254,21 +278,21 @@
     </div>
   </div>
 
-  <!-- Skills -->
-  <div class="page" id="page-skills">
-    <div class="page-head"><h1>Skills</h1><div class="sub">Skills are folders with a SKILL.md under an agent's skills/ directory, injected into its system prompt.</div></div>
-    <div class="page-body">
-      <div class="toolbar">
-        <input id="skill-search" placeholder="Search skills…" style="max-width:280px">
-        <div class="spacer"></div>
-        <button id="skills-upload">⬆ Upload</button>
-        <button class="ghost" id="skills-refresh">Refresh</button>
-      </div>
-      <table class="list"><thead><tr><th>Name</th><th>Description</th><th>Agent</th><th>Files</th></tr></thead>
-      <tbody id="skills-tbody"></tbody></table>
-      <div class="empty" id="skills-empty" style="display:none">No skills yet. Upload a ZIP or create <code>data/agents/&lt;agent&gt;/skills/&lt;name&gt;/SKILL.md</code>.</div>
-    </div>
-  </div>
+   <!-- Skills -->
+   <div class="page" id="page-skills">
+     <div class="page-head"><h1>Skills</h1><div class="sub">The shared skills library (<code>data/skills/</code>). Upload once here, then enable per agent on Agents → Skills — nothing is inherited automatically.</div></div>
+     <div class="page-body">
+       <div class="toolbar">
+         <input id="skill-search" placeholder="Search skills…" style="max-width:280px">
+         <div class="spacer"></div>
+         <button id="skills-upload">⬆ Upload</button>
+         <button class="ghost" id="skills-refresh">Refresh</button>
+       </div>
+       <table class="list"><thead><tr><th>Name</th><th>Description</th><th>Files</th><th></th></tr></thead>
+       <tbody id="skills-tbody"></tbody></table>
+       <div class="empty" id="skills-empty" style="display:none">The library is empty. Upload a ZIP or create <code>data/skills/&lt;name&gt;/SKILL.md</code>.</div>
+     </div>
+   </div>
 
   <!-- Built-in tools -->
   <div class="page" id="page-tools">
@@ -353,6 +377,7 @@
         </div>
         <label>Base URL *</label><input id="pf-baseurl" placeholder="http://localhost:11434/v1">
         <label>API Key</label><input id="pf-apikey" placeholder="(often unused for local servers)">
+        <div class="checkrow"><input type="checkbox" id="pf-vision"><label for="pf-vision" style="margin:0">Model supports images (vision / multimodal)</label></div>
         <div class="checkrow"><input type="checkbox" id="pf-default"><label for="pf-default" style="margin:0">Make default provider</label></div>
         <div class="toolbar" style="margin-top:16px; margin-bottom:0">
           <button id="pf-save">Save</button>
@@ -445,13 +470,17 @@
   function send(){
     const text = $('input').value.trim();
     const agent = $('chat-agent').value;
-    if (!text || !agent || !ws || ws.readyState !== WebSocket.OPEN || busy) return;
-    addMsg('user', text); $('input').value=''; setBusy(true); currentAssistant = null;
+    if ((!text && !pendingImages.length) || !agent || !ws || ws.readyState !== WebSocket.OPEN || busy) return;
+    addMsg('user', text + (pendingImages.length ? '  📷[' + pendingImages.join(', ') + ']' : ''));
+    $('input').value=''; setBusy(true); currentAssistant = null;
     ws.send(JSON.stringify({ agent, session: $('chat-session').value || 'default',
-      message: text, provider: $('chat-provider').value }));
+      message: text, provider: $('chat-provider').value, images: pendingImages.slice() }));
+    pendingImages = []; renderAttachBar();
   }
   $('send').addEventListener('click', send);
   $('input').addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+  $('chat-agent').addEventListener('change', refreshAttach);
+  $('chat-provider').addEventListener('change', refreshAttach);
   $('chat-clear').addEventListener('click', () => { $('chat').innerHTML=''; currentAssistant=null; });
   $('chat-evolve').addEventListener('click', () => {
     const agent = $('chat-agent').value; if (!agent) return;
@@ -490,8 +519,48 @@
         sel.appendChild(o);
       });
       sel.value = prev;
+      refreshAttach();
     }).catch(()=>{});
   }
+
+  // ---------- chat image attach (vision) ----------
+  // Attached image names for the next message.
+  let pendingImages = [];
+
+  // refreshAttach enables/disables the attach button based on whether the
+  // currently selected agent+provider is vision-capable (blocked up front).
+  function refreshAttach(){
+    const agent = $('chat-agent').value, provider = $('chat-provider').value;
+    const btn = $('attach');
+    if (!agent) { btn.disabled = true; btn.title = 'Pick an agent first'; return; }
+    api('/api/agents/' + encodeURIComponent(agent) + '/vision?provider=' + encodeURIComponent(provider || ''))
+      .then(v => {
+        const vision = !!(v && v.vision);
+        btn.disabled = !vision;
+        btn.title = vision ? 'Attach an image' : 'This provider/model has no vision — enable "Vision" on the provider or agent config';
+        if (!vision && pendingImages.length) { pendingImages = []; renderAttachBar(); }
+      }).catch(() => { btn.disabled = true; });
+  }
+  function renderAttachBar(){
+    const bar = $('attach-bar');
+    if (!pendingImages.length) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+    bar.style.display = '';
+    bar.innerHTML = 'Attached: ' + pendingImages.map((n,i) =>
+      '<span class="pill" style="margin-right:6px">' + esc(n) + ' <a href="#" data-rm="' + i + '" style="color:var(--danger)">×</a></span>').join('');
+    bar.querySelectorAll('[data-rm]').forEach(a => a.addEventListener('click', e => {
+      e.preventDefault(); pendingImages.splice(+a.dataset.rm, 1); renderAttachBar();
+    }));
+  }
+  $('attach').addEventListener('click', () => { if (!$('attach').disabled) $('attach-file').click(); });
+  $('attach-file').addEventListener('change', () => {
+    const f = $('attach-file').files[0]; const agent = $('chat-agent').value; if (!f || !agent) return;
+    const fd = new FormData(); fd.append('file', f);
+    toast('Uploading ' + f.name + '…');
+    fetch('/api/agents/' + encodeURIComponent(agent) + '/images', { method:'POST', body: fd })
+      .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+      .then(im => { pendingImages.push(im.name); renderAttachBar(); $('attach-file').value=''; })
+      .catch(e => toast('Attach failed: ' + e.message));
+  });
 
   // ---------- overview ----------
   function loadOverview(){
@@ -573,11 +642,54 @@
     $('atab-files').style.display = tab === 'files' ? '' : 'none';
     $('atab-skills').style.display = tab === 'skills' ? '' : 'none';
     $('atab-knowledge').style.display = tab === 'knowledge' ? '' : 'none';
+    $('atab-images').style.display = tab === 'images' ? '' : 'none';
     $('atab-config').style.display = tab === 'config' ? '' : 'none';
     if (tab === 'skills') renderAgentSkills();
     if (tab === 'knowledge') renderAgentKnowledge();
+    if (tab === 'images') renderAgentImages();
     if (tab === 'config') renderAgentConfig();
   }
+
+  // Render the Images tab, gating it on the agent's effective vision support.
+  function renderAgentImages(){
+    const c = (agentDetail && agentDetail.config) || {};
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/vision?provider=' + encodeURIComponent(c.provider || ''))
+      .then(v => {
+        const vision = !!(v && v.vision);
+        $('img-novision').style.display = vision ? 'none' : '';
+        $('img-wrap').style.display = vision ? '' : 'none';
+        if (vision) loadAgentImages();
+      }).catch(() => { $('img-novision').style.display = ''; $('img-wrap').style.display = 'none'; });
+  }
+  function loadAgentImages(){
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/images').then(list => {
+      const grid = $('img-grid'); grid.innerHTML = '';
+      $('img-empty').style.display = (list && list.length) ? 'none' : '';
+      (list||[]).forEach(im => {
+        const card = document.createElement('div'); card.className = 'card'; card.style.padding = '10px';
+        card.innerHTML = '<div style="font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="' + esc(im.name) + '">' + esc(im.name) + '</div>' +
+          '<div style="color:var(--muted); font-size:11px; margin:2px 0 8px">' + Math.round(im.size/1024) + ' KB</div>' +
+          '<button class="danger" style="padding:3px 10px; font-size:11px">Delete</button>';
+        card.querySelector('button').addEventListener('click', () => {
+          if (!confirm('Delete image "' + im.name + '"?')) return;
+          api('/api/agents/' + encodeURIComponent(detailAgent) + '/images/' + encodeURIComponent(im.name), { method:'DELETE' })
+            .then(loadAgentImages).catch(e => toast(e.message));
+        });
+        grid.appendChild(card);
+      });
+    }).catch(e => toast('Load images failed: ' + e.message));
+  }
+  $('img-refresh').addEventListener('click', loadAgentImages);
+  $('img-upload').addEventListener('click', () => $('img-file').click());
+  $('img-file').addEventListener('change', () => {
+    const f = $('img-file').files[0]; if (!f) return;
+    const fd = new FormData(); fd.append('file', f);
+    toast('Uploading ' + f.name + '…');
+    fetch('/api/agents/' + encodeURIComponent(detailAgent) + '/images', { method:'POST', body: fd })
+      .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+      .then(() => { toast('✓ Uploaded ' + f.name); $('img-file').value=''; loadAgentImages(); })
+      .catch(e => toast('Upload failed: ' + e.message));
+  });
 
   function renderFilesList(){
     const el = $('files-list'); el.innerHTML = '';
@@ -613,16 +725,30 @@
   function renderAgentSkills(){
     const el = $('atab-skills');
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/skills').then(list => {
-      el.innerHTML = '';
+      el.innerHTML = '<div style="color:var(--muted); font-size:12.5px; margin-bottom:12px">' +
+        'Skills live in the shared library (<code>data/skills/</code>). Enable them for this agent here — nothing is inherited automatically.</div>';
       if (!list || !list.length) {
-        el.innerHTML = '<div class="empty">No skills yet. Add <code>data/agents/' + esc(detailAgent) + '/skills/&lt;name&gt;/SKILL.md</code>.</div>';
+        el.innerHTML += '<div class="empty">The skills library is empty. Upload a ZIP on the <a href="#" onclick="showPage(\'skills\');return false">Skills page</a>.</div>';
         return;
       }
       list.forEach(sk => {
         const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
-        d.innerHTML = '<h3 style="margin:0 0 4px; font-size:14px">' + esc(sk.name) + ' <span class="pill">' + esc(sk.key) + '</span></h3>' +
-          (sk.description ? '<div style="color:var(--muted); font-size:12.5px; margin-bottom:8px">' + esc(sk.description) + '</div>' : '') +
-          (sk.body ? '<pre style="background:var(--bg2); padding:10px; border-radius:8px; font-size:12px; white-space:pre-wrap">' + esc(sk.body) + '</pre>' : '');
+        d.innerHTML =
+          '<div style="display:flex; align-items:flex-start; gap:10px">' +
+            '<input type="checkbox" id="skc-' + esc(sk.key) + '"' + (sk.enabled ? ' checked' : '') + ' style="width:auto; margin-top:2px; flex:none">' +
+            '<div style="flex:1; min-width:0">' +
+              '<label for="skc-' + esc(sk.key) + '" style="cursor:pointer; font-weight:600; font-size:14px; margin:0">' + esc(sk.name) + '</label> ' +
+              '<span class="pill">' + esc(sk.key) + '</span>' +
+              (sk.description ? '<div style="color:var(--muted); font-size:12.5px; margin-top:4px">' + esc(sk.description) + '</div>' : '') +
+            '</div>' +
+          '</div>';
+        d.querySelector('input').addEventListener('change', ev => {
+          const on = ev.target.checked;
+          api('/api/agents/' + encodeURIComponent(detailAgent) + '/skills/' + encodeURIComponent(sk.key),
+              { method: on ? 'PUT' : 'DELETE' })
+            .then(() => toast((on ? '✓ Enabled ' : '✓ Disabled ') + '"' + (sk.name || sk.key) + '" for ' + detailAgent))
+            .catch(e => { ev.target.checked = !on; toast('Failed: ' + e.message); });
+        });
         el.appendChild(d);
       });
     }).catch(() => { el.innerHTML = '<div class="empty">Failed to load skills.</div>'; });
@@ -630,11 +756,14 @@
 
   function renderAgentKnowledge(){
     const el = $('atab-knowledge');
+    // This tab shows self-evolution learnings (what the agent extracted from
+    // past sessions via Evolve / memory_search) — NOT the static knowledge-base
+    // documents, which live on the Knowledge Base page.
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/knowledge').then(list => {
-      if (!list || !list.length) { el.innerHTML = '<div class="empty">No accumulated knowledge yet. Use Evolve after a chat session.</div>'; return; }
+      if (!list || !list.length) { el.innerHTML = '<div class="empty">No learnings yet. Run Evolve after a chat session and the agent will extract reusable facts here.</div>'; return; }
       el.innerHTML = '<div class="card"><ul style="margin:0; padding-left:18px">' +
         list.map(k => '<li style="margin:6px 0; font-size:13px">' + esc(k) + '</li>').join('') + '</ul></div>';
-    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load knowledge.</div>'; });
+    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load learnings.</div>'; });
   }
 
   function renderAgentConfig(){
@@ -647,6 +776,7 @@
     $('cf-model').value = c.model || '';
     $('cf-temp').value = c.temperature != null ? c.temperature : '';
     $('cf-maxtok').value = c.max_tokens != null ? c.max_tokens : '';
+    $('cf-vision').value = c.vision == null ? '' : (c.vision ? 'true' : 'false');
     $('cf-saved').textContent = '';
   }
   $('cf-save').addEventListener('click', () => {
@@ -656,10 +786,12 @@
     const model = $('cf-model').value.trim();
     const temp = $('cf-temp').value;
     const maxtok = $('cf-maxtok').value;
+    const vision = $('cf-vision').value;
     if (prov) body.provider = prov;
     if (model) body.model = model;
     if (temp !== '') body.temperature = parseFloat(temp);
     if (maxtok !== '') body.max_tokens = parseInt(maxtok, 10);
+    if (vision !== '') body.vision = (vision === 'true');
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/config', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     }).then(a => {
@@ -674,7 +806,7 @@
       .catch(e => toast('Reset failed: ' + e.message));
   });
 
-  // ---------- skills page ----------
+  // ---------- skills page (global library) ----------
   function loadSkills(){
     api('/api/skills').then(list => {
       const tbody = $('skills-tbody'); tbody.innerHTML = '';
@@ -682,7 +814,14 @@
       (list||[]).forEach(sk => {
         const tr = document.createElement('tr');
         tr.innerHTML = '<td class="namecell">⚡ ' + esc(sk.key) + '</td><td>' + esc(sk.description || sk.name) + '</td>' +
-          '<td><span class="pill">' + esc(sk.agent) + '</span></td><td>' + (sk.files||[]).length + '</td>';
+          '<td>' + (sk.files||[]).length + '</td>' +
+          '<td style="text-align:right"><button class="danger" data-del="' + esc(sk.key) + '">Delete</button></td>';
+        tr.querySelector('[data-del]').addEventListener('click', () => {
+          if (!confirm('Delete skill "' + sk.key + '" from the library? It is disabled for all agents.')) return;
+          api('/api/skills/' + encodeURIComponent(sk.key), { method:'DELETE' })
+            .then(() => { toast('✓ Deleted skill "' + sk.key + '"'); loadSkills(); })
+            .catch(e => toast('Delete failed: ' + e.message));
+        });
         tbody.appendChild(tr);
       });
       $('skill-search').oninput = () => {
@@ -695,33 +834,30 @@
 
   // ---------- skill upload (ZIP) ----------
   $('skills-upload').addEventListener('click', () => {
-    api('/api/agents').then(list => {
-      const opts = (list||[]).map(a => '<option value="'+esc(a.key)+'">'+esc(a.name)+' ('+esc(a.key)+')</option>').join('');
-      openModal('<h2>Upload Skill</h2>' +
-        '<div style="color:var(--muted); font-size:12.5px; margin:4px 0 10px">ZIP containing a SKILL.md with front-matter (name, description). Max 25 MB.</div>' +
-        '<label>Install into agent</label><select id="su-agent">'+opts+'</select>' +
-        '<label>ZIP file</label>' +
-        '<div id="su-drop" style="border:2px dashed var(--border); border-radius:10px; padding:34px; text-align:center; color:var(--muted); cursor:pointer">Click or drag &amp; drop a .zip file</div>' +
-        '<input type="file" id="su-file" accept=".zip" style="display:none">' +
-        '<div class="row"><button class="ghost" id="su-cancel">Cancel</button><button id="su-go">Upload</button></div>');
-      const drop = $('su-drop'), fileIn = $('su-file'); let picked = null;
-      drop.addEventListener('click', () => fileIn.click());
-      drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
-      drop.addEventListener('dragleave', () => drop.style.borderColor = 'var(--border)');
-      drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor='var(--border)';
-        if (e.dataTransfer.files.length) { picked = e.dataTransfer.files[0]; drop.textContent = picked.name; } });
-      fileIn.addEventListener('change', () => { if (fileIn.files.length) { picked = fileIn.files[0]; drop.textContent = picked.name; } });
-      $('su-cancel').addEventListener('click', closeModal);
-      $('su-go').addEventListener('click', () => {
-        if (!picked) { toast('Pick a .zip file first'); return; }
-        const fd = new FormData(); fd.append('file', picked);
-        toast('Uploading…');
-        fetch('/api/agents/' + encodeURIComponent($('su-agent').value) + '/skills/upload', { method:'POST', body: fd })
-          .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
-          .then(sk => { closeModal(); toast('✓ Installed skill "' + (sk.name||sk.key) + '"'); loadSkills(); })
-          .catch(e => toast('Upload failed: ' + e.message));
-      });
-    }).catch(e => toast('Load agents failed: ' + e.message));
+    openModal('<h2>Upload Skill</h2>' +
+      '<div style="color:var(--muted); font-size:12.5px; margin:4px 0 10px">ZIP containing a SKILL.md with front-matter (name, description). Max 25 MB.<br>' +
+      'Uploads into the shared library (<code>data/skills/</code>); it is <b>not</b> enabled for any agent until you enable it on the agent\'s Skills tab.</div>' +
+      '<label>ZIP file</label>' +
+      '<div id="su-drop" style="border:2px dashed var(--border); border-radius:10px; padding:34px; text-align:center; color:var(--muted); cursor:pointer">Click or drag &amp; drop a .zip file</div>' +
+      '<input type="file" id="su-file" accept=".zip" style="display:none">' +
+      '<div class="row"><button class="ghost" id="su-cancel">Cancel</button><button id="su-go">Upload</button></div>');
+    const drop = $('su-drop'), fileIn = $('su-file'); let picked = null;
+    drop.addEventListener('click', () => fileIn.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
+    drop.addEventListener('dragleave', () => drop.style.borderColor = 'var(--border)');
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor='var(--border)';
+      if (e.dataTransfer.files.length) { picked = e.dataTransfer.files[0]; drop.textContent = picked.name; } });
+    fileIn.addEventListener('change', () => { if (fileIn.files.length) { picked = fileIn.files[0]; drop.textContent = picked.name; } });
+    $('su-cancel').addEventListener('click', closeModal);
+    $('su-go').addEventListener('click', () => {
+      if (!picked) { toast('Pick a .zip file first'); return; }
+      const fd = new FormData(); fd.append('file', picked);
+      toast('Uploading…');
+      fetch('/api/skills/upload', { method:'POST', body: fd })
+        .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+        .then(sk => { closeModal(); toast('✓ Installed skill "' + (sk.name||sk.key) + '" — enable it per agent on the Agents → Skills tab'); loadSkills(); })
+        .catch(e => toast('Upload failed: ' + e.message));
+    });
   });
 
   // ---------- tools page ----------
@@ -949,7 +1085,7 @@
         const tr = document.createElement('tr');
         tr.innerHTML = '<td class="namecell">' + esc(p.display_name || p.name) + (p.default ? ' <span class="pill accent">default</span>' : '') + '</td>' +
           '<td><span class="pill ok">' + esc(p.type) + '</span></td>' +
-          '<td><code>' + esc(p.base_url) + '</code></td><td><code>' + esc(p.model) + '</code></td>' +
+          '<td><code>' + esc(p.base_url) + '</code></td><td><code>' + esc(p.model) + '</code>' + (p.vision ? ' <span class="pill" title="Supports images">👁 vision</span>' : '') + '</td>' +
           '<td><button class="ghost" data-act="test">Test</button> <button class="ghost" data-act="edit">Edit</button></td>' +
           '<td><button class="danger" data-act="del">Delete</button></td>';
         tr.querySelector('[data-act=test]').addEventListener('click', () => {
@@ -972,21 +1108,27 @@
     $('pf-title').textContent = 'Edit provider';
     $('pf-display').value = p.display_name || ''; $('pf-name').value = p.name; $('pf-name').disabled = true;
     $('pf-model').value = p.model; $('pf-baseurl').value = p.base_url; $('pf-apikey').value = p.api_key || '';
-    $('pf-default').checked = !!p.default; $('pf-status').textContent = '';
+    $('pf-default').checked = !!p.default; $('pf-vision').checked = !!p.vision; $('pf-status').textContent = '';
     $('provider-form').style.display = '';
   }
+  // Heuristic: prefill the vision box from the model name (user can override).
+  function guessVision(model){
+    const m = (model||'').toLowerCase();
+    return /vision|llava|pixtral|gpt-4o|gpt-4-turbo|claude-3|gemini|qwen2-vl|qwen2.5vl|minicpm-v|moondream|bakllava/.test(m);
+  }
+  $('pf-model').addEventListener('input', () => { if (!editingProvider) $('pf-vision').checked = guessVision($('pf-model').value); });
   $('provider-new').addEventListener('click', () => {
     editingProvider = null;
     $('pf-title').textContent = 'New provider';
     ['pf-display','pf-name','pf-model','pf-baseurl','pf-apikey'].forEach(id => { $(id).value=''; $(id).disabled=false; });
-    $('pf-default').checked = false; $('pf-status').textContent = '';
+    $('pf-default').checked = false; $('pf-vision').checked = false; $('pf-status').textContent = '';
     $('provider-form').style.display = '';
   });
   $('pf-cancel').addEventListener('click', () => { $('provider-form').style.display = 'none'; });
   $('pf-save').addEventListener('click', () => {
     const body = { name: $('pf-name').value.trim(), display_name: $('pf-display').value.trim(),
       type: 'openai-compatible', base_url: $('pf-baseurl').value.trim(), api_key: $('pf-apikey').value,
-      model: $('pf-model').value.trim(), default: $('pf-default').checked };
+      model: $('pf-model').value.trim(), default: $('pf-default').checked, vision: $('pf-vision').checked };
     if (!body.name || !body.base_url || !body.model) { toast('Name, base URL and model are required'); return; }
     api('/api/providers', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
       .then(() => { $('provider-form').style.display = 'none'; loadProviders(); fillChatProviders(); toast('Provider saved'); })

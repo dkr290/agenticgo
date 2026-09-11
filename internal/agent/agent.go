@@ -41,6 +41,14 @@ type ProviderLookup interface {
 	GetLLM(name string) (llm.Provider, error)
 }
 
+// VisionLookup is an optional extension of ProviderLookup that also reports
+// whether the named provider's model supports images. Implemented by
+// internal/providers.Store.
+type VisionLookup interface {
+	// VisionCapable reports whether the provider ("" = default) is vision-capable.
+	VisionCapable(name string) bool
+}
+
 // Engine runs agent-scoped chat loops.
 type Engine struct {
 	cfg        *config.Config
@@ -77,22 +85,27 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 		b.WriteString("\n\n")
 	}
 
-	// Skills.
-	if sd, err := e.agents.SkillsDir(ag.Key); err == nil {
-		if sks, err := skills.Load(sd); err == nil && len(sks) > 0 {
-			if p := skills.Prompt(sks, nil); p != "" {
-				b.WriteString(p)
-				b.WriteString("\n\n")
+	// Skills: from the global library, but only those the agent has enabled.
+	// Skills are never inherited implicitly — an empty EnabledSkills means the
+	// agent gets no skills at all.
+	if len(ag.Config.EnabledSkills) > 0 {
+		if lib, err := e.agents.SkillsLibraryDir(); err == nil {
+			if sks, err := skills.Load(lib); err == nil && len(sks) > 0 {
+				if p := skills.Prompt(sks, ag.Config.EnabledSkills); p != "" {
+					b.WriteString(p)
+					b.WriteString("\n\n")
+				}
 			}
 		}
 	}
 
 	// Knowledge-base documents (uploaded reference material). List titles so the
-	// agent knows what's available; full content is fetched via search_docs.
+	// agent knows what's available; content is fetched via search_docs + read_doc.
 	if docs, err := e.store.ListKnowledgeDocs(ctx, ag.Key); err == nil && len(docs) > 0 {
 		b.WriteString("## Knowledge Base\n")
 		b.WriteString("Reference documents are available. Use the search_docs tool to find " +
-			"relevant content before answering on these topics:\n")
+			"relevant documents, then read_doc with the document id to read the content " +
+			"before answering on these topics:\n")
 		for _, d := range docs {
 			b.WriteString("- ")
 			b.WriteString(strings.TrimSpace(d.Title))
@@ -131,9 +144,11 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 
 // Run processes one user message for a given agent+session, streaming events
 // to emit. If providerName is non-empty and a provider lookup is configured,
-// that provider is used instead of the default. It returns the final
-// assistant reply. emit may be nil.
-func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, providerName string, emit func(Event)) (string, error) {
+// that provider is used instead of the default. images are base64 data-URLs
+// attached to this user message, included only when the effective provider is
+// vision-capable (otherwise they are dropped, so a non-vision model never
+// errors). It returns the final assistant reply. emit may be nil.
+func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, providerName string, images []string, emit func(Event)) (string, error) {
 	if emit == nil {
 		emit = func(Event) {}
 	}
@@ -148,6 +163,11 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	provider, err := e.resolveProvider(ag, providerName)
 	if err != nil {
 		return "", err
+	}
+
+	// Only forward images when the effective model can actually see them.
+	if !e.EffectiveVision(ag, providerName) {
+		images = nil
 	}
 
 	// Retention: prune stale observations so recurring agents don't accumulate
@@ -173,11 +193,16 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		Role:    llm.RoleSystem,
 		Content: e.buildSystemPrompt(ctx, ag),
 	})
-	for _, m := range history {
-		messages = append(messages, llm.Message{
+	for i, m := range history {
+		msg := llm.Message{
 			Role:    llm.Role(m.Role),
 			Content: m.Content,
-		})
+		}
+		// Attach images to the current user turn (the last message) only.
+		if i == len(history)-1 && len(images) > 0 && m.Role == string(llm.RoleUser) {
+			msg.Images = images
+		}
+		messages = append(messages, msg)
 	}
 
 	// Give this run access to the per-agent memory tools (search curated
@@ -186,6 +211,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		toolSpec(tools.NewMemorySearch(e.store, ag.Key)),
 		toolSpec(tools.NewRecordObservation(e.store, ag.Key)),
 		toolSpec(tools.NewSearchDocs(e.docSearcher(ag.Key))),
+		toolSpec(tools.NewReadDoc(e.docReader(ag.Key))),
 	)
 
 	for iter := 0; iter < e.cfg.MaxAgentIterations; iter++ {
@@ -284,7 +310,28 @@ func (e *Engine) resolveProvider(ag *agents.Agent, perRequest string) (llm.Provi
 	return p, nil
 }
 
+// EffectiveVision reports whether the agent may attach images, given an
+// optional per-request provider override. Precedence mirrors resolveProvider:
+// the agent's explicit Vision override wins; otherwise the resolved provider's
+// Vision flag. The env-built default provider (no lookup) reports false unless
+// the agent overrides it.
+func (e *Engine) EffectiveVision(ag *agents.Agent, perRequest string) bool {
+	if ag.Config.Vision != nil {
+		return *ag.Config.Vision
+	}
+	vl, ok := e.providers.(VisionLookup)
+	if !ok {
+		return false
+	}
+	name := perRequest
+	if name == "" && ag.Config.Provider != nil {
+		name = *ag.Config.Provider
+	}
+	return vl.VisionCapable(name)
+}
+
 // docSearcher adapts store.SearchDocs into a tools.DocSearcher for an agent.
+// Returns "id — title" lines so the agent can follow up with read_doc.
 func (e *Engine) docSearcher(agentKey string) tools.DocSearcher {
 	return func(ctx context.Context, query string, limit int) ([]string, error) {
 		docs, err := e.store.SearchDocs(ctx, agentKey, query, limit)
@@ -293,9 +340,21 @@ func (e *Engine) docSearcher(agentKey string) tools.DocSearcher {
 		}
 		out := make([]string, 0, len(docs))
 		for _, d := range docs {
-			out = append(out, d.Title)
+			out = append(out, fmt.Sprintf("%d — %s", d.ID, strings.TrimSpace(d.Title)))
 		}
 		return out, nil
+	}
+}
+
+// docReader adapts store.GetKnowledgeDocForAgent into a tools.DocReader for
+// an agent — scoped so one agent can never read another agent's documents.
+func (e *Engine) docReader(agentKey string) tools.DocReader {
+	return func(ctx context.Context, id int64) (string, string, error) {
+		d, err := e.store.GetKnowledgeDocForAgent(ctx, id, agentKey)
+		if err != nil {
+			return "", "", err
+		}
+		return d.Title, d.Content, nil
 	}
 }
 
@@ -309,6 +368,8 @@ func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.
 		return tools.NewRecordObservation(e.store, agentKey).Call(ctx, args)
 	case "search_docs":
 		return tools.NewSearchDocs(e.docSearcher(agentKey)).Call(ctx, args)
+	case "read_doc":
+		return tools.NewReadDoc(e.docReader(agentKey)).Call(ctx, args)
 	}
 	return e.tools.Call(ctx, name, args)
 }

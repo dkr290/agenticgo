@@ -121,7 +121,8 @@ func (t *recordObservationTool) Call(ctx context.Context, args json.RawMessage) 
 }
 
 // searchDocsTool searches the agent's knowledge-base documents (uploaded
-// reference material). Returns matching document titles.
+// reference material). Returns "id — title" lines so the agent can follow up
+// with read_doc to fetch the actual content.
 type searchDocsTool struct {
 	search DocSearcher
 }
@@ -133,8 +134,9 @@ func NewSearchDocs(search DocSearcher) Tool {
 
 func (t *searchDocsTool) Name() string { return "search_docs" }
 func (t *searchDocsTool) Description() string {
-	return "Search the knowledge base (documents uploaded for you) for relevant " +
-		"reference material by keyword. Returns matching document titles."
+	return "Search your knowledge base (documents uploaded for you) by keyword. " +
+		"Returns matching documents as 'id — title'. Call read_doc with a document's " +
+		"id to read its full content before relying on it."
 }
 func (t *searchDocsTool) Parameters() map[string]any {
 	return map[string]any{
@@ -166,11 +168,59 @@ func (t *searchDocsTool) Call(ctx context.Context, args json.RawMessage) (string
 		return "No documents matched.", nil
 	}
 	var b strings.Builder
-	b.WriteString("Matching knowledge-base documents:\n")
+	b.WriteString("Matching documents (use read_doc with the id to read content):\n")
 	for _, l := range lines {
 		b.WriteString("- ")
 		b.WriteString(l)
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String()), nil
+}
+
+// DocReader fetches one document's content by ID, scoped to the agent.
+// Implemented by the engine over store.GetKnowledgeDocForAgent.
+type DocReader func(ctx context.Context, id int64) (title, content string, err error)
+
+// readDocTool lets the agent read the full content of a knowledge-base
+// document it found via search_docs. Scoped to the agent: it cannot read
+// other agents' documents.
+type readDocTool struct {
+	read DocReader
+}
+
+// NewReadDoc creates the read_doc tool from a reader function.
+func NewReadDoc(read DocReader) Tool {
+	return &readDocTool{read: read}
+}
+
+func (t *readDocTool) Name() string { return "read_doc" }
+func (t *readDocTool) Description() string {
+	return "Read the full content of a knowledge-base document by its numeric id " +
+		"(from search_docs results). Always read a document before quoting or acting on it."
+}
+func (t *readDocTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id": map[string]any{"type": "integer", "description": "The document id from search_docs."},
+		},
+		"required": []string{"id"},
+	}
+}
+
+func (t *readDocTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	var in struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	if in.ID <= 0 {
+		return "", fmt.Errorf("id must be a positive number (from search_docs)")
+	}
+	title, content, err := t.read(ctx, in.ID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("# %s\n\n%s", title, strings.TrimSpace(content)), nil
 }
