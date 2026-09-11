@@ -216,7 +216,7 @@
     <div class="tabs">
       <button class="tab active" data-atab="files">Files</button>
       <button class="tab" data-atab="skills">Skills</button>
-      <button class="tab" data-atab="knowledge">Knowledge</button>
+      <button class="tab" data-atab="knowledge">Learnings</button>
       <button class="tab" data-atab="config">Config</button>
     </div>
     <div id="atab-files">
@@ -645,11 +645,14 @@
 
   function renderAgentKnowledge(){
     const el = $('atab-knowledge');
+    // This tab shows self-evolution learnings (what the agent extracted from
+    // past sessions via Evolve / memory_search) — NOT the static knowledge-base
+    // documents, which live on the Knowledge Base page.
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/knowledge').then(list => {
-      if (!list || !list.length) { el.innerHTML = '<div class="empty">No accumulated knowledge yet. Use Evolve after a chat session.</div>'; return; }
+      if (!list || !list.length) { el.innerHTML = '<div class="empty">No learnings yet. Run Evolve after a chat session and the agent will extract reusable facts here.</div>'; return; }
       el.innerHTML = '<div class="card"><ul style="margin:0; padding-left:18px">' +
         list.map(k => '<li style="margin:6px 0; font-size:13px">' + esc(k) + '</li>').join('') + '</ul></div>';
-    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load knowledge.</div>'; });
+    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load learnings.</div>'; });
   }
 
   function renderAgentConfig(){
