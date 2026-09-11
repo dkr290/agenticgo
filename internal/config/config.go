@@ -37,7 +37,8 @@ type Config struct {
 	// ExecAllowList is the set of command names the exec tool may run.
 	ExecAllowList []string
 
-	// ToolAllowList restricts which tools are exposed. Empty means all built-ins.
+	// ToolAllowList restricts which tools are exposed. Defaults to all built-ins;
+	// remove entries to disable tools.
 	ToolAllowList []string
 
 	// MaxAgentIterations bounds the tool-use loop to avoid runaway agents.
@@ -77,7 +78,8 @@ func Load() (*Config, error) {
 
 	cfg.ExecAllowList = splitList(getEnv("AGENTICGO_EXEC_ALLOWLIST",
 		"ls,cat,grep,find,echo,pwd,head,tail,wc,mkdir,touch,cp,mv,date"))
-	cfg.ToolAllowList = splitList(getEnv("AGENTICGO_TOOL_ALLOWLIST", ""))
+	cfg.ToolAllowList = splitList(getEnv("AGENTICGO_TOOL_ALLOWLIST",
+		"read_file,write_file,list_files,exec"))
 
 	cfg.MaxAgentIterations = getEnvInt("AGENTICGO_MAX_ITERATIONS", 12)
 	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
