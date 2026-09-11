@@ -17,17 +17,24 @@ The owner is building this to learn Go.
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
   a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens,
-  nil = inherit), a `skills/` dir, and a per-agent `workspace/` (tool jail). Files
-  that don't exist yet are still listed (empty) in the UI so they can be created.
-- **Skills**: a skill is a folder with `SKILL.md` (optional YAML-ish front-matter
-  with `name`/`description` + markdown instructions). Loaded per agent and injected
-  into the system prompt. Skills can be installed from the UI as a ZIP upload
+  nil = inherit, plus `enabled_skills`), and a per-agent `workspace/` (tool jail).
+  Files that don't exist yet are still listed (empty) in the UI so they can be created.
+- **Skills (shared library + per-agent enable)**: a skill is a folder with
+  `SKILL.md` (optional YAML-ish front-matter with `name`/`description` + markdown
+  instructions). Skills live in **one global library** (`data/skills/`,
+  `Registry.SkillsLibraryDir`) — uploaded once from the UI as a ZIP
   (`skills.InstallZip` validates the `SKILL.md`/`name`, derives a slug, and extracts
-  path-traversal-safe).
+  path-traversal-safe). They are **never inherited automatically**: each agent
+  enables the ones it wants via `config.json` `enabled_skills` (Agents → Skills tab
+  in the UI, or `PUT/DELETE /api/agents/{k}/skills/{skill}`); only enabled skills are
+  injected into that agent's system prompt. Legacy per-agent `skills/` dirs are
+  migrated into the library + enabled on first startup (`migrateLegacySkills`).
 - **Knowledge base**: per-agent reference documents (`knowledge_docs` table) uploaded
   from the UI. **Full-text indexed over content** (FTS5, `knowledge_docs_fts`) and
-  recalled via the `search_docs` tool — not bulk-injected. Titles are listed in the
-  system prompt so the agent knows to search.
+  recalled via tools — not bulk-injected: `search_docs` returns `id — title` matches,
+  `read_doc` fetches a document's content by id. Both are scoped to the calling agent
+  (`GetKnowledgeDocForAgent` filters by agent, so one agent cannot read another's docs).
+  Titles are listed in the system prompt so the agent knows to search.
 - **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
   Pages: Overview, Chat, Agents (per-agent Files/Skills/Knowledge/Config tabs), Skills,
   Built-in Tools, MCP Servers (scaffold), Cron (scaffold), Providers.
@@ -54,7 +61,7 @@ The owner is building this to learn Go.
     model. Recorded via the `record_observation` tool.
   Both memory tools are built per-run in `Engine.callTool` (scoped to the agent), not
   registered in the shared `tools.Registry`. The same per-run pattern is used for
-  `search_docs` (knowledge-base documents).
+  `search_docs` + `read_doc` (knowledge-base documents).
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
 - **Scaffolding**: `internal/scaffold` holds in-memory MCP-server and cron-job
@@ -92,12 +99,14 @@ data/
   agenticgo.db                 # SQLite (messages + knowledge, per-agent)
   providers.json               # named OpenAI-compatible provider configs
   workspace/                   # fallback tool jail
+  skills/                      # GLOBAL skills library (upload once; enabled per agent)
+    <skill>/SKILL.md
   agents/
     <key>/
       SOUL.md AGENTS.md IDENTITY.md
       USER.md USER_PREDEFINED.md CAPABILITIES.md HEARTBEAT.md
-      config.json                 # per-agent LLM settings (optional, nil = inherit)
-      skills/<skill>/SKILL.md
+      config.json                 # per-agent LLM settings + enabled_skills
+      skills/<skill>/SKILL.md     # legacy per-agent dir (migrated into data/skills)
       workspace/               # per-agent tool jail
 ```
 
@@ -119,8 +128,7 @@ data/
    manifests for Deployment + PVC (for the data dir) + Service (+ optional Ingress).
 
 Possible follow-ons the owner may ask for (not yet built): per-agent workspaces wired
-into the tool loop (tools currently use the global `WorkspaceDir`), skill enable/disable
-per agent.
+into the tool loop (tools currently use the global `WorkspaceDir`).
 
 ## Tech choices (keep these)
 

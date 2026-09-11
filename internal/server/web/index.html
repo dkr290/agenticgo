@@ -6,9 +6,9 @@
 <title>agenticgo</title>
 <style>
   :root {
-    --bg: #171210; --bg2: #0f0c0a; --panel: #201914; --panel2: #2a211a;
-    --border: #332a21; --text: #ece5dd; --muted: #9a8d80;
-    --accent: #ff6a00; --accent-dim: #b34c00; --tool: #c9a25e;
+    --bg: #101826; --bg2: #0b111d; --panel: #16202f; --panel2: #1e2b40;
+    --border: #263650; --text: #dde6f2; --muted: #8698b0;
+    --accent: #3d7bfd; --accent-dim: #2b5cc4; --tool: #5ea0c9;
     --ok: #3fb950; --danger: #e5534b;
   }
   * { box-sizing: border-box; }
@@ -25,6 +25,7 @@
   button.danger:hover { background: rgba(229,83,75,.12); }
   input, textarea, select { background: var(--bg2); border: 1px solid var(--border); color: var(--text);
     border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; width: 100%; }
+  input[type=checkbox], input[type=radio], input[type=file] { width: auto; }
   input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
   label { font-size: 12px; color: var(--muted); display: block; margin: 12px 0 4px; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
@@ -254,21 +255,21 @@
     </div>
   </div>
 
-  <!-- Skills -->
-  <div class="page" id="page-skills">
-    <div class="page-head"><h1>Skills</h1><div class="sub">Skills are folders with a SKILL.md under an agent's skills/ directory, injected into its system prompt.</div></div>
-    <div class="page-body">
-      <div class="toolbar">
-        <input id="skill-search" placeholder="Search skills…" style="max-width:280px">
-        <div class="spacer"></div>
-        <button id="skills-upload">⬆ Upload</button>
-        <button class="ghost" id="skills-refresh">Refresh</button>
-      </div>
-      <table class="list"><thead><tr><th>Name</th><th>Description</th><th>Agent</th><th>Files</th></tr></thead>
-      <tbody id="skills-tbody"></tbody></table>
-      <div class="empty" id="skills-empty" style="display:none">No skills yet. Upload a ZIP or create <code>data/agents/&lt;agent&gt;/skills/&lt;name&gt;/SKILL.md</code>.</div>
-    </div>
-  </div>
+   <!-- Skills -->
+   <div class="page" id="page-skills">
+     <div class="page-head"><h1>Skills</h1><div class="sub">The shared skills library (<code>data/skills/</code>). Upload once here, then enable per agent on Agents → Skills — nothing is inherited automatically.</div></div>
+     <div class="page-body">
+       <div class="toolbar">
+         <input id="skill-search" placeholder="Search skills…" style="max-width:280px">
+         <div class="spacer"></div>
+         <button id="skills-upload">⬆ Upload</button>
+         <button class="ghost" id="skills-refresh">Refresh</button>
+       </div>
+       <table class="list"><thead><tr><th>Name</th><th>Description</th><th>Files</th><th></th></tr></thead>
+       <tbody id="skills-tbody"></tbody></table>
+       <div class="empty" id="skills-empty" style="display:none">The library is empty. Upload a ZIP or create <code>data/skills/&lt;name&gt;/SKILL.md</code>.</div>
+     </div>
+   </div>
 
   <!-- Built-in tools -->
   <div class="page" id="page-tools">
@@ -613,16 +614,30 @@
   function renderAgentSkills(){
     const el = $('atab-skills');
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/skills').then(list => {
-      el.innerHTML = '';
+      el.innerHTML = '<div style="color:var(--muted); font-size:12.5px; margin-bottom:12px">' +
+        'Skills live in the shared library (<code>data/skills/</code>). Enable them for this agent here — nothing is inherited automatically.</div>';
       if (!list || !list.length) {
-        el.innerHTML = '<div class="empty">No skills yet. Add <code>data/agents/' + esc(detailAgent) + '/skills/&lt;name&gt;/SKILL.md</code>.</div>';
+        el.innerHTML += '<div class="empty">The skills library is empty. Upload a ZIP on the <a href="#" onclick="showPage(\'skills\');return false">Skills page</a>.</div>';
         return;
       }
       list.forEach(sk => {
         const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
-        d.innerHTML = '<h3 style="margin:0 0 4px; font-size:14px">' + esc(sk.name) + ' <span class="pill">' + esc(sk.key) + '</span></h3>' +
-          (sk.description ? '<div style="color:var(--muted); font-size:12.5px; margin-bottom:8px">' + esc(sk.description) + '</div>' : '') +
-          (sk.body ? '<pre style="background:var(--bg2); padding:10px; border-radius:8px; font-size:12px; white-space:pre-wrap">' + esc(sk.body) + '</pre>' : '');
+        d.innerHTML =
+          '<div style="display:flex; align-items:flex-start; gap:10px">' +
+            '<input type="checkbox" id="skc-' + esc(sk.key) + '"' + (sk.enabled ? ' checked' : '') + ' style="width:auto; margin-top:2px; flex:none">' +
+            '<div style="flex:1; min-width:0">' +
+              '<label for="skc-' + esc(sk.key) + '" style="cursor:pointer; font-weight:600; font-size:14px; margin:0">' + esc(sk.name) + '</label> ' +
+              '<span class="pill">' + esc(sk.key) + '</span>' +
+              (sk.description ? '<div style="color:var(--muted); font-size:12.5px; margin-top:4px">' + esc(sk.description) + '</div>' : '') +
+            '</div>' +
+          '</div>';
+        d.querySelector('input').addEventListener('change', ev => {
+          const on = ev.target.checked;
+          api('/api/agents/' + encodeURIComponent(detailAgent) + '/skills/' + encodeURIComponent(sk.key),
+              { method: on ? 'PUT' : 'DELETE' })
+            .then(() => toast((on ? '✓ Enabled ' : '✓ Disabled ') + '"' + (sk.name || sk.key) + '" for ' + detailAgent))
+            .catch(e => { ev.target.checked = !on; toast('Failed: ' + e.message); });
+        });
         el.appendChild(d);
       });
     }).catch(() => { el.innerHTML = '<div class="empty">Failed to load skills.</div>'; });
@@ -674,7 +689,7 @@
       .catch(e => toast('Reset failed: ' + e.message));
   });
 
-  // ---------- skills page ----------
+  // ---------- skills page (global library) ----------
   function loadSkills(){
     api('/api/skills').then(list => {
       const tbody = $('skills-tbody'); tbody.innerHTML = '';
@@ -682,7 +697,14 @@
       (list||[]).forEach(sk => {
         const tr = document.createElement('tr');
         tr.innerHTML = '<td class="namecell">⚡ ' + esc(sk.key) + '</td><td>' + esc(sk.description || sk.name) + '</td>' +
-          '<td><span class="pill">' + esc(sk.agent) + '</span></td><td>' + (sk.files||[]).length + '</td>';
+          '<td>' + (sk.files||[]).length + '</td>' +
+          '<td style="text-align:right"><button class="danger" data-del="' + esc(sk.key) + '">Delete</button></td>';
+        tr.querySelector('[data-del]').addEventListener('click', () => {
+          if (!confirm('Delete skill "' + sk.key + '" from the library? It is disabled for all agents.')) return;
+          api('/api/skills/' + encodeURIComponent(sk.key), { method:'DELETE' })
+            .then(() => { toast('✓ Deleted skill "' + sk.key + '"'); loadSkills(); })
+            .catch(e => toast('Delete failed: ' + e.message));
+        });
         tbody.appendChild(tr);
       });
       $('skill-search').oninput = () => {
@@ -695,33 +717,30 @@
 
   // ---------- skill upload (ZIP) ----------
   $('skills-upload').addEventListener('click', () => {
-    api('/api/agents').then(list => {
-      const opts = (list||[]).map(a => '<option value="'+esc(a.key)+'">'+esc(a.name)+' ('+esc(a.key)+')</option>').join('');
-      openModal('<h2>Upload Skill</h2>' +
-        '<div style="color:var(--muted); font-size:12.5px; margin:4px 0 10px">ZIP containing a SKILL.md with front-matter (name, description). Max 25 MB.</div>' +
-        '<label>Install into agent</label><select id="su-agent">'+opts+'</select>' +
-        '<label>ZIP file</label>' +
-        '<div id="su-drop" style="border:2px dashed var(--border); border-radius:10px; padding:34px; text-align:center; color:var(--muted); cursor:pointer">Click or drag &amp; drop a .zip file</div>' +
-        '<input type="file" id="su-file" accept=".zip" style="display:none">' +
-        '<div class="row"><button class="ghost" id="su-cancel">Cancel</button><button id="su-go">Upload</button></div>');
-      const drop = $('su-drop'), fileIn = $('su-file'); let picked = null;
-      drop.addEventListener('click', () => fileIn.click());
-      drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
-      drop.addEventListener('dragleave', () => drop.style.borderColor = 'var(--border)');
-      drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor='var(--border)';
-        if (e.dataTransfer.files.length) { picked = e.dataTransfer.files[0]; drop.textContent = picked.name; } });
-      fileIn.addEventListener('change', () => { if (fileIn.files.length) { picked = fileIn.files[0]; drop.textContent = picked.name; } });
-      $('su-cancel').addEventListener('click', closeModal);
-      $('su-go').addEventListener('click', () => {
-        if (!picked) { toast('Pick a .zip file first'); return; }
-        const fd = new FormData(); fd.append('file', picked);
-        toast('Uploading…');
-        fetch('/api/agents/' + encodeURIComponent($('su-agent').value) + '/skills/upload', { method:'POST', body: fd })
-          .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
-          .then(sk => { closeModal(); toast('✓ Installed skill "' + (sk.name||sk.key) + '"'); loadSkills(); })
-          .catch(e => toast('Upload failed: ' + e.message));
-      });
-    }).catch(e => toast('Load agents failed: ' + e.message));
+    openModal('<h2>Upload Skill</h2>' +
+      '<div style="color:var(--muted); font-size:12.5px; margin:4px 0 10px">ZIP containing a SKILL.md with front-matter (name, description). Max 25 MB.<br>' +
+      'Uploads into the shared library (<code>data/skills/</code>); it is <b>not</b> enabled for any agent until you enable it on the agent\'s Skills tab.</div>' +
+      '<label>ZIP file</label>' +
+      '<div id="su-drop" style="border:2px dashed var(--border); border-radius:10px; padding:34px; text-align:center; color:var(--muted); cursor:pointer">Click or drag &amp; drop a .zip file</div>' +
+      '<input type="file" id="su-file" accept=".zip" style="display:none">' +
+      '<div class="row"><button class="ghost" id="su-cancel">Cancel</button><button id="su-go">Upload</button></div>');
+    const drop = $('su-drop'), fileIn = $('su-file'); let picked = null;
+    drop.addEventListener('click', () => fileIn.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
+    drop.addEventListener('dragleave', () => drop.style.borderColor = 'var(--border)');
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor='var(--border)';
+      if (e.dataTransfer.files.length) { picked = e.dataTransfer.files[0]; drop.textContent = picked.name; } });
+    fileIn.addEventListener('change', () => { if (fileIn.files.length) { picked = fileIn.files[0]; drop.textContent = picked.name; } });
+    $('su-cancel').addEventListener('click', closeModal);
+    $('su-go').addEventListener('click', () => {
+      if (!picked) { toast('Pick a .zip file first'); return; }
+      const fd = new FormData(); fd.append('file', picked);
+      toast('Uploading…');
+      fetch('/api/skills/upload', { method:'POST', body: fd })
+        .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+        .then(sk => { closeModal(); toast('✓ Installed skill "' + (sk.name||sk.key) + '" — enable it per agent on the Agents → Skills tab'); loadSkills(); })
+        .catch(e => toast('Upload failed: ' + e.message));
+    });
   });
 
   // ---------- tools page ----------

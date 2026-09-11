@@ -64,7 +64,9 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Put("/agents/{key}/config", s.handleUpdateAgentConfig)
 		r.Get("/agents/{key}/files/{name}", s.handleReadFile)
 		r.Put("/agents/{key}/files/{name}", s.handleWriteFile)
-		r.Get("/agents/{key}/skills", s.handleListSkills)
+		r.Get("/agents/{key}/skills", s.handleListAgentSkills)
+		r.Put("/agents/{key}/skills/{skill}", s.handleEnableSkill)
+		r.Delete("/agents/{key}/skills/{skill}", s.handleDisableSkill)
 		r.Get("/agents/{key}/knowledge", s.handleListKnowledge)
 		r.Get("/agents/{key}/knowledge/search", s.handleSearchKnowledge)
 		r.Get("/agents/{key}/observations", s.handleListObservations)
@@ -74,8 +76,11 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Get("/agents/{key}/docs/{id}", s.handleGetDoc)
 		r.Delete("/agents/{key}/docs/{id}", s.handleDeleteDoc)
 		r.Get("/agents/{key}/docs/search/query", s.handleSearchDocs)
-		r.Get("/skills", s.handleListAllSkills)
-		r.Post("/agents/{key}/skills/upload", s.handleUploadSkill)
+
+		// Global skills library: upload once, enable per agent.
+		r.Get("/skills", s.handleListLibrarySkills)
+		r.Post("/skills/upload", s.handleUploadSkill)
+		r.Delete("/skills/{key}", s.handleDeleteSkill)
 		r.Post("/evolve", s.handleEvolve)
 
 		// Conversations.
@@ -240,47 +245,164 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 
 // --- Skills ---
 
-func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
+// skillWithState is a library skill plus whether the agent in context has it
+// enabled.
+type skillWithState struct {
+	skills.Skill
+	Enabled bool `json:"enabled"`
+}
+
+// handleListAgentSkills lists the global library skills annotated with the
+// agent's enabled state (Agents → Skills tab).
+func (s *Server) handleListAgentSkills(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	sd, err := s.agents.SkillsDir(key)
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	lib, err := s.loadLibrary()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	enabled := map[string]bool{}
+	for _, k := range ag.Config.EnabledSkills {
+		enabled[k] = true
+	}
+	out := make([]skillWithState, 0, len(lib))
+	for _, sk := range lib {
+		out = append(out, skillWithState{Skill: sk, Enabled: enabled[sk.Key]})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleEnableSkill enables a library skill for an agent.
+func (s *Server) handleEnableSkill(w http.ResponseWriter, r *http.Request) {
+	s.setSkillEnabled(w, r, true)
+}
+
+// handleDisableSkill disables a library skill for an agent.
+func (s *Server) handleDisableSkill(w http.ResponseWriter, r *http.Request) {
+	s.setSkillEnabled(w, r, false)
+}
+
+func (s *Server) setSkillEnabled(w http.ResponseWriter, r *http.Request, on bool) {
+	key := chi.URLParam(r, "key")
+	skillKey := chi.URLParam(r, "skill")
+
+	// The skill must exist in the library.
+	lib, err := s.loadLibrary()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	found := false
+	for _, sk := range lib {
+		if sk.Key == skillKey {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, fmt.Errorf("skill %q not found in library", skillKey))
+		return
+	}
+
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	set := map[string]bool{}
+	for _, k := range ag.Config.EnabledSkills {
+		set[k] = true
+	}
+	if on {
+		set[skillKey] = true
+	} else {
+		delete(set, skillKey)
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if _, err := s.agents.SetEnabledSkills(key, keys); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "skill": skillKey, "enabled": on})
+}
+
+// handleListLibrarySkills lists every skill in the global library (Skills
+// page). No agent inheritance — enabling happens per agent.
+func (s *Server) handleListLibrarySkills(w http.ResponseWriter, _ *http.Request) {
+	lib, err := s.loadLibrary()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if lib == nil {
+		lib = []skills.Skill{}
+	}
+	writeJSON(w, http.StatusOK, lib)
+}
+
+// handleUploadSkill installs a skill from an uploaded ZIP (multipart field
+// "file") into the global skills library. It is not enabled for any agent
+// automatically — enable it per agent afterwards.
+func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(25 << 20); err != nil { // 25 MB
+		writeError(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing file: %w", err))
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 25<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("read upload: %w", err))
+		return
+	}
+	lib, err := s.agents.SkillsLibraryDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sk, err := skills.InstallZip(lib, data)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	sks, err := skills.Load(sd)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if sks == nil {
-		sks = []skills.Skill{}
-	}
-	writeJSON(w, http.StatusOK, sks)
+	writeJSON(w, http.StatusCreated, sk)
 }
 
-// handleListAllSkills lists skills across all agents (for the Skills page).
-func (s *Server) handleListAllSkills(w http.ResponseWriter, _ *http.Request) {
-	agentList, err := s.agents.List()
+// handleDeleteSkill removes a skill from the global library.
+func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	lib, err := s.agents.SkillsLibraryDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	out := []skills.Skill{}
-	for _, ag := range agentList {
-		sd, err := s.agents.SkillsDir(ag.Key)
-		if err != nil {
-			continue
-		}
-		sks, err := skills.Load(sd)
-		if err != nil {
-			continue
-		}
-		for _, sk := range sks {
-			sk.Agent = ag.Key
-			out = append(out, sk)
-		}
+	if err := skills.Delete(lib, key); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]string{"deleted": key})
+}
+
+// loadLibrary loads all skills from the global library dir.
+func (s *Server) loadLibrary() ([]skills.Skill, error) {
+	dir, err := s.agents.SkillsLibraryDir()
+	if err != nil {
+		return nil, err
+	}
+	return skills.Load(dir)
 }
 
 // --- Evolve ---
@@ -462,40 +584,6 @@ func (s *Server) handleAddDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "title": body.Title})
-}
-
-// --- Skill upload ---
-
-// handleUploadSkill installs a skill from an uploaded ZIP (multipart field
-// "file") into the agent's skills directory.
-func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	if err := r.ParseMultipartForm(25 << 20); err != nil { // 25 MB
-		writeError(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
-		return
-	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("missing file: %w", err))
-		return
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, 25<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("read upload: %w", err))
-		return
-	}
-	sd, err := s.agents.SkillsDir(key)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	sk, err := skills.InstallZip(sd, data)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, sk)
 }
 
 // --- Sessions ---

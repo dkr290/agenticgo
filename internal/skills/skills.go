@@ -26,12 +26,11 @@ import (
 
 // Skill is a single loaded skill.
 type Skill struct {
-	Key         string   `json:"key"`             // directory name
-	Name        string   `json:"name"`            // from front-matter, defaults to key
-	Description string   `json:"description"`     // from front-matter
-	Body        string   `json:"body"`            // instructions (markdown after front-matter)
-	Files       []string `json:"files"`           // supporting files in the skill dir
-	Agent       string   `json:"agent,omitempty"` // owning agent key (set when listing across agents)
+	Key         string   `json:"key"`         // directory name
+	Name        string   `json:"name"`        // from front-matter, defaults to key
+	Description string   `json:"description"` // from front-matter
+	Body        string   `json:"body"`        // instructions (markdown after front-matter)
+	Files       []string `json:"files"`       // supporting files in the skill dir
 }
 
 // Load reads all skills under a skills directory.
@@ -277,6 +276,21 @@ func frontMatterValue(content, key string) string {
 		}
 	}
 	return ""
+}
+
+// Delete removes a skill directory from the library, validating the key.
+func Delete(skillsDir, key string) error {
+	if !slugRE.MatchString(key) {
+		return fmt.Errorf("invalid skill key %q", key)
+	}
+	dir := filepath.Join(skillsDir, key)
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return fmt.Errorf("skill %q not found", key)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("delete skill %q: %w", key, err)
+	}
+	return nil
 }
 
 // Prompt renders skills as a system-prompt section. If enabled is empty, all

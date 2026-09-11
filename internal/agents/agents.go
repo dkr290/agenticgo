@@ -40,6 +40,10 @@ type AgentConfig struct {
 	Model       *string  `json:"model,omitempty"`       // model override (empty = provider default)
 	Temperature *float64 `json:"temperature,omitempty"` // sampling temperature (0.0-2.0)
 	MaxTokens   *int     `json:"max_tokens,omitempty"`  // max output tokens
+	// EnabledSkills lists keys from the global skills library that are active
+	// for this agent. nil/empty = none: skills are never inherited implicitly,
+	// they must be enabled per agent (UI Skills tab or this field).
+	EnabledSkills []string `json:"enabled_skills,omitempty"`
 }
 
 // configFileName is where a per-agent LLM config is stored on disk.
@@ -114,7 +118,10 @@ func (r *Registry) WorkspaceDir(key string) (string, error) {
 	return ws, nil
 }
 
-// SkillsDir returns (creating if needed) the per-agent skills dir.
+// SkillsDir returns (creating if needed) the legacy per-agent skills dir.
+// Deprecated: skills live in the shared library (SkillsLibraryDir) and are
+// enabled per agent via AgentConfig.EnabledSkills. This stays so old
+// on-disk layouts keep working and can be migrated.
 func (r *Registry) SkillsDir(key string) (string, error) {
 	dir, err := r.dirFor(key)
 	if err != nil {
@@ -125,6 +132,35 @@ func (r *Registry) SkillsDir(key string) (string, error) {
 		return "", fmt.Errorf("create agent skills dir: %w", err)
 	}
 	return sd, nil
+}
+
+// SkillsLibraryDir returns (creating if needed) the global skills library:
+// one shared directory where skills are uploaded once and from which agents
+// enable them individually. Lives at <agentsRoot>/../skills (data/skills).
+func (r *Registry) SkillsLibraryDir() (string, error) {
+	lib := filepath.Join(filepath.Dir(r.root), "skills")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		return "", fmt.Errorf("create skills library dir: %w", err)
+	}
+	return lib, nil
+}
+
+// SetEnabledSkills replaces the agent's enabled-skills list in its
+// config.json and returns the refreshed agent.
+func (r *Registry) SetEnabledSkills(key string, skillKeys []string) (*Agent, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Exists(key) {
+		return nil, fmt.Errorf("agent %q not found", key)
+	}
+	cfg := r.loadConfig(dir)
+	cfg.EnabledSkills = skillKeys
+	if err := r.saveConfig(dir, cfg); err != nil {
+		return nil, err
+	}
+	return r.Get(key)
 }
 
 // List returns all agents present on disk, sorted by key.
