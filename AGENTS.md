@@ -28,8 +28,7 @@ The owner is building this to learn Go.
   path-traversal-safe). They are **never inherited automatically**: each agent
   enables the ones it wants via `config.json` `enabled_skills` (Agents → Skills tab
   in the UI, or `PUT/DELETE /api/agents/{k}/skills/{skill}`); only enabled skills are
-  injected into that agent's system prompt. Legacy per-agent `skills/` dirs are
-  migrated into the library + enabled on first startup (`migrateLegacySkills`).
+  injected into that agent's system prompt.
 - **Knowledge base**: per-agent reference documents (`knowledge_docs` table) uploaded
   from the UI. **Full-text indexed over content** (FTS5, `knowledge_docs_fts`) and
   recalled via tools — not bulk-injected: `search_docs` returns `id — title` matches,
@@ -116,7 +115,6 @@ data/
       SOUL.md AGENTS.md IDENTITY.md
       USER.md USER_PREDEFINED.md CAPABILITIES.md HEARTBEAT.md
       config.json                 # per-agent LLM settings + enabled_skills
-      skills/<skill>/SKILL.md     # legacy per-agent dir (migrated into data/skills)
       images/                  # reference images for vision models (Images tab)
       workspace/               # per-agent tool jail
 ```
