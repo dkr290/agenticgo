@@ -25,11 +25,11 @@ type Tool interface {
 // Registry holds the available tools and enforces the allow-list.
 type Registry struct {
 	tools   map[string]Tool
-	allowed map[string]bool // empty => all allowed
+	allowed map[string]bool // empty => all allowed (config supplies a default)
 }
 
-// NewRegistry builds a registry. If allowList is empty, every registered
-// tool is exposed; otherwise only the named tools are.
+// NewRegistry builds a registry. Only the named tools are exposed. An empty
+// allowList exposes everything registered (config always passes a default).
 func NewRegistry(allowList []string) *Registry {
 	allowed := map[string]bool{}
 	for _, n := range allowList {
