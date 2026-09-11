@@ -16,8 +16,9 @@ The owner is building this to learn Go.
 - **Multiple agents**: each agent is a directory under `AgentsDir` with context
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
-  a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens,
-  nil = inherit, plus `enabled_skills`), and a per-agent `workspace/` (tool jail).
+  a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens/vision,
+  nil = inherit, plus `enabled_skills`), a per-agent `images/` dir (reference
+  pictures/screenshots for vision models), and a per-agent `workspace/` (tool jail).
   Files that don't exist yet are still listed (empty) in the UI so they can be created.
 - **Skills (shared library + per-agent enable)**: a skill is a folder with
   `SKILL.md` (optional YAML-ish front-matter with `name`/`description` + markdown
@@ -47,6 +48,15 @@ The owner is building this to learn Go.
   (per-request override > agent config > default);
   `agent.ProviderLookup` (`providers.Store.GetLLM`) resolves names.
 - **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`.
+- **Vision / images**: a provider can be flagged `vision` (its model understands
+  images — set manually, there's no reliable API to detect it). An agent's
+  `config.json` `vision` tri-state overrides it (nil = inherit) for when the agent
+  pins a different model. When the effective provider is vision-capable, the UI
+  enables the per-agent **Images** tab (`data/agents/<key>/images/`) and the chat
+  attach button; attached images go over the WS as names, are read into base64
+  data-URLs, and sent as OpenAI `image_url` content parts. Non-vision models have
+  attach blocked up front and any images dropped in `Engine.Run`, so they never
+  error. Resolution: `Engine.EffectiveVision` (agent override > provider flag).
 - **Security**: filesystem tools jailed to a workspace; `exec` runs only allow-listed
   commands; tools gated by a global allow-list. Context-file names are validated
   against an allow-list (`validContextFile`) to prevent path traversal; agent keys are
@@ -107,6 +117,7 @@ data/
       USER.md USER_PREDEFINED.md CAPABILITIES.md HEARTBEAT.md
       config.json                 # per-agent LLM settings + enabled_skills
       skills/<skill>/SKILL.md     # legacy per-agent dir (migrated into data/skills)
+      images/                  # reference images for vision models (Images tab)
       workspace/               # per-agent tool jail
 ```
 

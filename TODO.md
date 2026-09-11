@@ -149,6 +149,10 @@ this lists what's still needed to make the project fully functional).
 
 ## 6. Housekeeping
 
+- **Vision flag is per-provider, not per-model**: a provider marked `vision` assumes its
+  model sees images. If you switch that provider's model to a non-vision one, untick the
+  box or override per agent (Config → Vision). There is no reliable API to auto-detect
+  vision support, so it stays manual.
 - *Where things live (answers for on-boarding):*
   - Agent definitions + context files: `data/agents/<key>/*.md` (`AgentsDir`)
   - Per-agent LLM config + enabled skills: `data/agents/<key>/config.json`

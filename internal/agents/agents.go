@@ -40,6 +40,10 @@ type AgentConfig struct {
 	Model       *string  `json:"model,omitempty"`       // model override (empty = provider default)
 	Temperature *float64 `json:"temperature,omitempty"` // sampling temperature (0.0-2.0)
 	MaxTokens   *int     `json:"max_tokens,omitempty"`  // max output tokens
+	// Vision overrides the provider's vision capability for this agent — set it
+	// when the agent pins a different Model than the provider's default and that
+	// model does/doesn't support images. nil = inherit the provider's Vision flag.
+	Vision *bool `json:"vision,omitempty"`
 	// EnabledSkills lists keys from the global skills library that are active
 	// for this agent. nil/empty = none: skills are never inherited implicitly,
 	// they must be enabled per agent (UI Skills tab or this field).
@@ -145,6 +149,20 @@ func (r *Registry) SkillsLibraryDir() (string, error) {
 	return lib, nil
 }
 
+// ImagesDir returns (creating if needed) the per-agent images dir, where
+// reference images (screenshots, pictures) are stored for vision-capable runs.
+func (r *Registry) ImagesDir(key string) (string, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return "", err
+	}
+	id := filepath.Join(dir, "images")
+	if err := os.MkdirAll(id, 0o755); err != nil {
+		return "", fmt.Errorf("create agent images dir: %w", err)
+	}
+	return id, nil
+}
+
 // SetEnabledSkills replaces the agent's enabled-skills list in its
 // config.json and returns the refreshed agent.
 func (r *Registry) SetEnabledSkills(key string, skillKeys []string) (*Agent, error) {
@@ -161,6 +179,130 @@ func (r *Registry) SetEnabledSkills(key string, skillKeys []string) (*Agent, err
 		return nil, err
 	}
 	return r.Get(key)
+}
+
+// --- Agent images (reference pictures/screenshots for vision models) ---
+
+// Image is one stored reference image for an agent.
+type Image struct {
+	Name string `json:"name"` // base filename, e.g. "diagram.png"
+	Size int64  `json:"size"` // bytes
+}
+
+// maxImageBytes caps a single uploaded image (kept small; it is base64'd into
+// the LLM request, so large images blow up token/cost).
+const maxImageBytes = 8 << 20 // 8 MB
+
+// imageExt allow-lists image types we accept and can mime-type for the API.
+var imageExt = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+}
+
+// ListImages returns the agent's stored images, sorted by name.
+func (r *Registry) ListImages(key string) ([]Image, error) {
+	dir, err := r.ImagesDir(key)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read images dir: %w", err)
+	}
+	out := []Image{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(e.Name()))
+		if _, ok := imageExt[ext]; !ok {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, Image{Name: e.Name(), Size: info.Size()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// SaveImage validates and writes an image into the agent's images dir. The
+// filename is sanitized to a safe base name.
+func (r *Registry) SaveImage(key, filename string, data []byte) (*Image, error) {
+	if !r.Exists(key) {
+		return nil, fmt.Errorf("agent %q not found", key)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty image")
+	}
+	if len(data) > maxImageBytes {
+		return nil, fmt.Errorf("image too large (max %d MB)", maxImageBytes>>20)
+	}
+	base := filepath.Base(strings.TrimSpace(filename))
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return nil, fmt.Errorf("invalid filename")
+	}
+	ext := strings.ToLower(filepath.Ext(base))
+	if _, ok := imageExt[ext]; !ok {
+		return nil, fmt.Errorf("unsupported image type %q (use png, jpg, gif, webp)", ext)
+	}
+	dir, err := r.ImagesDir(key)
+	if err != nil {
+		return nil, err
+	}
+	dst := filepath.Join(dir, base)
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		return nil, fmt.Errorf("write image: %w", err)
+	}
+	return &Image{Name: base, Size: int64(len(data))}, nil
+}
+
+// DeleteImage removes an image from the agent's images dir.
+func (r *Registry) DeleteImage(key, name string) error {
+	base := filepath.Base(strings.TrimSpace(name))
+	if base == "" || base == "." {
+		return fmt.Errorf("invalid image name")
+	}
+	if _, ok := imageExt[strings.ToLower(filepath.Ext(base))]; !ok {
+		return fmt.Errorf("invalid image name %q", name)
+	}
+	dir, err := r.ImagesDir(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, base)); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("image %q not found", name)
+		}
+		return fmt.Errorf("delete image: %w", err)
+	}
+	return nil
+}
+
+// ReadImage returns the raw bytes and MIME type of one of the agent's images.
+func (r *Registry) ReadImage(key, name string) (data []byte, mime string, err error) {
+	base := filepath.Base(strings.TrimSpace(name))
+	mime, ok := imageExt[strings.ToLower(filepath.Ext(base))]
+	if !ok || base == "" || base == "." {
+		return nil, "", fmt.Errorf("invalid image name %q", name)
+	}
+	dir, err := r.ImagesDir(key)
+	if err != nil {
+		return nil, "", err
+	}
+	data, err = os.ReadFile(filepath.Join(dir, base))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", fmt.Errorf("image %q not found", name)
+		}
+		return nil, "", fmt.Errorf("read image: %w", err)
+	}
+	return data, mime, nil
 }
 
 // List returns all agents present on disk, sorted by key.

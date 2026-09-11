@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,6 +68,10 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Get("/agents/{key}/skills", s.handleListAgentSkills)
 		r.Put("/agents/{key}/skills/{skill}", s.handleEnableSkill)
 		r.Delete("/agents/{key}/skills/{skill}", s.handleDisableSkill)
+		r.Get("/agents/{key}/images", s.handleListImages)
+		r.Post("/agents/{key}/images", s.handleUploadImage)
+		r.Delete("/agents/{key}/images/{name}", s.handleDeleteImage)
+		r.Get("/agents/{key}/vision", s.handleVisionStatus)
 		r.Get("/agents/{key}/knowledge", s.handleListKnowledge)
 		r.Get("/agents/{key}/knowledge/search", s.handleSearchKnowledge)
 		r.Get("/agents/{key}/observations", s.handleListObservations)
@@ -405,6 +410,79 @@ func (s *Server) loadLibrary() ([]skills.Skill, error) {
 	return skills.Load(dir)
 }
 
+// --- Agent images (vision) ---
+
+// handleListImages lists an agent's stored reference images.
+func (s *Server) handleListImages(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	imgs, err := s.agents.ListImages(key)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, imgs)
+}
+
+// handleUploadImage stores one image (multipart field "file") for the agent.
+func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	if err := r.ParseMultipartForm(10 << 20); err != nil { // 10 MB form
+		writeError(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
+		return
+	}
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing file: %w", err))
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 9<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("read upload: %w", err))
+		return
+	}
+	img, err := s.agents.SaveImage(key, hdr.Filename, data)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, img)
+}
+
+// handleDeleteImage removes one of the agent's images.
+func (s *Server) handleDeleteImage(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	name := chi.URLParam(r, "name")
+	if err := s.agents.DeleteImage(key, name); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
+}
+
+// handleVisionStatus reports whether the agent may attach images, given the
+// optional ?provider= override the chat UI passes for the selected provider.
+func (s *Server) handleVisionStatus(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	provider := r.URL.Query().Get("provider")
+	writeJSON(w, http.StatusOK, map[string]bool{"vision": s.engine.EffectiveVision(ag, provider)})
+}
+
+// imageDataURL reads one of the agent's images and returns it as a base64
+// data-URL suitable for an OpenAI image_url content part.
+func (s *Server) imageDataURL(agentKey, name string) (string, error) {
+	data, mime, err := s.agents.ReadImage(agentKey, name)
+	if err != nil {
+		return "", err
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
 // --- Evolve ---
 
 func (s *Server) handleEvolve(w http.ResponseWriter, r *http.Request) {
@@ -737,6 +815,9 @@ type wsMessage struct {
 	Session  string `json:"session"`
 	Message  string `json:"message"`
 	Provider string `json:"provider"` // optional provider override
+	// Images are names of the agent's stored reference images to attach to this
+	// turn (only sent when the effective model is vision-capable).
+	Images []string `json:"images,omitempty"`
 }
 
 type wsEvent struct {
@@ -791,7 +872,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			_ = s.sendEvent(ctx, conn, out)
 		}
 
-		_, runErr := s.engine.Run(ctx, msg.Agent, msg.Session, msg.Message, msg.Provider, emit)
+		// Resolve any referenced agent images into base64 data-URLs. Unknown or
+		// unreadable images are skipped (the engine drops them entirely if the
+		// model isn't vision-capable).
+		var images []string
+		for _, name := range msg.Images {
+			if dataURL, err := s.imageDataURL(msg.Agent, name); err == nil {
+				images = append(images, dataURL)
+			}
+		}
+
+		_, runErr := s.engine.Run(ctx, msg.Agent, msg.Session, msg.Message, msg.Provider, images, emit)
 		cancel()
 		if runErr != nil {
 			s.sendEvent(r.Context(), conn, wsEvent{Kind: "error", Error: runErr.Error()})

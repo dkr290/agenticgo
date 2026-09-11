@@ -28,6 +28,10 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"` // for RoleTool results
 	Name       string     `json:"name,omitempty"`         // tool name for RoleTool results
+	// Images are base64 data-URLs ("data:image/png;base64,...") attached to a
+	// user message for vision-capable models. Ignored unless the model supports
+	// images; providers serialize them as image_url content parts.
+	Images []string `json:"images,omitempty"`
 }
 
 // ToolSpec describes a tool to the model (OpenAI-compatible schema).

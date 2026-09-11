@@ -41,6 +41,14 @@ type ProviderLookup interface {
 	GetLLM(name string) (llm.Provider, error)
 }
 
+// VisionLookup is an optional extension of ProviderLookup that also reports
+// whether the named provider's model supports images. Implemented by
+// internal/providers.Store.
+type VisionLookup interface {
+	// VisionCapable reports whether the provider ("" = default) is vision-capable.
+	VisionCapable(name string) bool
+}
+
 // Engine runs agent-scoped chat loops.
 type Engine struct {
 	cfg        *config.Config
@@ -136,9 +144,11 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 
 // Run processes one user message for a given agent+session, streaming events
 // to emit. If providerName is non-empty and a provider lookup is configured,
-// that provider is used instead of the default. It returns the final
-// assistant reply. emit may be nil.
-func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, providerName string, emit func(Event)) (string, error) {
+// that provider is used instead of the default. images are base64 data-URLs
+// attached to this user message, included only when the effective provider is
+// vision-capable (otherwise they are dropped, so a non-vision model never
+// errors). It returns the final assistant reply. emit may be nil.
+func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, providerName string, images []string, emit func(Event)) (string, error) {
 	if emit == nil {
 		emit = func(Event) {}
 	}
@@ -153,6 +163,11 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	provider, err := e.resolveProvider(ag, providerName)
 	if err != nil {
 		return "", err
+	}
+
+	// Only forward images when the effective model can actually see them.
+	if !e.EffectiveVision(ag, providerName) {
+		images = nil
 	}
 
 	// Retention: prune stale observations so recurring agents don't accumulate
@@ -178,11 +193,16 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		Role:    llm.RoleSystem,
 		Content: e.buildSystemPrompt(ctx, ag),
 	})
-	for _, m := range history {
-		messages = append(messages, llm.Message{
+	for i, m := range history {
+		msg := llm.Message{
 			Role:    llm.Role(m.Role),
 			Content: m.Content,
-		})
+		}
+		// Attach images to the current user turn (the last message) only.
+		if i == len(history)-1 && len(images) > 0 && m.Role == string(llm.RoleUser) {
+			msg.Images = images
+		}
+		messages = append(messages, msg)
 	}
 
 	// Give this run access to the per-agent memory tools (search curated
@@ -288,6 +308,26 @@ func (e *Engine) resolveProvider(ag *agents.Agent, perRequest string) (llm.Provi
 		return nil, err
 	}
 	return p, nil
+}
+
+// EffectiveVision reports whether the agent may attach images, given an
+// optional per-request provider override. Precedence mirrors resolveProvider:
+// the agent's explicit Vision override wins; otherwise the resolved provider's
+// Vision flag. The env-built default provider (no lookup) reports false unless
+// the agent overrides it.
+func (e *Engine) EffectiveVision(ag *agents.Agent, perRequest string) bool {
+	if ag.Config.Vision != nil {
+		return *ag.Config.Vision
+	}
+	vl, ok := e.providers.(VisionLookup)
+	if !ok {
+		return false
+	}
+	name := perRequest
+	if name == "" && ag.Config.Provider != nil {
+		name = *ag.Config.Provider
+	}
+	return vl.VisionCapable(name)
 }
 
 // docSearcher adapts store.SearchDocs into a tools.DocSearcher for an agent.
