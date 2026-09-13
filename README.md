@@ -86,11 +86,6 @@ description: Search and synthesize web sources
 - Cite what you find.
 ```
 
-## What it deliberately leaves out (vs GoClaw)
-
-Multi-tenancy / RBAC · messaging channels · agent teams & delegation · PostgreSQL +
-pgvector knowledge graph · 5-layer security stack · 20+ provider adapters. Those are the
-hard 80% — this project keeps the useful 20%.
 
 ## Roadmap
 
