@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/dkr290/agenticgo/internal/logger"
 )
 
 // OpenAIProvider talks to any OpenAI-compatible /chat/completions endpoint
@@ -20,6 +22,7 @@ type OpenAIProvider struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+	log     logger.Logger
 }
 
 // NewOpenAI creates a provider for an OpenAI-compatible endpoint.
@@ -31,7 +34,17 @@ func NewOpenAI(baseURL, apiKey, model string) *OpenAIProvider {
 		client: &http.Client{
 			Timeout: 0, // no overall timeout; streaming can be long
 		},
+		log: logger.Nop(),
 	}
+}
+
+// SetLogger wires verbose debug logging into the provider (nil keeps a no-op
+// logger). The API key is never logged — only a redacted tail.
+func (p *OpenAIProvider) SetLogger(l logger.Logger) {
+	if l == nil {
+		l = logger.Nop()
+	}
+	p.log = l
 }
 
 // Name returns the provider name.
@@ -40,9 +53,21 @@ func (p *OpenAIProvider) Name() string { return "openai-compatible" }
 // Model returns the configured model identifier.
 func (p *OpenAIProvider) Model() string { return p.model }
 
+// redactKey masks the API key for logs, showing only the last 4 characters.
+func redactKey(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	if len(s) <= 4 {
+		return "****"
+	}
+	return "****" + s[len(s)-4:]
+}
+
 // ListModels queries the provider's /models endpoint and returns model IDs.
 // It works against any OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenAI).
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
+	p.log.Debug("llm: GET /models", "base_url", p.baseURL, "api_key", redactKey(p.apiKey))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -52,11 +77,13 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
+		p.log.Debug("llm: GET /models failed", "error", err)
 		return nil, fmt.Errorf("list models: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		p.log.Debug("llm: GET /models non-2xx", "status", resp.Status, "body", strings.TrimSpace(string(slurp)))
 		return nil, fmt.Errorf("list models: %s: %s", resp.Status, strings.TrimSpace(string(slurp)))
 	}
 	var out struct {
@@ -65,6 +92,7 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		p.log.Debug("llm: GET /models decode failed", "error", err)
 		return nil, fmt.Errorf("decode models: %w", err)
 	}
 	models := make([]string, 0, len(out.Data))
@@ -73,6 +101,7 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 			models = append(models, m.ID)
 		}
 	}
+	p.log.Debug("llm: GET /models ok", "status", resp.Status, "models", len(models))
 	return models, nil
 }
 
@@ -175,6 +204,9 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 		MaxTokens:   req.MaxTokens,
 		Stream:      req.Stream,
 	}
+	p.log.Debug("llm: chat completion",
+		"base_url", p.baseURL, "model", model, "stream", req.Stream,
+		"messages", len(msgs), "tools", len(req.Tools))
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return Message{}, fmt.Errorf("marshal request: %w", err)
@@ -194,14 +226,17 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, on
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		p.log.Debug("llm: request failed", "model", model, "error", err)
 		return Message{}, fmt.Errorf("llm request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		p.log.Debug("llm: non-2xx response", "model", model, "status", resp.Status, "body", strings.TrimSpace(string(slurp)))
 		return Message{}, fmt.Errorf("llm returned %s: %s", resp.Status, strings.TrimSpace(string(slurp)))
 	}
+	p.log.Debug("llm: response ok", "model", model, "status", resp.Status)
 
 	if !req.Stream {
 		return parseNonStream(resp.Body, onDelta)

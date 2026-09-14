@@ -15,7 +15,19 @@ import (
 	"time"
 
 	"github.com/dkr290/agenticgo/internal/llm"
+	"github.com/dkr290/agenticgo/internal/logger"
 )
+
+// redact masks a secret for logs, showing only the last 4 characters.
+func redact(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 4 {
+		return "****"
+	}
+	return "****" + s[len(s)-4:]
+}
 
 // Provider is a named OpenAI-compatible endpoint configuration.
 type Provider struct {
@@ -42,6 +54,7 @@ type Store struct {
 	path string
 	mu   sync.RWMutex
 	list []*Provider
+	log  logger.Logger
 }
 
 // Open loads (or initializes) the provider store at path.
@@ -49,10 +62,11 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create providers dir: %w", err)
 	}
-	s := &Store{path: path}
+	s := &Store{path: path, log: logger.Nop()}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			s.log.Debug("providers store: no file yet, starting empty", "path", path)
 			return s, nil // empty store; caller seeds a default
 		}
 		return nil, fmt.Errorf("read providers: %w", err)
@@ -60,7 +74,18 @@ func Open(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &s.list); err != nil {
 		return nil, fmt.Errorf("parse providers: %w", err)
 	}
+	s.log.Debug("providers store: loaded", "path", path, "count", len(s.list))
 	return s, nil
+}
+
+// SetLogger wires verbose logging into the store (nil keeps a no-op logger).
+func (s *Store) SetLogger(l logger.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l == nil {
+		l = logger.Nop()
+	}
+	s.log = l
 }
 
 // SeedDefault adds a default provider from the env config if the store is empty.
@@ -68,8 +93,10 @@ func (s *Store) SeedDefault(baseURL, apiKey, model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.list) > 0 {
+		s.log.Debug("providers: store not empty, skipping env seed", "count", len(s.list))
 		return
 	}
+	s.log.Debug("providers: seeding default from env", "base_url", baseURL, "model", model)
 	s.list = append(s.list, &Provider{
 		Name:        "default",
 		DisplayName: "Default (env)",
@@ -134,12 +161,15 @@ func (s *Store) GetLLM(name string) (llm.Provider, error) {
 		if p == nil {
 			return nil, fmt.Errorf("no providers configured")
 		}
+		name = p.Name
 	} else {
 		p, err = s.Get(name)
 		if err != nil {
+			s.log.Debug("providers: GetLLM lookup failed", "name", name, "error", err)
 			return nil, err
 		}
 	}
+	s.log.Debug("providers: resolved LLM", "name", name, "base_url", p.BaseURL, "model", p.Model)
 	return p.LLM(), nil
 }
 
@@ -181,6 +211,9 @@ func (s *Store) Upsert(p Provider) error {
 			if p.Default {
 				s.clearDefaultLocked(p.Name)
 			}
+			s.log.Debug("providers: updated",
+				"name", p.Name, "base_url", p.BaseURL, "model", p.Model,
+				"vision", p.Vision, "default", p.Default, "api_key", redact(p.APIKey))
 			return s.saveLocked()
 		}
 	}
@@ -189,6 +222,9 @@ func (s *Store) Upsert(p Provider) error {
 	if p.Default {
 		s.clearDefaultLocked(p.Name)
 	}
+	s.log.Debug("providers: created",
+		"name", p.Name, "base_url", p.BaseURL, "model", p.Model,
+		"vision", p.Vision, "default", p.Default, "api_key", redact(p.APIKey))
 	return s.saveLocked()
 }
 
@@ -199,26 +235,54 @@ func (s *Store) Delete(name string) error {
 	for i, p := range s.list {
 		if p.Name == name {
 			s.list = append(s.list[:i], s.list[i+1:]...)
+			s.log.Debug("providers: deleted", "name", name, "remaining", len(s.list))
 			return s.saveLocked()
 		}
 	}
+	s.log.Debug("providers: delete failed, not found", "name", name)
 	return fmt.Errorf("provider %q not found", name)
 }
 
-// TestConnection checks the provider by listing its models; it returns the
+// TestConnection checks a provider by listing its models; it returns the
 // discovered model IDs on success.
-func (s *Store) TestConnection(ctx context.Context, name string) ([]string, error) {
-	p, err := s.Get(name)
-	if err != nil {
-		return nil, err
+//
+// If adhoc is non-nil it is tested as-is — this lets the UI test the
+// provider form's current (possibly unsaved) values. Otherwise the saved
+// provider named `name` is looked up and tested.
+func (s *Store) TestConnection(ctx context.Context, name string, adhoc *Provider) ([]string, error) {
+	var p Provider
+	switch {
+	case adhoc != nil:
+		p = *adhoc
+		s.log.Debug("providers: testing ad-hoc (unsaved) config",
+			"name", p.Name, "base_url", p.BaseURL, "model", p.Model, "api_key", redact(p.APIKey))
+	default:
+		saved, err := s.Get(name)
+		if err != nil {
+			s.log.Debug("providers: test failed, not found", "name", name)
+			return nil, err
+		}
+		p = *saved
+		s.log.Debug("providers: testing saved provider",
+			"name", p.Name, "base_url", p.BaseURL, "model", p.Model, "api_key", redact(p.APIKey))
+	}
+	if p.BaseURL == "" {
+		return nil, fmt.Errorf("provider base_url is required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	op, ok := p.LLM().(*llm.OpenAIProvider)
 	if !ok {
-		return nil, fmt.Errorf("provider %q is not OpenAI-compatible", name)
+		return nil, fmt.Errorf("provider %q is not OpenAI-compatible", p.Name)
 	}
-	return op.ListModels(ctx)
+	op.SetLogger(s.log)
+	models, err := op.ListModels(ctx)
+	if err != nil {
+		s.log.Debug("providers: test connection failed", "name", p.Name, "error", err)
+		return nil, err
+	}
+	s.log.Debug("providers: test connection ok", "name", p.Name, "models", len(models))
+	return models, nil
 }
 
 func (s *Store) clearDefaultLocked(except string) {

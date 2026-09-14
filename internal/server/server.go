@@ -98,6 +98,7 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		// Providers (OpenAI-compatible endpoints).
 		r.Get("/providers", s.handleListProviders)
 		r.Post("/providers", s.handleUpsertProvider)
+		r.Post("/providers/test", s.handleTestProvider) // ad-hoc test of a posted config
 		r.Get("/providers/{name}", s.handleGetProvider)
 		r.Delete("/providers/{name}", s.handleDeleteProvider)
 		r.Post("/providers/{name}/test", s.handleTestProvider)
@@ -740,8 +741,22 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// handleTestProvider tests a provider connection. On POST /api/providers/test
+// (or with a JSON body on the named route) the posted provider config is
+// tested as-is, so the UI can test the form's current values before saving.
+// With an empty body it falls back to testing the saved provider named in the
+// path.
 func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
-	models, err := s.providers.TestConnection(r.Context(), chi.URLParam(r, "name"))
+	var adhoc *providers.Provider
+	if r.Body != nil && r.ContentLength != 0 {
+		var p providers.Provider
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("decode provider: %w", err))
+			return
+		}
+		adhoc = &p
+	}
+	models, err := s.providers.TestConnection(r.Context(), chi.URLParam(r, "name"), adhoc)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
