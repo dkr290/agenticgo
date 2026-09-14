@@ -1,39 +1,51 @@
 package llm
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
+
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/dkr290/agenticgo/internal/logger"
 )
 
-// OpenAIProvider talks to any OpenAI-compatible /chat/completions endpoint
-// (Ollama, LM Studio, vLLM, OpenAI itself). It streams via SSE and parses
-// incremental tool calls.
+// OpenAIProvider talks to any OpenAI-compatible chat-completions endpoint
+// (Ollama, LM Studio, LocalAI, vLLM, OpenAI itself) through the official
+// OpenAI Go SDK. The endpoint is selected with a base-URL override, so any
+// server implementing the OpenAI wire format works.
+//
+// The original hand-rolled SSE client is kept for reference in
+// openai.go.bak (not compiled).
 type OpenAIProvider struct {
 	baseURL string
 	apiKey  string
 	model   string
-	client  *http.Client
+	client  openai.Client
 	log     logger.Logger
 }
 
-// NewOpenAI creates a provider for an OpenAI-compatible endpoint.
+// NewOpenAI creates a provider for an OpenAI-compatible endpoint. Local
+// servers ignore the API key, but the SDK requires a non-empty one, so an
+// empty key is replaced with a placeholder.
 func NewOpenAI(baseURL, apiKey, model string) *OpenAIProvider {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	key := apiKey
+	if key == "" {
+		key = "unused" // required by the SDK, ignored by local servers
+	}
 	return &OpenAIProvider{
-		baseURL: strings.TrimSuffix(baseURL, "/"),
+		baseURL: baseURL,
 		apiKey:  apiKey,
 		model:   model,
-		client: &http.Client{
-			Timeout: 0, // no overall timeout; streaming can be long
-		},
+		client: openai.NewClient(
+			option.WithBaseURL(baseURL),
+			option.WithAPIKey(key),
+		),
 		log: logger.Nop(),
 	}
 }
@@ -68,284 +80,63 @@ func redactKey(s string) string {
 // It works against any OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenAI).
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	p.log.Debug("llm: GET /models", "base_url", p.baseURL, "api_key", redactKey(p.apiKey))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-	resp, err := p.client.Do(req)
+	page, err := p.client.Models.List(ctx)
 	if err != nil {
 		p.log.Debug("llm: GET /models failed", "error", err)
 		return nil, fmt.Errorf("list models: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		p.log.Debug("llm: GET /models non-2xx", "status", resp.Status, "body", strings.TrimSpace(string(slurp)))
-		return nil, fmt.Errorf("list models: %s: %s", resp.Status, strings.TrimSpace(string(slurp)))
-	}
-	var out struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		p.log.Debug("llm: GET /models decode failed", "error", err)
-		return nil, fmt.Errorf("decode models: %w", err)
-	}
-	models := make([]string, 0, len(out.Data))
-	for _, m := range out.Data {
+	models := make([]string, 0, len(page.Data))
+	for _, m := range page.Data {
 		if m.ID != "" {
 			models = append(models, m.ID)
 		}
 	}
-	p.log.Debug("llm: GET /models ok", "status", resp.Status, "models", len(models))
+	p.log.Debug("llm: GET /models ok", "models", len(models))
 	return models, nil
-}
-
-// wire types for the OpenAI-compatible API.
-type oaiRequest struct {
-	Model       string     `json:"model"`
-	Messages    []oaiMsg   `json:"messages"`
-	Tools       []ToolSpec `json:"tools,omitempty"`
-	Temperature *float64   `json:"temperature,omitempty"`
-	MaxTokens   *int       `json:"max_tokens,omitempty"`
-	Stream      bool       `json:"stream"`
-}
-
-type oaiMsg struct {
-	Role string `json:"role"`
-	// Content is a plain string for text-only messages, or an array of content
-	// parts (text + image_url) when the message carries images for a
-	// vision-capable model. Typed as any to hold both shapes.
-	Content    any           `json:"content"`
-	ToolCalls  []oaiToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
-	Name       string        `json:"name,omitempty"`
-}
-
-// oaiContentPart is one element of a multimodal message's content array.
-type oaiContentPart struct {
-	Type     string `json:"type"` // "text" | "image_url"
-	Text     string `json:"text,omitempty"`
-	ImageURL *struct {
-		URL string `json:"url"`
-	} `json:"image_url,omitempty"`
-}
-
-type oaiToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
-type oaiChunk struct {
-	Choices []struct {
-		Delta struct {
-			Content   string        `json:"content"`
-			ToolCalls []oaiToolCall `json:"tool_calls"`
-		} `json:"delta"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
 }
 
 // ChatCompletion implements Provider.
 func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest, onDelta StreamFunc) (Message, error) {
-	msgs := make([]oaiMsg, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		om := oaiMsg{
-			Role:       string(m.Role),
-			Content:    m.Content,
-			ToolCallID: m.ToolCallID,
-			Name:       m.Name,
-		}
-		// Multimodal: a user message carrying images becomes an array of
-		// content parts (text + one image_url per image), the OpenAI vision shape.
-		if len(m.Images) > 0 {
-			parts := make([]oaiContentPart, 0, len(m.Images)+1)
-			if m.Content != "" {
-				parts = append(parts, oaiContentPart{Type: "text", Text: m.Content})
-			}
-			for _, img := range m.Images {
-				var p oaiContentPart
-				p.Type = "image_url"
-				p.ImageURL = &struct {
-					URL string `json:"url"`
-				}{URL: img}
-				parts = append(parts, p)
-			}
-			om.Content = parts
-		}
-		for _, tc := range m.ToolCalls {
-			var out oaiToolCall
-			out.ID = tc.ID
-			out.Type = "function"
-			out.Function.Name = tc.Name
-			out.Function.Arguments = tc.Arguments
-			om.ToolCalls = append(om.ToolCalls, out)
-		}
-		msgs = append(msgs, om)
-	}
-
 	model := req.Model
 	if model == "" {
 		model = p.model
 	}
-	body := oaiRequest{
-		Model:       model,
-		Messages:    msgs,
-		Tools:       req.Tools,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      req.Stream,
+	params := openai.ChatCompletionNewParams{
+		Model:    openai.ChatModel(model),
+		Messages: toOAIMessages(req.Messages),
+		Tools:    toOAITools(req.Tools),
+	}
+	if req.Temperature != nil {
+		params.Temperature = openai.Float(*req.Temperature)
+	}
+	if req.MaxTokens != nil {
+		params.MaxTokens = openai.Int(int64(*req.MaxTokens))
 	}
 	p.log.Debug("llm: chat completion",
 		"base_url", p.baseURL, "model", model, "stream", req.Stream,
-		"messages", len(msgs), "tools", len(req.Tools))
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return Message{}, fmt.Errorf("marshal request: %w", err)
-	}
+		"messages", len(req.Messages), "tools", len(req.Tools))
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(buf))
-	if err != nil {
-		return Message{}, fmt.Errorf("build request: %w", err)
+	if !req.Stream {
+		return p.nonStream(ctx, params, model, onDelta)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if req.Stream {
-		httpReq.Header.Set("Accept", "text/event-stream")
-	}
-	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
+	return p.stream(ctx, params, model, onDelta)
+}
 
-	resp, err := p.client.Do(httpReq)
+// nonStream handles a regular chat completion.
+func (p *OpenAIProvider) nonStream(ctx context.Context, params openai.ChatCompletionNewParams, model string, onDelta StreamFunc) (Message, error) {
+	resp, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
 		p.log.Debug("llm: request failed", "model", model, "error", err)
 		return Message{}, fmt.Errorf("llm request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		p.log.Debug("llm: non-2xx response", "model", model, "status", resp.Status, "body", strings.TrimSpace(string(slurp)))
-		return Message{}, fmt.Errorf("llm returned %s: %s", resp.Status, strings.TrimSpace(string(slurp)))
-	}
-	p.log.Debug("llm: response ok", "model", model, "status", resp.Status)
-
-	if !req.Stream {
-		return parseNonStream(resp.Body, onDelta)
-	}
-
-	var (
-		assistant strings.Builder
-		// Accumulate streaming tool calls by index.
-		toolArgs = map[int]*strings.Builder{}
-		toolName = map[int]string{}
-		toolID   = map[int]string{}
-	)
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			break
-		}
-
-		var chunk oaiChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			// Tolerate keep-alives / non-JSON lines from quirky providers.
-			continue
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-
-		delta := chunk.Choices[0].Delta
-		if delta.Content != "" {
-			assistant.WriteString(delta.Content)
-			if err := onDelta(Delta{Content: delta.Content}); err != nil {
-				return Message{}, err
-			}
-		}
-
-		for i, tc := range delta.ToolCalls {
-			if tc.ID != "" {
-				toolID[i] = tc.ID
-			}
-			if tc.Function.Name != "" {
-				toolName[i] = tc.Function.Name
-			}
-			if tc.Function.Arguments != "" {
-				b, ok := toolArgs[i]
-				if !ok {
-					b = &strings.Builder{}
-					toolArgs[i] = b
-				}
-				b.WriteString(tc.Function.Arguments)
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return Message{}, fmt.Errorf("read stream: %w", err)
-	}
-
-	msg := Message{Role: RoleAssistant, Content: assistant.String()}
-
-	// Emit accumulated tool calls (ordered by index).
-	if len(toolArgs) > 0 {
-		for i := 0; i < len(toolArgs); i++ {
-			id := toolID[i]
-			if id == "" {
-				id = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
-			}
-			msg.ToolCalls = append(msg.ToolCalls, ToolCall{
-				ID:        id,
-				Name:      toolName[i],
-				Arguments: toolArgs[i].String(),
-			})
-		}
-		// Notify the loop that tool calls are ready.
-		if err := onDelta(Delta{ToolCalls: msg.ToolCalls, Done: true}); err != nil {
-			return Message{}, err
-		}
-	} else if err := onDelta(Delta{Done: true}); err != nil {
-		return Message{}, err
-	}
-
-	return msg, nil
-}
-
-// parseNonStream handles a regular (non-SSE) chat completion response.
-func parseNonStream(body io.Reader, onDelta StreamFunc) (Message, error) {
-	var resp struct {
-		Choices []struct {
-			Message struct {
-				Content   string        `json:"content"`
-				ToolCalls []oaiToolCall `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(body).Decode(&resp); err != nil {
-		return Message{}, fmt.Errorf("decode response: %w", err)
-	}
 	if len(resp.Choices) == 0 {
 		return Message{}, fmt.Errorf("llm returned no choices")
 	}
-	c := resp.Choices[0].Message
-	msg := Message{Role: RoleAssistant, Content: c.Content}
-	for _, tc := range c.ToolCalls {
+	msg := Message{Role: RoleAssistant, Content: resp.Choices[0].Message.Content}
+	for _, tc := range resp.Choices[0].Message.ToolCalls {
+		if tc.Type != "function" {
+			continue
+		}
 		msg.ToolCalls = append(msg.ToolCalls, ToolCall{
 			ID:        tc.ID,
 			Name:      tc.Function.Name,
@@ -361,4 +152,142 @@ func parseNonStream(body io.Reader, onDelta StreamFunc) (Message, error) {
 		return Message{}, err
 	}
 	return msg, nil
+}
+
+// stream handles a streaming (SSE) chat completion. The SDK accumulator
+// reassembles streamed tool calls by their wire index, so parallel tool
+// calls come out correctly separated.
+func (p *OpenAIProvider) stream(ctx context.Context, params openai.ChatCompletionNewParams, model string, onDelta StreamFunc) (Message, error) {
+	s := p.client.Chat.Completions.NewStreaming(ctx, params)
+	defer s.Close()
+
+	var (
+		acc       openai.ChatCompletionAccumulator
+		assistant strings.Builder
+	)
+	for s.Next() {
+		chunk := s.Current()
+		acc.AddChunk(chunk)
+		if len(chunk.Choices) == 0 {
+			// Some providers send a mid-stream error object instead of
+			// choices; surface it instead of ending with an empty reply.
+			if msg, ok := streamError(chunk.RawJSON()); ok {
+				return Message{}, fmt.Errorf("llm stream error: %s", msg)
+			}
+			continue
+		}
+		if delta := chunk.Choices[0].Delta.Content; delta != "" {
+			assistant.WriteString(delta)
+			if err := onDelta(Delta{Content: delta}); err != nil {
+				return Message{}, err
+			}
+		}
+	}
+	if err := s.Err(); err != nil {
+		p.log.Debug("llm: stream failed", "model", model, "error", err)
+		return Message{}, fmt.Errorf("read stream: %w", err)
+	}
+
+	msg := Message{Role: RoleAssistant, Content: assistant.String()}
+	if len(acc.Choices) > 0 {
+		for i, tc := range acc.Choices[0].Message.ToolCalls {
+			if tc.Type != "function" {
+				continue
+			}
+			id := tc.ID
+			if id == "" {
+				id = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
+			}
+			msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+				ID:        id,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			})
+		}
+	}
+	if err := onDelta(Delta{ToolCalls: msg.ToolCalls, Done: true}); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+// streamError detects a provider error payload sent as an SSE data frame
+// ({"error": {...}}) instead of an HTTP error status.
+func streamError(raw string) (string, bool) {
+	if !strings.Contains(raw, `"error"`) {
+		return "", false
+	}
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &e); err != nil || e.Error.Message == "" {
+		return "", false
+	}
+	return e.Error.Message, true
+}
+
+// toOAIMessages maps our messages to SDK params. A user message with images
+// becomes an array of content parts (text + one image_url per image), the
+// OpenAI vision shape.
+func toOAIMessages(in []Message) []openai.ChatCompletionMessageParamUnion {
+	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(in))
+	for _, m := range in {
+		switch m.Role {
+		case RoleSystem:
+			msgs = append(msgs, openai.SystemMessage(m.Content))
+		case RoleUser:
+			if len(m.Images) == 0 {
+				msgs = append(msgs, openai.UserMessage(m.Content))
+				continue
+			}
+			parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Images)+1)
+			if m.Content != "" {
+				parts = append(parts, openai.TextContentPart(m.Content))
+			}
+			for _, img := range m.Images {
+				parts = append(parts, openai.ImageContentPart(
+					openai.ChatCompletionContentPartImageImageURLParam{URL: img}))
+			}
+			msgs = append(msgs, openai.UserMessage(parts))
+		case RoleAssistant:
+			am := openai.AssistantMessage(m.Content)
+			if len(m.ToolCalls) > 0 {
+				tcs := make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(m.ToolCalls))
+				for _, tc := range m.ToolCalls {
+					tcs = append(tcs, openai.ChatCompletionMessageToolCallUnionParam{
+						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+							ID: tc.ID,
+							Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+								Name:      tc.Name,
+								Arguments: tc.Arguments,
+							},
+						},
+					})
+				}
+				am.OfAssistant.ToolCalls = tcs
+			}
+			msgs = append(msgs, am)
+		case RoleTool:
+			msgs = append(msgs, openai.ToolMessage(m.Content, m.ToolCallID))
+		}
+	}
+	return msgs
+}
+
+// toOAITools maps our tool specs to SDK function-tool params.
+func toOAITools(specs []ToolSpec) []openai.ChatCompletionToolUnionParam {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]openai.ChatCompletionToolUnionParam, 0, len(specs))
+	for _, s := range specs {
+		out = append(out, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
+			Name:        s.Function.Name,
+			Description: openai.String(s.Function.Description),
+			Parameters:  shared.FunctionParameters(s.Function.Parameters),
+		}))
+	}
+	return out
 }

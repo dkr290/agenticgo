@@ -7,7 +7,6 @@ Context for AI coding agents working on **agenticgo**.
 `agenticgo` is a **simplified, self-hosted AI agent gateway in Go**, inspired by
 GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 **clean-room reimplementation of ideas** — do NOT copy GoClaw code (CC BY-NC).
-The owner is building this to learn Go.
 
 **Module path:** `github.com/dkr290/agenticgo`
 
@@ -153,6 +152,10 @@ into the tool loop (tools currently use the global `WorkspaceDir`).
 ## Tech choices (keep these)
 
 - **Go 1.26+**. Stdlib-first.
+- LLM client: `github.com/openai/openai-go/v3` (official SDK, Chat Completions
+  API with base-URL override — works with Ollama / LM Studio / LocalAI / vLLM /
+  OpenAI). The old hand-rolled SSE client is kept, bug-fixed, as reference only
+  in `internal/llm/openai.go.bak` (not compiled).
 - Router: `github.com/go-chi/chi/v5`.
 - WebSocket: `github.com/coder/websocket`.
 - SQLite: `modernc.org/sqlite` (no cgo — static binary / k8s friendly).
@@ -191,7 +194,8 @@ curl localhost:18099/api/agents             # list agents
 - `internal/crypto/crypto.go` — AES-256-GCM encryption of secrets at rest (`AGENTICGO_SECRET_KEY` or `data/secret.key`)
 - `internal/logger/logger.go` — minimal `Logger` interface + slog backend (debug via `AGENTICGO_DEBUG`)
 - `internal/scaffold/scaffold.go` — in-memory MCP-server + cron-job scaffolding
-- `internal/llm/openai.go` — OpenAI-compatible streaming client (SSE + tool calls)
+- `internal/llm/openai.go` — OpenAI-compatible provider on the official SDK
+  (streaming + tool calls); `openai.go.bak` = pre-SDK reference copy (not compiled)
 - `internal/tools/{tools,fs,exec,memory}.go` — registry, filesystem jail,
   allow-listed exec, memory tools (`memory_search`, `record_observation`)
 - `internal/store/store.go` — SQLite schema + queries (per-agent; FTS5 knowledge +

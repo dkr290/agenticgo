@@ -52,11 +52,6 @@ this lists what's still needed to make the project fully functional).
   fallback becomes redundant — fold its removal into this item (keep `llm.NewOpenAI` only as
   the seed for the providers store).
 
-- **Streaming tool-call accumulation drops sparse tool indexes.**
-  `internal/llm/openai.go:243` iterates `len(toolArgs)` over a map; tool calls that stream
-  an ID/name but zero argument bytes are lost, and a gap between indexes mis-reports them.
-  Track a slice (or maxIndex) instead.
-
 - **`AGENTICGO_KNOWLEDGE_FILE` / `cfg.KnowledgeFile` is dead config.**
   No longer referenced (`internal/config/config.go:33`); self-evolution writes to SQLite.
   Remove it or document it.
