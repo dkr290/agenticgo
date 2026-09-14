@@ -15,6 +15,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
+	"github.com/dkr290/agenticgo/internal/crypto"
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/logger"
 	"github.com/dkr290/agenticgo/internal/providers"
@@ -74,8 +75,16 @@ func main() {
 	provider := llm.NewOpenAI(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 	provider.SetLogger(lg)
 
+	// Encryption key for provider API keys at rest (env, else a generated
+	// data/secret.key file).
+	encKey, err := crypto.LoadKey("AGENTICGO_SECRET_KEY", filepath.Join(cfg.DataDir, "secret.key"))
+	if err != nil {
+		log.Fatalf("secret key: %v", err)
+	}
+
 	// Named provider store (editable from the Providers UI). Seeded from env.
-	providerStore, err := providers.Open(filepath.Join(cfg.DataDir, "providers.json"))
+	// API keys are encrypted at rest.
+	providerStore, err := providers.Open(filepath.Join(cfg.DataDir, "providers.json"), encKey)
 	if err != nil {
 		log.Fatalf("providers: %v", err)
 	}
