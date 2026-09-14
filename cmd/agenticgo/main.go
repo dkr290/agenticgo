@@ -15,7 +15,9 @@ import (
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
+	"github.com/dkr290/agenticgo/internal/crypto"
 	"github.com/dkr290/agenticgo/internal/llm"
+	"github.com/dkr290/agenticgo/internal/logger"
 	"github.com/dkr290/agenticgo/internal/providers"
 	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/server"
@@ -27,6 +29,13 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+
+	// Verbose debug logging to stderr when AGENTICGO_DEBUG=true. Wired into
+	// the providers/LLM path for now (other packages can adopt it later).
+	lg := logger.New(cfg.Debug)
+	if cfg.Debug {
+		lg.Debug("debug logging enabled")
 	}
 
 	// Ensure data + workspace dirs exist.
@@ -64,12 +73,22 @@ func main() {
 
 	// LLM provider (OpenAI-compatible: Ollama / LM Studio / vLLM / OpenAI).
 	provider := llm.NewOpenAI(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
+	provider.SetLogger(lg)
+
+	// Encryption key for provider API keys at rest (env, else a generated
+	// data/secret.key file).
+	encKey, err := crypto.LoadKey("AGENTICGO_SECRET_KEY", filepath.Join(cfg.DataDir, "secret.key"))
+	if err != nil {
+		log.Fatalf("secret key: %v", err)
+	}
 
 	// Named provider store (editable from the Providers UI). Seeded from env.
-	providerStore, err := providers.Open(filepath.Join(cfg.DataDir, "providers.json"))
+	// API keys are encrypted at rest.
+	providerStore, err := providers.Open(filepath.Join(cfg.DataDir, "providers.json"), encKey)
 	if err != nil {
 		log.Fatalf("providers: %v", err)
 	}
+	providerStore.SetLogger(lg)
 	providerStore.SeedDefault(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 
 	// Scaffolding for not-yet-implemented features (MCP servers, cron).

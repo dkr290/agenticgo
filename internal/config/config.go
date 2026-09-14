@@ -50,6 +50,9 @@ type Config struct {
 	ObservationTTLDays    int
 	ObservationKeepLatest int
 
+	// Debug enables verbose debug logging to stderr (AGENTICGO_DEBUG=true).
+	Debug bool
+
 	// SystemPrompt is the base system prompt; knowledge is appended to it.
 	SystemPrompt string
 }
@@ -84,6 +87,7 @@ func Load() (*Config, error) {
 	cfg.MaxAgentIterations = getEnvInt("AGENTICGO_MAX_ITERATIONS", 12)
 	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
 	cfg.ObservationKeepLatest = getEnvInt("AGENTICGO_OBSERVATION_KEEP", 200)
+	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
 
 	if cfg.LLMBaseURL == "" {
 		return nil, fmt.Errorf("AGENTICGO_LLM_BASE_URL must not be empty")
@@ -106,6 +110,15 @@ func getEnvInt(key string, def int) int {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func getEnvBool(key string, def bool) bool {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return def

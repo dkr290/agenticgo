@@ -376,7 +376,11 @@
           <div><label>Model *</label><input id="pf-model" placeholder="qwen2.5"></div>
         </div>
         <label>Base URL *</label><input id="pf-baseurl" placeholder="http://localhost:11434/v1">
-        <label>API Key</label><input id="pf-apikey" placeholder="(often unused for local servers)">
+        <label>API Key</label>
+        <div style="display:flex; gap:6px; align-items:center">
+          <input id="pf-apikey" type="password" placeholder="(often unused for local servers)" style="flex:1">
+          <button type="button" class="ghost" id="pf-apikey-eye" title="Show / hide API key" style="padding:6px 10px; line-height:1">👁</button>
+        </div>
         <div class="checkrow"><input type="checkbox" id="pf-vision"><label for="pf-vision" style="margin:0">Model supports images (vision / multimodal)</label></div>
         <div class="checkrow"><input type="checkbox" id="pf-default"><label for="pf-default" style="margin:0">Make default provider</label></div>
         <div class="toolbar" style="margin-top:16px; margin-bottom:0">
@@ -1108,6 +1112,7 @@
     $('pf-title').textContent = 'Edit provider';
     $('pf-display').value = p.display_name || ''; $('pf-name').value = p.name; $('pf-name').disabled = true;
     $('pf-model').value = p.model; $('pf-baseurl').value = p.base_url; $('pf-apikey').value = p.api_key || '';
+    $('pf-apikey').type = 'password'; $('pf-apikey-eye').textContent = '👁';
     $('pf-default').checked = !!p.default; $('pf-vision').checked = !!p.vision; $('pf-status').textContent = '';
     $('provider-form').style.display = '';
   }
@@ -1121,6 +1126,7 @@
     editingProvider = null;
     $('pf-title').textContent = 'New provider';
     ['pf-display','pf-name','pf-model','pf-baseurl','pf-apikey'].forEach(id => { $(id).value=''; $(id).disabled=false; });
+    $('pf-apikey').type = 'password'; $('pf-apikey-eye').textContent = '👁';
     $('pf-default').checked = false; $('pf-vision').checked = false; $('pf-status').textContent = '';
     $('provider-form').style.display = '';
   });
@@ -1134,11 +1140,22 @@
       .then(() => { $('provider-form').style.display = 'none'; loadProviders(); fillChatProviders(); toast('Provider saved'); })
       .catch(e => toast('Save failed: ' + e.message));
   });
+  // Mask/unmask the API key field (default masked, click the eye to peek).
+  $('pf-apikey-eye').addEventListener('click', () => {
+    const f = $('pf-apikey');
+    const show = f.type === 'password';
+    f.type = show ? 'text' : 'password';
+    $('pf-apikey-eye').textContent = show ? '🙈' : '👁';
+  });
   $('pf-test').addEventListener('click', () => {
-    const name = $('pf-name').value.trim();
-    if (!name) { toast('Save the provider first, then test'); return; }
+    // Test the form's CURRENT values (works before saving) by posting the
+    // config; the server tests it ad-hoc instead of requiring a saved record.
+    const body = { name: $('pf-name').value.trim(), display_name: $('pf-display').value.trim(),
+      type: 'openai-compatible', base_url: $('pf-baseurl').value.trim(), api_key: $('pf-apikey').value,
+      model: $('pf-model').value.trim(), default: $('pf-default').checked, vision: $('pf-vision').checked };
+    if (!body.base_url) { toast('Base URL is required to test'); return; }
     $('pf-status').textContent = 'testing…';
-    api('/api/providers/' + encodeURIComponent(name) + '/test', { method:'POST' })
+    api('/api/providers/test', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
       .then(r => { $('pf-status').textContent = '✓ OK — models: ' + (r.models||[]).slice(0,5).join(', '); })
       .catch(e => { $('pf-status').textContent = '✗ ' + e.message; });
   });

@@ -46,6 +46,17 @@ The owner is building this to learn Go.
   agent's `config.json` may pin a provider/model/temperature/max_tokens too
   (per-request override > agent config > default);
   `agent.ProviderLookup` (`providers.Store.GetLLM`) resolves names.
+  **API keys are encrypted at rest** (`internal/crypto`, AES-256-GCM, `enc:v1:`
+  envelope in the JSON) using a key from `AGENTICGO_SECRET_KEY` (base64, 32 bytes)
+  or a generated `data/secret.key` (0600). Keys are decrypted transparently on
+  load, so callers and the UI still work with plaintext; legacy plaintext keys in
+  `providers.json` are migrated on first boot.
+- **Logging**: `internal/logger` defines a small `Logger` interface (Info/Error/
+  Debug/Warn with slog-style key/value pairs) backed by stdlib `log/slog`
+  (human-readable text to stderr). Set `AGENTICGO_DEBUG=true` to enable debug
+  level. Wired into the providers/LLM path for now (`providers.Store.SetLogger`,
+  `llm.OpenAIProvider.SetLogger`); other packages keep `logger.Nop()` until
+  adopted. Secrets are redacted (`****` + last 4) before logging.
 - **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`.
 - **Vision / images**: a provider can be flagged `vision` (its model understands
   images — set manually, there's no reliable API to detect it). An agent's
@@ -177,6 +188,8 @@ curl localhost:18099/api/agents             # list agents
 - `internal/agents/agents.go` — agent registry + context files
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition
 - `internal/providers/providers.go` — named provider configs (JSON store)
+- `internal/crypto/crypto.go` — AES-256-GCM encryption of secrets at rest (`AGENTICGO_SECRET_KEY` or `data/secret.key`)
+- `internal/logger/logger.go` — minimal `Logger` interface + slog backend (debug via `AGENTICGO_DEBUG`)
 - `internal/scaffold/scaffold.go` — in-memory MCP-server + cron-job scaffolding
 - `internal/llm/openai.go` — OpenAI-compatible streaming client (SSE + tool calls)
 - `internal/tools/{tools,fs,exec,memory}.go` — registry, filesystem jail,
