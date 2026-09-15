@@ -30,24 +30,23 @@ func IsEncrypted(value string) bool {
 // Key is a 32-byte AES-256 key.
 type Key [32]byte
 
-// LoadKey resolves the encryption key: env first, then the persisted key file
-// (created on first use). envVar may be empty to skip the env lookup.
-func LoadKey(envVar, keyFile string) (Key, error) {
+// LoadKey resolves the encryption key: secretB64 (base64, 32 bytes — typically
+// from config, e.g. AGENTICGO_SECRET_KEY) first, then the persisted key file
+// (created on first use). An empty secretB64 skips straight to the key file.
+func LoadKey(secretB64, keyFile string) (Key, error) {
 	var k Key
-	if envVar != "" {
-		if v, ok := os.LookupEnv(envVar); ok && v != "" {
-			b, err := base64.StdEncoding.DecodeString(v)
-			if err == nil && len(b) == 32 {
-				copy(k[:], b)
-				return k, nil
-			}
-			// Be strict so a mistyped key is loud rather than silently
-			// deriving a different key and failing to decrypt later.
-			if err != nil {
-				return k, fmt.Errorf("%s is not valid base64: %w", envVar, err)
-			}
-			return k, fmt.Errorf("%s must decode to 32 bytes, got %d", envVar, len(b))
+	if secretB64 != "" {
+		b, err := base64.StdEncoding.DecodeString(secretB64)
+		if err == nil && len(b) == 32 {
+			copy(k[:], b)
+			return k, nil
 		}
+		// Be strict so a mistyped key is loud rather than silently
+		// deriving a different key and failing to decrypt later.
+		if err != nil {
+			return k, fmt.Errorf("secret key is not valid base64: %w", err)
+		}
+		return k, fmt.Errorf("secret key must decode to 32 bytes, got %d", len(b))
 	}
 	// Fall back to (or create) the persisted key file.
 	if b, err := os.ReadFile(keyFile); err == nil && len(b) == 32 {

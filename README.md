@@ -32,7 +32,8 @@ single static binary, in Docker, or on Kubernetes.
 - **Providers** — manage multiple OpenAI-compatible endpoints (Ollama, LM Studio, vLLM,
   OpenAI) from the UI; pick a default or override per chat. Each agent can also pin its
   own provider, model, temperature, and max-tokens in `config.json`. Configs persist to
-  `data/providers.json`.
+  `data/providers.json`; **API keys are encrypted at rest** (AES-256-GCM, `enc:v1:`
+  envelope) with a key from `AGENTICGO_SECRET_KEY` or a generated `data/secret.key`.
 - **Built-in tools (allow-listed):**
   - `read_file` — read a file in the workspace
   - `write_file` — write a file in the workspace
@@ -135,6 +136,7 @@ Health check: `curl http://localhost:8080/healthz`
 | `AGENTICGO_OBSERVATION_TTL_DAYS` | `14` | Prune observations older than this |
 | `AGENTICGO_OBSERVATION_KEEP` | `200` | Max observations kept per agent |
 | `AGENTICGO_SYSTEM_PROMPT` | built-in | Base system prompt (prepended to every agent) |
+| `AGENTICGO_SECRET_KEY` | *(none)* | Base64-encoded 32-byte master key used to encrypt provider API keys at rest (`enc:v1:` values in `data/providers.json`). When unset, a random key is generated once and stored in `data/secret.key` (0600). Supply it via env (e.g. from a secrets manager) so the key never touches disk. Generate one with `openssl rand -base64 32`. **Warning:** changing (or losing) the key makes previously encrypted API keys undecryptable. |
 
 ## API
 

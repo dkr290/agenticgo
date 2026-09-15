@@ -75,9 +75,9 @@ func main() {
 	provider := llm.NewOpenAI(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 	provider.SetLogger(lg)
 
-	// Encryption key for provider API keys at rest (env, else a generated
-	// data/secret.key file).
-	encKey, err := crypto.LoadKey("AGENTICGO_SECRET_KEY", filepath.Join(cfg.DataDir, "secret.key"))
+	// Encryption key for provider API keys at rest (AGENTICGO_SECRET_KEY from
+	// config, else a generated data/secret.key file).
+	encKey, err := crypto.LoadKey(cfg.SecretKey, filepath.Join(cfg.DataDir, "secret.key"))
 	if err != nil {
 		log.Fatalf("secret key: %v", err)
 	}

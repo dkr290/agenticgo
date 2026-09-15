@@ -78,31 +78,39 @@ func TestEncryptRandomNonce(t *testing.T) {
 	}
 }
 
-func TestLoadKeyFromEnv(t *testing.T) {
+func TestLoadKeyFromSecret(t *testing.T) {
 	raw := make([]byte, 32)
 	for i := range raw {
 		raw[i] = 0xAB
 	}
-	t.Setenv("TEST_SECRET_KEY", base64.StdEncoding.EncodeToString(raw))
-	k, err := LoadKey("TEST_SECRET_KEY", filepath.Join(t.TempDir(), "ignored.key"))
+	k, err := LoadKey(base64.StdEncoding.EncodeToString(raw), filepath.Join(t.TempDir(), "ignored.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if k[0] != 0xAB {
-		t.Fatalf("env key not loaded: %v", k[:4])
+		t.Fatalf("secret key not loaded: %v", k[:4])
+	}
+}
+
+func TestLoadKeyInvalidSecret(t *testing.T) {
+	if _, err := LoadKey("not-base64!!!", filepath.Join(t.TempDir(), "ignored.key")); err == nil {
+		t.Fatal("expected error for non-base64 secret")
+	}
+	// Valid base64 but wrong length must also fail loudly.
+	if _, err := LoadKey(base64.StdEncoding.EncodeToString([]byte("short")), filepath.Join(t.TempDir(), "ignored.key")); err == nil {
+		t.Fatal("expected error for wrong-length secret")
 	}
 }
 
 func TestLoadKeyGeneratesAndPersists(t *testing.T) {
-	t.Setenv("TEST_SECRET_KEY", "")
 	dir := t.TempDir()
 	kf := filepath.Join(dir, "secret.key")
-	k1, err := LoadKey("TEST_SECRET_KEY", kf)
+	k1, err := LoadKey("", kf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Second load must return the SAME persisted key.
-	k2, err := LoadKey("TEST_SECRET_KEY", kf)
+	k2, err := LoadKey("", kf)
 	if err != nil {
 		t.Fatal(err)
 	}
