@@ -17,6 +17,8 @@ this lists what's still needed to make the project fully functional).
   Then provide themto the agent like MCP tools on the page called `Environment Tools`.
   Make Warning there that thoose tools can be used and can have potential harm of the systems.
   So install them only if are aware.Excample kubectl can be user with full potential to delete stuff.
+  (OR more secure when the dockerfile got build we add kubectl , git etc whatever installation is
+  and provide it as a tool with some env var to the allowed list.)
 
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
