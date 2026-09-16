@@ -26,6 +26,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
+	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
 	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/skills"
@@ -45,12 +46,13 @@ type Server struct {
 	store     *store.Store
 	providers *providers.Store
 	scaffold  *scaffold.Store
+	mcp       *mcp.Manager
 	http      *http.Server
 }
 
 // New builds the server.
-func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.Registry, st *store.Store, ps *providers.Store, sc *scaffold.Store) *Server {
-	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, scaffold: sc}
+func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.Registry, st *store.Store, ps *providers.Store, sc *scaffold.Store, mm *mcp.Manager) *Server {
+	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, scaffold: sc, mcp: mm}
 
 	r := chi.NewRouter()
 	r.Get("/healthz", s.handleHealth)
@@ -68,6 +70,9 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Get("/agents/{key}/skills", s.handleListAgentSkills)
 		r.Put("/agents/{key}/skills/{skill}", s.handleEnableSkill)
 		r.Delete("/agents/{key}/skills/{skill}", s.handleDisableSkill)
+		r.Get("/agents/{key}/custom-tools", s.handleListCustomTools)
+		r.Put("/agents/{key}/custom-tools/{name}", s.handleEnableCustomTool)
+		r.Delete("/agents/{key}/custom-tools/{name}", s.handleDisableCustomTool)
 		r.Get("/agents/{key}/images", s.handleListImages)
 		r.Post("/agents/{key}/images", s.handleUploadImage)
 		r.Delete("/agents/{key}/images/{name}", s.handleDeleteImage)
@@ -103,10 +108,17 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Delete("/providers/{name}", s.handleDeleteProvider)
 		r.Post("/providers/{name}/test", s.handleTestProvider)
 
-		// Scaffolding (not yet functional; UI + API shape only).
+		// MCP servers: real connections (Phase 3), tool discovery, per-agent
+		// enablement via the custom-tools endpoints above.
 		r.Get("/mcp-servers", s.handleListMCPServers)
 		r.Post("/mcp-servers", s.handleAddMCPServer)
+		r.Put("/mcp-servers/{id}", s.handleUpdateMCPServer)
 		r.Delete("/mcp-servers/{id}", s.handleDeleteMCPServer)
+		r.Post("/mcp-servers/{id}/connect", s.handleConnectMCPServer)
+		r.Post("/mcp-servers/{id}/disconnect", s.handleDisconnectMCPServer)
+		r.Get("/mcp-tools", s.handleListMCPTools)
+
+		// Scaffolding (not yet functional; UI + API shape only).
 		r.Get("/cron", s.handleListCronJobs)
 		r.Post("/cron", s.handleAddCronJob)
 		r.Delete("/cron/{id}", s.handleDeleteCronJob)
@@ -767,19 +779,19 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "models": models})
 }
 
-// --- MCP servers (scaffolding) ---
+// --- MCP servers (real client; tools are enabled per agent) ---
 
 func (s *Server) handleListMCPServers(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.scaffold.ListMCPServers())
+	writeJSON(w, http.StatusOK, s.mcp.ListServers())
 }
 
 func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
-	var srv scaffold.MCPServer
+	var srv mcp.ServerConfig
 	if err := json.NewDecoder(r.Body).Decode(&srv); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	created, err := s.scaffold.AddMCPServer(srv)
+	created, err := s.mcp.Add(srv)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -787,12 +799,147 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
+func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
+	var srv mcp.ServerConfig
+	if err := json.NewDecoder(r.Body).Decode(&srv); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	updated, err := s.mcp.Update(chi.URLParam(r, "id"), srv)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
-	if err := s.scaffold.DeleteMCPServer(chi.URLParam(r, "id")); err != nil {
+	if err := s.mcp.Delete(chi.URLParam(r, "id")); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleConnectMCPServer dials the server and discovers its tools. This is
+// deliberately manual (the Connect button) so heavyweight servers such as
+// kubernetes-mcp-server are only spawned when wanted.
+func (s *Server) handleConnectMCPServer(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	st, err := s.mcp.Connect(ctx, chi.URLParam(r, "id"))
+	if err != nil {
+		// Still return the status so the UI shows the error next to the server.
+		if st != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "server": st})
+			return
+		}
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleDisconnectMCPServer(w http.ResponseWriter, r *http.Request) {
+	if err := s.mcp.Disconnect(chi.URLParam(r, "id")); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+}
+
+// handleListMCPTools returns the discovered tool catalog across all connected
+// servers (the "MCP Tools" that agents can enable).
+func (s *Server) handleListMCPTools(w http.ResponseWriter, _ *http.Request) {
+	tools := s.mcp.Tools()
+	if tools == nil {
+		tools = []mcp.ToolInfo{}
+	}
+	writeJSON(w, http.StatusOK, tools)
+}
+
+// --- MCP tools: per-agent enablement of discovered tools (custom-tools API) ---
+
+// customToolWithState is a discovered MCP tool plus whether the agent in
+// context has it enabled.
+type customToolWithState struct {
+	mcp.ToolInfo
+	// Discovered is the namespaced name (mcp_<server>_<tool>) used as the key.
+	Discovered string `json:"discovered"`
+	Enabled    bool   `json:"enabled"`
+}
+
+// handleListCustomTools lists all discovered MCP tools annotated with the
+// agent's enabled state (Agents → MCP Tools tab).
+func (s *Server) handleListCustomTools(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	enabled := map[string]bool{}
+	for _, n := range ag.Config.EnabledTools {
+		enabled[n] = true
+	}
+	all := s.mcp.Tools()
+	out := make([]customToolWithState, 0, len(all))
+	for _, t := range all {
+		dn := t.DiscoveredName()
+		out = append(out, customToolWithState{ToolInfo: t, Discovered: dn, Enabled: enabled[dn]})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleEnableCustomTool(w http.ResponseWriter, r *http.Request) {
+	s.setCustomToolEnabled(w, r, true)
+}
+
+func (s *Server) handleDisableCustomTool(w http.ResponseWriter, r *http.Request) {
+	s.setCustomToolEnabled(w, r, false)
+}
+
+func (s *Server) setCustomToolEnabled(w http.ResponseWriter, r *http.Request, on bool) {
+	key := chi.URLParam(r, "key")
+	name := chi.URLParam(r, "name")
+
+	if !mcp.IsMCPToolName(name) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid MCP tool name %q", name))
+		return
+	}
+	// Enabling requires the tool to be discovered (currently known from a
+	// connected server); disabling is always allowed.
+	if on {
+		if _, ok := s.mcp.Lookup(name); !ok {
+			writeError(w, http.StatusNotFound, fmt.Errorf("tool %q not discovered — connect its MCP server first", name))
+			return
+		}
+	}
+
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	set := map[string]bool{}
+	for _, n := range ag.Config.EnabledTools {
+		set[n] = true
+	}
+	if on {
+		set[name] = true
+	} else {
+		delete(set, name)
+	}
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if _, err := s.agents.SetEnabledTools(key, names); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "tool": name, "enabled": on})
 }
 
 // --- Cron jobs (scaffolding) ---

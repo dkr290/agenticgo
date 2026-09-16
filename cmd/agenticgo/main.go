@@ -18,6 +18,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/crypto"
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/logger"
+	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
 	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/server"
@@ -91,8 +92,18 @@ func main() {
 	providerStore.SetLogger(lg)
 	providerStore.SeedDefault(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 
-	// Scaffolding for not-yet-implemented features (MCP servers, cron).
+	// Scaffolding for not-yet-implemented features (cron).
 	scaff := scaffold.New()
+
+	// MCP server manager (data/mcp_servers.json). Connections are manual:
+	// use the Connect button on the MCP Servers page to spawn/dial a server
+	// and discover its tools, then enable them per agent (MCP Tools tab).
+	mcpMgr, err := mcp.Open(filepath.Join(cfg.DataDir, "mcp_servers.json"))
+	if err != nil {
+		log.Fatalf("mcp servers: %v", err)
+	}
+	mcpMgr.SetLogger(lg)
+	defer mcpMgr.CloseAll()
 
 	// Tool registry with built-ins, gated by the tool allow-list.
 	reg := tools.NewRegistry(cfg.ToolAllowList)
@@ -103,7 +114,8 @@ func main() {
 
 	engine := agent.New(cfg, provider, reg, st, agentReg)
 	engine.SetProviderLookup(providerStore)
-	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, scaff)
+	engine.SetMCPManager(mcpMgr)
+	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, scaff, mcpMgr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

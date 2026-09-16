@@ -16,8 +16,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
   a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens/vision,
-  nil = inherit, plus `enabled_skills`), a per-agent `images/` dir (reference
-  pictures/screenshots for vision models), and a per-agent `workspace/` (tool jail).
+  nil = inherit, plus `enabled_skills` and `enabled_tools`), a per-agent `images/`
+  dir (reference pictures/screenshots for vision models), and a per-agent
+  `workspace/` (tool jail).
   Files that don't exist yet are still listed (empty) in the UI so they can be created.
 - **Skills (shared library + per-agent enable)**: a skill is a folder with
   `SKILL.md` (optional YAML-ish front-matter with `name`/`description` + markdown
@@ -35,9 +36,23 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   (`GetKnowledgeDocForAgent` filters by agent, so one agent cannot read another's docs).
   Titles are listed in the system prompt so the agent knows to search.
 - **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
-  Pages: Overview, Chat, Agents (per-agent Files/Skills/Knowledge/Config tabs), Skills,
-  Built-in Tools, MCP Servers (scaffold), Cron (scaffold), Providers.
+  Pages: Overview, Chat, Agents (per-agent Files/Skills/MCP Tools/Knowledge/
+  Images/Config tabs), Skills, Built-in Tools, MCP Servers, Cron (scaffold),
+  Providers.
 - **Agent loop**: LLM may call tools, observe results, iterate (capped).
+- **MCP tools**: external MCP servers (stdio or HTTP, e.g.
+  kubernetes-mcp-server) are registered in `data/mcp_servers.json` and connected
+  **manually** (Connect button / `POST /api/mcp-servers/{id}/connect`) — nothing
+  spawns at startup. On connect, `internal/mcp` discovers the server's tools and
+  caches them namespaced as `mcp_<server>_<tool>`. Agents then enable exactly the
+  tools they may use via `config.json` `enabled_tools` (Agents → MCP Tools tab,
+  or `PUT/DELETE /api/agents/{k}/custom-tools/{name}`); only enabled tools are
+  exposed to the LLM, and `Engine.callTool` re-checks the allow-list server-side
+  before delegating to `mcp.Manager.CallTool` (which lazily reconnects a
+  configured-but-disconnected server). Tool names resolve back by longest-prefix
+  matching against known server names, so underscores in tool names are safe.
+  Built-in tools stay gated by the global `AGENTICGO_TOOL_ALLOWLIST`; MCP tools
+  are purely additive per agent.
 - **LLM providers**: OpenAI-compatible endpoints only (Ollama / LM Studio / vLLM /
   OpenAI), behind a `llm.Provider` interface. Named provider configs are managed
   from the UI, persisted to `data/providers.json`, and seeded from env on first
@@ -83,26 +98,32 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   `search_docs` + `read_doc` (knowledge-base documents).
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
-- **Scaffolding**: `internal/scaffold` holds in-memory MCP-server and cron-job
-  registries backing the UI/API shape only — nothing connects or executes yet.
+- **Scaffolding**: `internal/scaffold` holds the in-memory cron-job registry backing
+  the UI/API shape only — nothing executes yet. (MCP servers graduated from
+  scaffolding to a real client in `internal/mcp`.)
 
 ## Architecture map (how it fits together)
 
 - `cmd/agenticgo/main.go` — wiring: config → agents.Registry (seeds a `default`
   agent) → store → llm.Provider → providers.Store (seeded from env) →
-  scaffold.Store → tools.Registry → agent.Engine → server.
+  mcp.Manager + scaffold.Store → tools.Registry → agent.Engine → server.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
   `AgentsDir`. `Agent.SystemPrompt()` composes context files.
 - `internal/skills` — `Load(skillsDir)` → `[]Skill`; `Prompt(skills, enabled)` →
   system-prompt section.
+- `internal/mcp` — MCP client: JSON-persisted server registry
+  (`data/mcp_servers.json`), manual connect/disconnect, tool discovery cache,
+  namespaced `CallTool` with lazy reconnect (`github.com/modelcontextprotocol/
+  go-sdk/mcp`, stdio `CommandTransport` + HTTP `StreamableClientTransport`).
 - `internal/providers` — named OpenAI-compatible provider configs in
   `data/providers.json`; `GetLLM(name)` resolves names (empty = default).
-- `internal/scaffold` — in-memory MCP-server and cron-job registries (not
-  persisted, not executed — API/UI shape only).
+- `internal/scaffold` — in-memory cron-job registry (not persisted, not
+  executed — API/UI shape only).
 - `internal/agent` — `Engine` resolves an agent, builds the system prompt
   (base + context files + skills + per-agent knowledge) and runs the tool loop,
   persisting turns under `(agent, session)`. `SetProviderLookup` enables
-  per-request provider overrides.
+  per-request provider overrides; `SetMCPManager` enables per-agent MCP tools,
+  gated by `AgentConfig.EnabledTools` in `callTool`.
 - `internal/server` — chi routes for agent CRUD / context files / skills /
   providers / tools / sessions / MCP / cron / evolve, plus `/ws` streaming chat.
   The agent key (and optional provider name) flows through WS messages and API
@@ -117,6 +138,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 data/
   agenticgo.db                 # SQLite (messages + knowledge, per-agent)
   providers.json               # named OpenAI-compatible provider configs
+  mcp_servers.json             # MCP server definitions (MCP tools)
   workspace/                   # fallback tool jail
   skills/                      # GLOBAL skills library (upload once; enabled per agent)
     <skill>/SKILL.md
@@ -125,6 +147,7 @@ data/
       SOUL.md AGENTS.md IDENTITY.md
       USER.md USER_PREDEFINED.md CAPABILITIES.md HEARTBEAT.md
       config.json                 # per-agent LLM settings + enabled_skills
+                                  #   + enabled_tools (MCP tools)
       images/                  # reference images for vision models (Images tab)
       workspace/               # per-agent tool jail
 ```
@@ -139,10 +162,12 @@ data/
 
 ## Planned next phases (from the README roadmap)
 
-1. **Phase 3 — MCP client**: integrate `github.com/modelcontextprotocol/go-sdk/mcp`
-   to attach external tools at runtime. MCP tools must be merged into the existing
-   `tools.Registry`, namespaced (e.g. `mcp_<server>_<tool>`), and gated by the same
-   allow-list. Config lists MCP servers (stdio and/or HTTP/SSE).
+1. ~~**Phase 3 — MCP client**~~ **(done)**: `internal/mcp` integrates
+   `github.com/modelcontextprotocol/go-sdk/mcp` (stdio + HTTP). Tools are
+   discovered on manual Connect, namespaced `mcp_<server>_<tool>`, and enabled
+   per agent via `config.json` `enabled_tools` (Agents → MCP Tools tab) —
+   separate from the built-in `AGENTICGO_TOOL_ALLOWLIST`, which still gates the
+   system tools.
 2. **Phase 5 — Docker + k8s**: multi-stage Dockerfile producing a static binary;
    manifests for Deployment + PVC (for the data dir) + Service (+ optional Ingress).
 
@@ -193,7 +218,8 @@ curl localhost:18099/api/agents             # list agents
 - `internal/providers/providers.go` — named provider configs (JSON store)
 - `internal/crypto/crypto.go` — AES-256-GCM encryption of secrets at rest (`AGENTICGO_SECRET_KEY` or `data/secret.key`)
 - `internal/logger/logger.go` — minimal `Logger` interface + slog backend (debug via `AGENTICGO_DEBUG`)
-- `internal/scaffold/scaffold.go` — in-memory MCP-server + cron-job scaffolding
+- `internal/scaffold/scaffold.go` — in-memory cron-job scaffolding
+- `internal/mcp/mcp.go` — MCP client manager (server registry, discovery, `CallTool`)
 - `internal/llm/openai.go` — OpenAI-compatible provider on the official SDK
   (streaming + tool calls); `openai.go.bak` = pre-SDK reference copy (not compiled)
 - `internal/tools/{tools,fs,exec,memory}.go` — registry, filesystem jail,

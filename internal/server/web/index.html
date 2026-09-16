@@ -219,6 +219,7 @@
     <div class="tabs">
       <button class="tab active" data-atab="files">Files</button>
       <button class="tab" data-atab="skills">Skills</button>
+      <button class="tab" data-atab="custom-tools">MCP Tools</button>
       <button class="tab" data-atab="knowledge">Learnings</button>
       <button class="tab" data-atab="images">Images</button>
       <button class="tab" data-atab="config">Config</button>
@@ -237,6 +238,7 @@
       </div>
     </div>
     <div id="atab-skills" style="display:none" class="page-body"></div>
+    <div id="atab-custom-tools" style="display:none" class="page-body"></div>
     <div id="atab-knowledge" style="display:none" class="page-body"></div>
     <div id="atab-images" style="display:none" class="page-body">
       <div id="img-novision" class="empty" style="display:none">The selected provider's model does not support images. Enable "Vision" on the provider or this agent's Config to use reference images.</div>
@@ -303,14 +305,17 @@
     </div>
   </div>
 
-  <!-- MCP servers (scaffolding) -->
+  <!-- MCP servers -->
   <div class="page" id="page-mcp">
-    <div class="page-head"><h1>MCP Servers</h1><div class="sub">Attach external tools over the Model Context Protocol. <span class="pill accent">Scaffolding — not connected yet (Phase 3)</span></div></div>
+    <div class="page-head"><h1>MCP Servers</h1><div class="sub">Attach external tools over the Model Context Protocol. <b>Connect</b> a server to discover its tools, then allow them per agent on Agents → MCP Tools.</div></div>
     <div class="page-body">
-      <div class="toolbar"><button id="mcp-new">+ Add MCP Server</button></div>
-      <table class="list"><thead><tr><th>Name</th><th>Transport</th><th>Endpoint / Command</th><th></th></tr></thead>
+      <div class="toolbar">
+        <button id="mcp-new">+ Add MCP Server</button>
+        <button class="ghost" id="mcp-refresh">Refresh</button>
+      </div>
+      <table class="list"><thead><tr><th>Name</th><th>Transport</th><th>Endpoint / Command</th><th>Status</th><th></th></tr></thead>
       <tbody id="mcp-tbody"></tbody></table>
-      <div class="empty" id="mcp-empty" style="display:none">No MCP servers configured yet.</div>
+      <div class="empty" id="mcp-empty" style="display:none">No MCP servers configured yet. Add one, e.g. <code>npx kubernetes-mcp-server@latest</code> (stdio), then Connect to discover its tools.</div>
     </div>
   </div>
 
@@ -645,10 +650,12 @@
     document.querySelectorAll('[data-atab]').forEach(x => x.classList.toggle('active', x.dataset.atab === tab));
     $('atab-files').style.display = tab === 'files' ? '' : 'none';
     $('atab-skills').style.display = tab === 'skills' ? '' : 'none';
+    $('atab-custom-tools').style.display = tab === 'custom-tools' ? '' : 'none';
     $('atab-knowledge').style.display = tab === 'knowledge' ? '' : 'none';
     $('atab-images').style.display = tab === 'images' ? '' : 'none';
     $('atab-config').style.display = tab === 'config' ? '' : 'none';
     if (tab === 'skills') renderAgentSkills();
+    if (tab === 'custom-tools') renderAgentCustomTools();
     if (tab === 'knowledge') renderAgentKnowledge();
     if (tab === 'images') renderAgentImages();
     if (tab === 'config') renderAgentConfig();
@@ -756,6 +763,65 @@
         el.appendChild(d);
       });
     }).catch(() => { el.innerHTML = '<div class="empty">Failed to load skills.</div>'; });
+  }
+
+  // Render the MCP Tools tab: discovered MCP tools, ticked per agent.
+  function renderAgentCustomTools(){
+    const el = $('atab-custom-tools');
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/custom-tools').then(list => {
+      el.innerHTML = '<div style="color:var(--muted); font-size:12.5px; margin-bottom:12px">' +
+        'These tools come from connected <a href="#" onclick="showPage(\'mcp\');return false">MCP servers</a>. ' +
+        'Tick exactly which tools this agent may use — like skills, nothing is enabled implicitly.</div>';
+      if (!list || !list.length) {
+        el.innerHTML += '<div class="empty">No MCP tools discovered yet. Add an MCP server on the ' +
+          '<a href="#" onclick="showPage(\'mcp\');return false">MCP Servers page</a> and click <b>Connect</b> to discover its tools, then come back here to allow them.</div>';
+        return;
+      }
+      // Group by server so a whole server's tools can be allowed at once.
+      const byServer = {};
+      list.forEach(t => { (byServer[t.server] = byServer[t.server] || []).push(t); });
+      Object.keys(byServer).sort().forEach(server => {
+        const tools = byServer[server];
+        const group = document.createElement('div');
+        group.className = 'card'; group.style.marginBottom = '14px';
+        group.innerHTML =
+          '<div style="display:flex; align-items:center; gap:10px; margin-bottom:8px">' +
+            '<span class="pill accent">MCP</span><b>' + esc(server) + '</b>' +
+            '<span style="color:var(--muted); font-size:11.5px">' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') + '</span>' +
+            '<span style="flex:1"></span>' +
+            '<button class="ghost" style="padding:3px 10px; font-size:11.5px">Allow all</button>' +
+          '</div><div class="ct-list"></div>';
+        group.querySelector('button').addEventListener('click', () => {
+          const off = tools.filter(t => !t.enabled);
+          if (!off.length) { toast('All tools from "' + server + '" already allowed'); return; }
+          if (!confirm('Allow all ' + tools.length + ' tools from "' + server + '" for ' + detailAgent + '?')) return;
+          Promise.all(off.map(t => api('/api/agents/' + encodeURIComponent(detailAgent) + '/custom-tools/' + encodeURIComponent(t.discovered), { method:'PUT' })))
+            .then(() => { toast('✓ Allowed ' + off.length + ' tools from "' + server + '"'); renderAgentCustomTools(); })
+            .catch(e => { toast('Failed: ' + e.message); renderAgentCustomTools(); });
+        });
+        const listEl = group.querySelector('.ct-list');
+        tools.forEach(t => {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex; align-items:flex-start; gap:10px; padding:6px 0; border-top:1px solid var(--border)';
+          row.innerHTML =
+            '<input type="checkbox" id="ctc-' + esc(t.discovered) + '"' + (t.enabled ? ' checked' : '') + ' style="width:auto; margin-top:2px; flex:none">' +
+            '<div style="flex:1; min-width:0">' +
+              '<label for="ctc-' + esc(t.discovered) + '" style="cursor:pointer; font-weight:600; font-size:13px; margin:0">' + esc(t.name) + '</label> ' +
+              '<span class="pill">' + esc(t.discovered) + '</span>' +
+              (t.description ? '<div style="color:var(--muted); font-size:12px; margin-top:2px">' + esc(t.description) + '</div>' : '') +
+            '</div>';
+          row.querySelector('input').addEventListener('change', ev => {
+            const on = ev.target.checked;
+            api('/api/agents/' + encodeURIComponent(detailAgent) + '/custom-tools/' + encodeURIComponent(t.discovered),
+                { method: on ? 'PUT' : 'DELETE' })
+              .then(() => { t.enabled = on; toast((on ? '✓ Allowed ' : '✓ Blocked ') + '"' + t.name + '" for ' + detailAgent); })
+              .catch(e => { ev.target.checked = !on; toast('Failed: ' + e.message); });
+          });
+          listEl.appendChild(row);
+        });
+        el.appendChild(group);
+      });
+    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load MCP tools.</div>'; });
   }
 
   function renderAgentKnowledge(){
@@ -876,29 +942,51 @@
     }).catch(e => toast('Load tools failed: ' + e.message));
   }
 
-  // ---------- MCP servers (scaffolding) ----------
+  // ---------- MCP servers ----------
   function loadMCP(){
     api('/api/mcp-servers').then(list => {
       const tbody = $('mcp-tbody'); tbody.innerHTML = '';
       $('mcp-empty').style.display = (list && list.length) ? 'none' : '';
       (list||[]).forEach(srv => {
         const tr = document.createElement('tr');
+        const endpoint = srv.transport === 'stdio' ? (srv.command + ' ' + (srv.args||[]).join(' ')) : srv.url;
+        let status;
+        if (srv.connected) status = '<span class="pill ok">connected · ' + srv.tool_count + ' tools</span>';
+        else if (srv.error) status = '<span class="pill" style="color:var(--danger); border-color:var(--danger)" title="' + esc(srv.error) + '">error</span>';
+        else status = '<span class="pill">off</span>';
         tr.innerHTML = '<td class="namecell">' + esc(srv.name) + '</td><td><span class="pill">' + esc(srv.transport) + '</span></td>' +
-          '<td>' + esc(srv.transport === 'stdio' ? (srv.command + ' ' + (srv.args||[]).join(' ')) : srv.url) + '</td>' +
-          '<td><button class="danger" data-id="' + esc(srv.id) + '">Delete</button></td>';
-        tr.querySelector('button').addEventListener('click', () =>
-          api('/api/mcp-servers/' + srv.id, { method:'DELETE' }).then(loadMCP).catch(e => toast(e.message)));
+          '<td style="max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="' + esc(endpoint) + '">' + esc(endpoint) + '</td>' +
+          '<td>' + status + '</td>' +
+          '<td style="white-space:nowrap">' +
+            (srv.connected
+              ? '<button class="ghost" data-act="disconnect">Disconnect</button> '
+              : '<button data-act="connect">Connect</button> ') +
+            '<button class="danger" data-act="delete">Delete</button></td>';
+        tr.querySelectorAll('button').forEach(btn => btn.addEventListener('click', () => {
+          const act = btn.dataset.act;
+          if (act === 'delete') {
+            if (!confirm('Delete MCP server "' + srv.name + '"? Its tools stop being available to every agent.')) return;
+            api('/api/mcp-servers/' + srv.id, { method:'DELETE' }).then(loadMCP).catch(e => toast(e.message));
+            return;
+          }
+          btn.disabled = true; btn.textContent = act === 'connect' ? 'Connecting…' : 'Disconnecting…';
+          api('/api/mcp-servers/' + srv.id + '/' + act, { method:'POST' })
+            .then(st => { if (act === 'connect') toast('✓ ' + srv.name + ': ' + st.tool_count + ' tools discovered — allow them per agent on Agents → MCP Tools'); loadMCP(); })
+            .catch(e => { toast((act === 'connect' ? 'Connect' : 'Disconnect') + ' failed: ' + e.message); loadMCP(); });
+        }));
         tbody.appendChild(tr);
       });
     }).catch(e => toast('Load failed: ' + e.message));
   }
+  $('mcp-refresh').addEventListener('click', loadMCP);
   $('mcp-new').addEventListener('click', () => {
     openModal('<h2>Add MCP server</h2>' +
-      '<label>Name</label><input id="mcp-name" placeholder="filesystem">' +
+      '<label>Name (a-z, 0-9, -, _ — becomes the tool name prefix)</label><input id="mcp-name" placeholder="kubernetes">' +
       '<label>Transport</label><select id="mcp-transport"><option value="stdio">stdio</option><option value="http">http</option></select>' +
-      '<div id="mcp-stdio-fields"><label>Command</label><input id="mcp-command" placeholder="npx -y @modelcontextprotocol/server-filesystem">' +
-      '<label>Args (comma separated)</label><input id="mcp-args" placeholder="/path/to/dir"></div>' +
+      '<div id="mcp-stdio-fields"><label>Command</label><input id="mcp-command" placeholder="npx">' +
+      '<label>Args (comma separated)</label><input id="mcp-args" placeholder="kubernetes-mcp-server@latest"></div>' +
       '<div id="mcp-http-fields" style="display:none"><label>URL</label><input id="mcp-url" placeholder="http://localhost:3001/mcp"></div>' +
+      '<div style="color:var(--muted); font-size:11.5px; margin-top:8px">Servers are only spawned when you click Connect.</div>' +
       '<div class="row"><button class="ghost" id="mcp-cancel">Cancel</button><button id="mcp-save">Add</button></div>');
     $('mcp-transport').addEventListener('change', () => {
       $('mcp-stdio-fields').style.display = $('mcp-transport').value === 'stdio' ? '' : 'none';
