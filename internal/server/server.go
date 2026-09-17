@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,6 +74,9 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Get("/agents/{key}/custom-tools", s.handleListCustomTools)
 		r.Put("/agents/{key}/custom-tools/{name}", s.handleEnableCustomTool)
 		r.Delete("/agents/{key}/custom-tools/{name}", s.handleDisableCustomTool)
+		r.Get("/agents/{key}/extra-commands", s.handleListAgentExtraCommands)
+		r.Put("/agents/{key}/extra-commands/{name}", s.handleEnableExtraCommand)
+		r.Delete("/agents/{key}/extra-commands/{name}", s.handleDisableExtraCommand)
 		r.Get("/agents/{key}/images", s.handleListImages)
 		r.Post("/agents/{key}/images", s.handleUploadImage)
 		r.Delete("/agents/{key}/images/{name}", s.handleDeleteImage)
@@ -99,6 +103,7 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 
 		// Capabilities.
 		r.Get("/tools", s.handleListTools)
+		r.Get("/extra-commands", s.handleListExtraCommands)
 
 		// Providers (OpenAI-compatible endpoints).
 		r.Get("/providers", s.handleListProviders)
@@ -940,6 +945,89 @@ func (s *Server) setCustomToolEnabled(w http.ResponseWriter, r *http.Request, on
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "tool": name, "enabled": on})
+}
+
+// --- Extra (dangerous) exec commands: env-declared, enabled per agent ---
+
+// extraCommandWithState is one AGENTICGO_EXTRA_EXEC_COMMANDS entry plus
+// whether the agent in context has it enabled.
+type extraCommandWithState struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+// handleListExtraCommands lists the env-declared extra commands (read-only,
+// for the sidebar Extra Dangerous Exec Commands page).
+func (s *Server) handleListExtraCommands(w http.ResponseWriter, _ *http.Request) {
+	cmds := s.cfg.ExtraExecCommands
+	if cmds == nil {
+		cmds = []string{}
+	}
+	writeJSON(w, http.StatusOK, cmds)
+}
+
+// handleListAgentExtraCommands lists the env-declared extra commands annotated
+// with the agent's enabled state (Agents → Extra Dangerous Exec Commands tab).
+func (s *Server) handleListAgentExtraCommands(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	enabled := map[string]bool{}
+	for _, c := range ag.Config.EnabledCommands {
+		enabled[c] = true
+	}
+	out := make([]extraCommandWithState, 0, len(s.cfg.ExtraExecCommands))
+	for _, c := range s.cfg.ExtraExecCommands {
+		out = append(out, extraCommandWithState{Name: c, Enabled: enabled[c]})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleEnableExtraCommand(w http.ResponseWriter, r *http.Request) {
+	s.setExtraCommandEnabled(w, r, true)
+}
+
+func (s *Server) handleDisableExtraCommand(w http.ResponseWriter, r *http.Request) {
+	s.setExtraCommandEnabled(w, r, false)
+}
+
+func (s *Server) setExtraCommandEnabled(w http.ResponseWriter, r *http.Request, on bool) {
+	key := chi.URLParam(r, "key")
+	name := chi.URLParam(r, "name")
+
+	// The command must be declared via AGENTICGO_EXTRA_EXEC_COMMANDS.
+	if !slices.Contains(s.cfg.ExtraExecCommands, name) {
+		writeError(w, http.StatusNotFound, fmt.Errorf("command %q is not declared in AGENTICGO_EXTRA_EXEC_COMMANDS", name))
+		return
+	}
+
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	set := map[string]bool{}
+	for _, c := range ag.Config.EnabledCommands {
+		set[c] = true
+	}
+	if on {
+		set[name] = true
+	} else {
+		delete(set, name)
+	}
+	cmds := make([]string, 0, len(set))
+	for c := range set {
+		cmds = append(cmds, c)
+	}
+	sort.Strings(cmds)
+	if _, err := s.agents.SetEnabledCommands(key, cmds); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "command": name, "enabled": on})
 }
 
 // --- Cron jobs (scaffolding) ---

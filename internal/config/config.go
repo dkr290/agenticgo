@@ -37,6 +37,14 @@ type Config struct {
 	// ExecAllowList is the set of command names the exec tool may run.
 	ExecAllowList []string
 
+	// ExtraExecCommands are additional, potentially dangerous command names
+	// (e.g. kubectl, git) baked into the deployment image and declared via
+	// AGENTICGO_EXTRA_EXEC_COMMANDS. They are NOT on the exec allow-list by
+	// default: each agent must explicitly enable them (config.json
+	// enabled_commands, Agents → Extra Dangerous Exec Commands tab) before the
+	// exec tool will run them.
+	ExtraExecCommands []string
+
 	// ToolAllowList restricts which tools are exposed. Defaults to all built-ins;
 	// remove entries to disable tools.
 	ToolAllowList []string
@@ -90,6 +98,7 @@ func Load() (*Config, error) {
 		"ls,cat,grep,find,echo,pwd,head,tail,wc,mkdir,touch,cp,mv,date"))
 	cfg.ToolAllowList = splitList(getEnv("AGENTICGO_TOOL_ALLOWLIST",
 		"read_file,write_file,list_files,exec"))
+	cfg.ExtraExecCommands = sanitizeCommands(splitList(getEnv("AGENTICGO_EXTRA_EXEC_COMMANDS", "")))
 
 	cfg.MaxAgentIterations = getEnvInt("AGENTICGO_MAX_ITERATIONS", 12)
 	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
@@ -141,6 +150,19 @@ func splitList(s string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+// sanitizeCommands drops any command names containing a path separator —
+// extra exec commands must be bare names resolved via PATH, never paths.
+func sanitizeCommands(cmds []string) []string {
+	out := cmds[:0]
+	for _, c := range cmds {
+		if strings.ContainsAny(c, "/\\") {
+			continue
+		}
+		out = append(out, c)
 	}
 	return out
 }

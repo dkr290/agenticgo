@@ -131,6 +131,21 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 		b.WriteString("\n\n")
 	}
 
+	// Extra (dangerous) exec commands this agent has enabled, beyond the safe
+	// global allow-list. Listing them tells the model it may run them via exec.
+	if len(ag.Config.EnabledCommands) > 0 {
+		b.WriteString("## Extra Exec Commands\n")
+		b.WriteString("In addition to the standard allow-listed commands, you may run the " +
+			"following commands with the exec tool (use them with care — they can " +
+			"modify or delete real state):\n")
+		for _, c := range ag.Config.EnabledCommands {
+			b.WriteString("- ")
+			b.WriteString(c)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
 	// Curated knowledge (self-evolution memory), per agent. Capped and labelled
 	// as historical; the agent should use memory_search to find relevant facts
 	// rather than treating everything here as current.
@@ -400,7 +415,8 @@ func (e *Engine) docReader(agentKey string) tools.DocReader {
 
 // callTool routes a tool call: per-agent memory tools are constructed on the
 // fly (scoped to the agent); custom (MCP) tools go to the MCP manager (gated
-// by the agent's enabled_tools); everything else goes to the shared registry.
+// by the agent's enabled_tools); extra (dangerous) exec commands are gated by
+// the agent's enabled_commands; everything else goes to the shared registry.
 func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.RawMessage) (string, error) {
 	switch name {
 	case "memory_search":
@@ -425,7 +441,51 @@ func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.
 		}
 		return e.mcp.CallTool(ctx, name, args)
 	}
+	if name == "exec" {
+		return e.callExec(ctx, agentKey, args)
+	}
 	return e.tools.Call(ctx, name, args)
+}
+
+// callExec runs the exec tool, extending it with the agent's enabled extra
+// (dangerous) commands. Safe built-in commands are handled by the shared exec
+// tool (global AGENTICGO_EXEC_ALLOWLIST). Extra commands from
+// AGENTICGO_EXTRA_EXEC_COMMANDS are executed only when the agent has ticked
+// them (config.json enabled_commands), via a per-run exec tool scoped to that
+// one command and jailed to the agent's own workspace.
+func (e *Engine) callExec(ctx context.Context, agentKey string, args json.RawMessage) (string, error) {
+	var in struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	fields := strings.Fields(in.Command)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("empty command")
+	}
+	cmdName := fields[0]
+
+	// Not an extra command: fall through to the shared exec tool, which
+	// enforces the global AGENTICGO_EXEC_ALLOWLIST.
+	if !slices.Contains(e.cfg.ExtraExecCommands, cmdName) {
+		return e.tools.Call(ctx, "exec", args)
+	}
+
+	ag, err := e.agents.Get(agentKey)
+	if err != nil {
+		return "", err
+	}
+	if !slices.Contains(ag.Config.EnabledCommands, cmdName) {
+		return "", fmt.Errorf("command %q is not enabled for agent %q (tick it on the Extra Dangerous Exec Commands tab)", cmdName, agentKey)
+	}
+
+	// Jail to the agent's own workspace; fall back to the global one.
+	workspace, err := e.agents.WorkspaceDir(agentKey)
+	if err != nil {
+		workspace = e.cfg.WorkspaceDir
+	}
+	return tools.NewExec(workspace, []string{cmdName}).Call(ctx, args)
 }
 
 // Evolve summarizes the session and appends learnings to the agent's knowledge
