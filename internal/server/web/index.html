@@ -188,11 +188,11 @@
     <div class="chat-meta">
       <span class="field"><label for="chat-agent">Agent</label>
         <select id="chat-agent" title="Agent"></select></span>
-      <span class="field"><label for="chat-provider">Provider</label>
-        <select id="chat-provider" title="Provider"><option value="">Default provider</option></select></span>
       <span class="field"><label for="chat-session">Conversation</label>
         <input id="chat-session" placeholder="name" value="default" style="width:150px"
                 title="Name of this conversation — type any name; reopen it later from the History page"></span>
+      <span class="field"><label for="chat-provider">Provider</label>
+        <span id="chat-provider" style="font-size:13px;color:var(--muted)">—</span></span>
       <div class="spacer" style="flex:1"></div>
       <button class="ghost" id="chat-evolve" title="Extract learnings from this session">Evolve</button>
       <button class="ghost" id="chat-clear">Clear</button>
@@ -486,7 +486,7 @@
     if (page === 'memory') loadMemoryPage();
     if (page === 'kb') loadKBPage();
     if (page === 'providers') loadProviders();
-    if (page === 'chat') { fillChatAgents(); fillChatProviders(); }
+    if (page === 'chat') { fillChatAgents().then(() => updateChatProvider()); }
   }
   document.querySelectorAll('.nav .item').forEach(i =>
     i.addEventListener('click', () => show(i.dataset.page)));
@@ -531,13 +531,12 @@
     addMsg('user', text + (pendingImages.length ? '  📷[' + pendingImages.join(', ') + ']' : ''));
     $('input').value=''; setBusy(true); currentAssistant = null;
     ws.send(JSON.stringify({ agent, session: $('chat-session').value || 'default',
-      message: text, provider: $('chat-provider').value, images: pendingImages.slice() }));
+      message: text, images: pendingImages.slice() }));
     pendingImages = []; renderAttachBar();
   }
   $('send').addEventListener('click', send);
   $('input').addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
-  $('chat-agent').addEventListener('change', refreshAttach);
-  $('chat-provider').addEventListener('change', refreshAttach);
+  $('chat-agent').addEventListener('change', () => { updateChatProvider(); refreshAttach(); });
   $('chat-clear').addEventListener('click', () => { $('chat').innerHTML=''; currentAssistant=null; });
   $('chat-evolve').addEventListener('click', () => {
     const agent = $('chat-agent').value; if (!agent) return;
@@ -554,7 +553,7 @@
   }
 
   function fillChatAgents(){
-    api('/api/agents').then(list => {
+    return api('/api/agents').then(list => {
       const sel = $('chat-agent'); const prev = sel.value || currentAgent;
       sel.innerHTML = '';
       (list||[]).forEach(a => {
@@ -564,18 +563,22 @@
       if (prev) sel.value = prev;
     }).catch(()=>{});
   }
-  function fillChatProviders(){
-    api('/api/providers').then(list => {
-      const sel = $('chat-provider'); const prev = sel.value;
-      sel.innerHTML = '<option value="">Default provider</option>';
-      (list||[]).forEach(p => {
-        const o = document.createElement('option'); o.value = p.name;
-        o.textContent = (p.display_name || p.name) + (p.default ? ' ★' : '');
-        sel.appendChild(o);
-      });
-      sel.value = prev;
-      refreshAttach();
-    }).catch(()=>{});
+  function updateChatProvider(){
+    const agent = $('chat-agent').value;
+    if (!agent) { $('chat-provider').textContent = '—'; return; }
+    api('/api/agents/' + encodeURIComponent(agent))
+      .then(a => {
+        const provName = (a.config && a.config.provider) || '';
+        if (provName) {
+          api('/api/providers').then(list => {
+            const p = (list||[]).find(x => x.name === provName);
+            $('chat-provider').textContent = p ? (p.display_name || p.name) : provName;
+          }).catch(() => { $('chat-provider').textContent = provName; });
+        } else {
+          $('chat-provider').textContent = 'Default';
+        }
+      })
+      .catch(() => { $('chat-provider').textContent = '—'; });
   }
   // ---------- chat history page ----------
   // All sessions are listed on a dedicated page (agent dropdown + name filter)
@@ -621,6 +624,7 @@
     show('chat');
     $('chat-agent').value = agent;
     $('chat-session').value = session;
+    updateChatProvider();
     refreshAttach();
     loadConversationMessages(agent, session);
   }
@@ -643,10 +647,10 @@
   // refreshAttach enables/disables the attach button based on whether the
   // currently selected agent+provider is vision-capable (blocked up front).
   function refreshAttach(){
-    const agent = $('chat-agent').value, provider = $('chat-provider').value;
+    const agent = $('chat-agent').value;
     const btn = $('attach');
     if (!agent) { btn.disabled = true; btn.title = 'Pick an agent first'; return; }
-    api('/api/agents/' + encodeURIComponent(agent) + '/vision?provider=' + encodeURIComponent(provider || ''))
+    api('/api/agents/' + encodeURIComponent(agent) + '/vision')
       .then(v => {
         const vision = !!(v && v.vision);
         btn.disabled = !vision;
