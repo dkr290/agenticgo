@@ -36,9 +36,17 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   (`GetKnowledgeDocForAgent` filters by agent, so one agent cannot read another's docs).
   Titles are listed in the system prompt so the agent knows to search.
 - **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
-  Pages: Overview, Chat, Agents (per-agent Files/Skills/MCP Tools/Knowledge/
-  Images/Config tabs), Skills, Built-in Tools, MCP Servers, Cron (scaffold),
-  Providers.
+  Pages: Overview, Chat, Chat History, Agents (per-agent Files/Skills/MCP Tools/
+  Knowledge/Images/Config tabs), Skills, Built-in Tools, MCP Servers,
+  Cron (scaffold), Providers. Past conversations live on the dedicated
+  **Chat History** page (not the sidebar, so long histories don't bloat the
+  nav): a table of all sessions (`GET /api/sessions`) with an agent dropdown
+  and a name filter, click a row to reopen it in Chat with history loaded,
+  Delete button per row (`DELETE /api/sessions/{agent}/{session}`). The
+  Overview caps its recent-conversations card at 10 with a link to the full
+  page. The chat header's labeled **Conversation** free-text field names new
+  conversations; existing ones are reopened from Chat History (there is no
+  session dropdown).
 - **Agent loop**: LLM may call tools, observe results, iterate (capped).
 - **MCP tools**: external MCP servers (stdio or HTTP, e.g.
   kubernetes-mcp-server) are registered in `data/mcp_servers.json` and connected
