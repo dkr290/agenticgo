@@ -1,7 +1,8 @@
 // Package scaffold holds in-memory scaffolding registries for features that
-// are designed but not yet implemented: MCP servers (Phase 3) and cron jobs.
-// They back the UI pages and API endpoints so the shape of the data and the
-// workflows are settled before the real functionality lands.
+// are designed but not yet implemented: cron jobs. They back the UI pages and
+// API endpoints so the shape of the data and the workflows are settled before
+// the real functionality lands. (MCP servers graduated from scaffolding to a
+// real client in internal/mcp.)
 package scaffold
 
 import (
@@ -9,17 +10,6 @@ import (
 	"sync"
 	"time"
 )
-
-// MCPServer is a configured (but not yet connected) MCP server.
-type MCPServer struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Transport string    `json:"transport"` // "stdio" | "http"
-	Command   string    `json:"command,omitempty"`
-	Args      []string  `json:"args,omitempty"`
-	URL       string    `json:"url,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-}
 
 // CronJob is a scheduled (but not yet executed) agent run.
 type CronJob struct {
@@ -36,7 +26,6 @@ type CronJob struct {
 // State is intentionally not persisted yet.
 type Store struct {
 	mu      sync.RWMutex
-	mcp     map[string]*MCPServer
 	cron    map[string]*CronJob
 	counter int
 }
@@ -44,7 +33,6 @@ type Store struct {
 // New creates an empty scaffold store.
 func New() *Store {
 	return &Store{
-		mcp:  map[string]*MCPServer{},
 		cron: map[string]*CronJob{},
 	}
 }
@@ -52,48 +40,6 @@ func New() *Store {
 func (s *Store) nextID(prefix string) string {
 	s.counter++
 	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano()/1e6, s.counter)
-}
-
-// --- MCP servers ---
-
-// AddMCPServer registers an MCP server definition.
-func (s *Store) AddMCPServer(srv MCPServer) (*MCPServer, error) {
-	if srv.Name == "" {
-		return nil, fmt.Errorf("name is required")
-	}
-	if srv.Transport != "stdio" && srv.Transport != "http" {
-		return nil, fmt.Errorf("transport must be \"stdio\" or \"http\"")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := srv
-	cp.ID = s.nextID("mcp")
-	cp.CreatedAt = time.Now()
-	s.mcp[cp.ID] = &cp
-	out := cp
-	return &out, nil
-}
-
-// ListMCPServers returns all registered MCP servers.
-func (s *Store) ListMCPServers() []MCPServer {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]MCPServer, 0, len(s.mcp))
-	for _, srv := range s.mcp {
-		out = append(out, *srv)
-	}
-	return out
-}
-
-// DeleteMCPServer removes an MCP server by ID.
-func (s *Store) DeleteMCPServer(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.mcp[id]; !ok {
-		return fmt.Errorf("mcp server %q not found", id)
-	}
-	delete(s.mcp, id)
-	return nil
 }
 
 // --- Cron jobs ---

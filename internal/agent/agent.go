@@ -10,12 +10,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
 	"github.com/dkr290/agenticgo/internal/llm"
+	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/skills"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
@@ -57,6 +59,7 @@ type Engine struct {
 	store      *store.Store
 	agents     *agents.Registry
 	providers  ProviderLookup // optional: per-request provider override
+	mcp        *mcp.Manager   // optional: custom (MCP) tools, enabled per agent
 	basePrompt string
 }
 
@@ -68,6 +71,10 @@ func New(cfg *config.Config, p llm.Provider, reg *tools.Registry, st *store.Stor
 // SetProviderLookup enables per-request provider overrides (used by the
 // Providers UI; empty provider name falls back to the default provider).
 func (e *Engine) SetProviderLookup(pl ProviderLookup) { e.providers = pl }
+
+// SetMCPManager wires the MCP manager so agents can use MCP tools they
+// have enabled (config.json enabled_tools, the MCP Tools tab).
+func (e *Engine) SetMCPManager(m *mcp.Manager) { e.mcp = m }
 
 // buildSystemPrompt composes: base prompt + agent context files + skills +
 // accumulated per-agent knowledge.
@@ -214,6 +221,10 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		toolSpec(tools.NewReadDoc(e.docReader(ag.Key))),
 	)
 
+	// Custom (MCP) tools enabled for this agent. Only ticked tools are
+	// exposed; callTool re-checks the allow-list before executing.
+	specs = append(specs, e.mcpToolSpecs(ag)...)
+
 	for iter := 0; iter < e.cfg.MaxAgentIterations; iter++ {
 		req := llm.ChatRequest{
 			Model:       provider.Model(),
@@ -291,6 +302,35 @@ func toolSpec(t tools.Tool) llm.ToolSpec {
 	}
 }
 
+// mcpToolSpecs renders the specs of the custom (MCP) tools the agent has
+// enabled. Tools whose server is not connected are silently skipped — they
+// become visible once the server is connected and the tool is discovered.
+func (e *Engine) mcpToolSpecs(ag *agents.Agent) []llm.ToolSpec {
+	if e.mcp == nil || len(ag.Config.EnabledTools) == 0 {
+		return nil
+	}
+	out := make([]llm.ToolSpec, 0, len(ag.Config.EnabledTools))
+	for _, name := range ag.Config.EnabledTools {
+		t, ok := e.mcp.Lookup(name)
+		if !ok {
+			continue // not discovered (server offline or tool removed)
+		}
+		desc := t.Description
+		if desc == "" {
+			desc = "Tool from MCP server " + t.Server
+		}
+		out = append(out, llm.ToolSpec{
+			Type: "function",
+			Function: llm.FunctionSpec{
+				Name:        name,
+				Description: desc,
+				Parameters:  t.Schema,
+			},
+		})
+	}
+	return out
+}
+
 // resolveProvider picks the provider for a run: a per-request override wins,
 // then the agent's configured provider (if any), then the engine default.
 // If no named provider is requested and no provider lookup is configured,
@@ -359,7 +399,8 @@ func (e *Engine) docReader(agentKey string) tools.DocReader {
 }
 
 // callTool routes a tool call: per-agent memory tools are constructed on the
-// fly (scoped to the agent); everything else goes to the shared registry.
+// fly (scoped to the agent); custom (MCP) tools go to the MCP manager (gated
+// by the agent's enabled_tools); everything else goes to the shared registry.
 func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.RawMessage) (string, error) {
 	switch name {
 	case "memory_search":
@@ -370,6 +411,19 @@ func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.
 		return tools.NewSearchDocs(e.docSearcher(agentKey)).Call(ctx, args)
 	case "read_doc":
 		return tools.NewReadDoc(e.docReader(agentKey)).Call(ctx, args)
+	}
+	if mcp.IsMCPToolName(name) {
+		if e.mcp == nil {
+			return "", fmt.Errorf("MCP tools are not configured")
+		}
+		ag, err := e.agents.Get(agentKey)
+		if err != nil {
+			return "", err
+		}
+		if !slices.Contains(ag.Config.EnabledTools, name) {
+			return "", fmt.Errorf("tool %q is not enabled for agent %q (tick it on the MCP Tools tab)", name, agentKey)
+		}
+		return e.mcp.CallTool(ctx, name, args)
 	}
 	return e.tools.Call(ctx, name, args)
 }

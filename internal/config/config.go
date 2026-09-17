@@ -50,6 +50,13 @@ type Config struct {
 	ObservationTTLDays    int
 	ObservationKeepLatest int
 
+	// SecretKey is the base64-encoded 32-byte master key used to encrypt
+	// provider API keys at rest (AGENTICGO_SECRET_KEY). No default on purpose:
+	// when empty, a random key is generated once and persisted to
+	// DataDir/secret.key (0600) — supplying it via env (e.g. from a secrets
+	// manager) is stronger because the key never touches disk.
+	SecretKey string
+
 	// Debug enables verbose debug logging to stderr (AGENTICGO_DEBUG=true).
 	Debug bool
 
@@ -88,6 +95,9 @@ func Load() (*Config, error) {
 	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
 	cfg.ObservationKeepLatest = getEnvInt("AGENTICGO_OBSERVATION_KEEP", 200)
 	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
+
+	// No default: empty means "generate/persist a key under DataDir".
+	cfg.SecretKey = getEnv("AGENTICGO_SECRET_KEY", "")
 
 	if cfg.LLMBaseURL == "" {
 		return nil, fmt.Errorf("AGENTICGO_LLM_BASE_URL must not be empty")

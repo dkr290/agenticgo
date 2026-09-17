@@ -11,6 +11,15 @@ this lists what's still needed to make the project fully functional).
   calling agent so one agent can never read another's docs by guessing IDs). System prompt
   updated to tell agents to search then read.
 
+- **Add posibility of installation of additional command line packages**: Like `kubectl` or `git` or any possible package.
+  Somehow to install them into the environment in some folder available to the path and expose them.
+  The Cutom tools instllation needs to be done in some folder inside /data.
+  Then provide themto the agent like MCP tools on the page called `Environment Tools`.
+  Make Warning there that thoose tools can be used and can have potential harm of the systems.
+  So install them only if are aware.Excample kubectl can be user with full potential to delete stuff.
+  (OR more secure when the dockerfile got build we add kubectl , git etc whatever installation is
+  and provide it as a tool with some env var to the allowed list.)
+
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
   registered against the global `cfg.WorkspaceDir` (`cmd/agenticgo/main.go:74`). Wire per-agent
@@ -148,7 +157,7 @@ this lists what's still needed to make the project fully functional).
   model sees images. If you switch that provider's model to a non-vision one, untick the
   box or override per agent (Config → Vision). There is no reliable API to auto-detect
   vision support, so it stays manual.
-- *Where things live (answers for on-boarding):*
+- _Where things live (answers for on-boarding):_
   - Agent definitions + context files: `data/agents/<key>/*.md` (`AgentsDir`)
   - Per-agent LLM config + enabled skills: `data/agents/<key>/config.json`
   - Global skills library (upload once, enable per agent): `data/skills/<skill>/SKILL.md`

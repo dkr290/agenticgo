@@ -48,6 +48,12 @@ type AgentConfig struct {
 	// for this agent. nil/empty = none: skills are never inherited implicitly,
 	// they must be enabled per agent (UI Skills tab or this field).
 	EnabledSkills []string `json:"enabled_skills,omitempty"`
+	// EnabledTools lists namespaced MCP tool names
+	// ("mcp_<server>_<tool>") this agent may use. nil/empty = none: MCP
+	// tools are never inherited implicitly, they must be enabled per agent
+	// (UI MCP Tools tab or this field). Built-in tools are gated by the
+	// global AGENTICGO_TOOL_ALLOWLIST instead.
+	EnabledTools []string `json:"enabled_tools,omitempty"`
 }
 
 // configFileName is where a per-agent LLM config is stored on disk.
@@ -159,6 +165,24 @@ func (r *Registry) SetEnabledSkills(key string, skillKeys []string) (*Agent, err
 	}
 	cfg := r.loadConfig(dir)
 	cfg.EnabledSkills = skillKeys
+	if err := r.saveConfig(dir, cfg); err != nil {
+		return nil, err
+	}
+	return r.Get(key)
+}
+
+// SetEnabledTools replaces the agent's enabled MCP-tools list in its
+// config.json and returns the refreshed agent.
+func (r *Registry) SetEnabledTools(key string, toolNames []string) (*Agent, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Exists(key) {
+		return nil, fmt.Errorf("agent %q not found", key)
+	}
+	cfg := r.loadConfig(dir)
+	cfg.EnabledTools = toolNames
 	if err := r.saveConfig(dir, cfg); err != nil {
 		return nil, err
 	}
