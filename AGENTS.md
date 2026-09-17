@@ -16,7 +16,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
   a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens/vision,
-  nil = inherit, plus `enabled_skills` and `enabled_tools`), a per-agent `images/`
+  nil = inherit, plus `enabled_skills`, `enabled_tools` and `enabled_commands`), a per-agent `images/`
   dir (reference pictures/screenshots for vision models), and a per-agent
   `workspace/` (tool jail).
   Files that don't exist yet are still listed (empty) in the UI so they can be created.
@@ -71,7 +71,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   level. Wired into the providers/LLM path for now (`providers.Store.SetLogger`,
   `llm.OpenAIProvider.SetLogger`); other packages keep `logger.Nop()` until
   adopted. Secrets are redacted (`****` + last 4) before logging.
-- **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`.
+- **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`. The `exec`
+  tool's safe commands come from `AGENTICGO_EXEC_ALLOWLIST`; additional dangerous
+  commands (`AGENTICGO_EXTRA_EXEC_COMMANDS`) are enabled per agent.
 - **Vision / images**: a provider can be flagged `vision` (its model understands
   images — set manually, there's no reliable API to detect it). An agent's
   `config.json` `vision` tri-state overrides it (nil = inherit) for when the agent
@@ -82,7 +84,12 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   attach blocked up front and any images dropped in `Engine.Run`, so they never
   error. Resolution: `Engine.EffectiveVision` (agent override > provider flag).
 - **Security**: filesystem tools jailed to a workspace; `exec` runs only allow-listed
-  commands; tools gated by a global allow-list. Context-file names are validated
+  commands (`AGENTICGO_EXEC_ALLOWLIST`); tools gated by a global allow-list.
+  Extra, dangerous commands (e.g. `kubectl`, `git`) are declared via
+  `AGENTICGO_EXTRA_EXEC_COMMANDS` but are **never** runnable until an agent enables
+  them via `config.json` `enabled_commands` (Agents → Extra Dangerous Exec Commands
+  tab); `Engine.callExec` re-checks per run and runs them jailed to the agent's own
+  workspace. Context-file names are validated
   against an allow-list (`validContextFile`) to prevent path traversal; agent keys are
   validated (`ValidKey`) since they're used as directory names.
 - **Memory**: SQLite (`modernc.org/sqlite`, no cgo). Two kinds, scoped **per agent**:
@@ -148,6 +155,7 @@ data/
       USER.md USER_PREDEFINED.md CAPABILITIES.md HEARTBEAT.md
       config.json                 # per-agent LLM settings + enabled_skills
                                   #   + enabled_tools (MCP tools)
+                                  #   + enabled_commands (extra dangerous exec cmds)
       images/                  # reference images for vision models (Images tab)
       workspace/               # per-agent tool jail
 ```

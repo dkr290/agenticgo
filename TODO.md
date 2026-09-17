@@ -11,14 +11,18 @@ this lists what's still needed to make the project fully functional).
   calling agent so one agent can never read another's docs by guessing IDs). System prompt
   updated to tell agents to search then read.
 
-- **Add posibility of installation of additional command line packages**: Like `kubectl` or `git` or any possible package.
-  Somehow to install them into the environment in some folder available to the path and expose them.
-  The Cutom tools instllation needs to be done in some folder inside /data.
-  Then provide themto the agent like MCP tools on the page called `Environment Tools`.
-  Make Warning there that thoose tools can be used and can have potential harm of the systems.
-  So install them only if are aware.Excample kubectl can be user with full potential to delete stuff.
-  (OR more secure when the dockerfile got build we add kubectl , git etc whatever installation is
-  and provide it as a tool with some env var to the allowed list.)
+- ~~**Add posibility of installation of additional command line packages**~~ **DONE**:
+  took the "more secure" branch — commands are baked into the deployment image and
+  declared via `AGENTICGO_EXTRA_EXEC_COMMANDS` (comma-separated bare names, e.g.
+  `kubectl,git,jq`), not installed at runtime. They are never on the exec allow-list
+  by default: each agent enables the ones it may run via `config.json`
+  `enabled_commands` (Agents → Extra Dangerous Exec Commands tab, or
+  `PUT/DELETE /api/agents/{k}/extra-commands/{name}`), exactly like skills/MCP tools.
+  `Engine.callExec` re-checks the allow-list per run and executes enabled commands
+  via a per-run exec tool jailed to the agent's own workspace. The commands are
+  listed read-only on the new Extra Dangerous Exec Commands sidebar page (with a
+  DANGEROUS warning), and surfaced in the system prompt once enabled.
+  (The runtime-install-into-/data variant was deliberately not built.)
 
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are

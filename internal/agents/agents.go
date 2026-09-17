@@ -54,6 +54,13 @@ type AgentConfig struct {
 	// (UI MCP Tools tab or this field). Built-in tools are gated by the
 	// global AGENTICGO_TOOL_ALLOWLIST instead.
 	EnabledTools []string `json:"enabled_tools,omitempty"`
+	// EnabledCommands lists extra (dangerous) exec command names from
+	// AGENTICGO_EXTRA_EXEC_COMMANDS that this agent may run via the exec
+	// tool. nil/empty = none: extra commands are never inherited implicitly,
+	// they must be enabled per agent (UI Extra Dangerous Exec Commands tab
+	// or this field). Safe built-in commands are gated by the global
+	// AGENTICGO_EXEC_ALLOWLIST instead.
+	EnabledCommands []string `json:"enabled_commands,omitempty"`
 }
 
 // configFileName is where a per-agent LLM config is stored on disk.
@@ -183,6 +190,24 @@ func (r *Registry) SetEnabledTools(key string, toolNames []string) (*Agent, erro
 	}
 	cfg := r.loadConfig(dir)
 	cfg.EnabledTools = toolNames
+	if err := r.saveConfig(dir, cfg); err != nil {
+		return nil, err
+	}
+	return r.Get(key)
+}
+
+// SetEnabledCommands replaces the agent's enabled extra-exec-commands list in
+// its config.json and returns the refreshed agent.
+func (r *Registry) SetEnabledCommands(key string, cmds []string) (*Agent, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Exists(key) {
+		return nil, fmt.Errorf("agent %q not found", key)
+	}
+	cfg := r.loadConfig(dir)
+	cfg.EnabledCommands = cmds
 	if err := r.saveConfig(dir, cfg); err != nil {
 		return nil, err
 	}
