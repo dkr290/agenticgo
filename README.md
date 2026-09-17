@@ -131,6 +131,7 @@ Health check: `curl http://localhost:8080/healthz`
 | `AGENTICGO_AGENTS_DIR` | `data/agents` | Root dir containing one folder per agent |
 | `AGENTICGO_WORKSPACE_DIR` | `data/workspace` | Fallback jail root for tools |
 | `AGENTICGO_EXEC_ALLOWLIST` | `ls,cat,grep,find,echo,pwd,head,tail,wc,mkdir,touch,cp,mv,date` | Commands `exec` may run |
+| `AGENTICGO_EXTRA_EXEC_COMMANDS` | *(empty)* | Extra, dangerous commands baked into the deployment image (e.g. `kubectl,git,jq`). Not runnable by default — each agent must enable them via `config.json` `enabled_commands` (Agents → Extra Dangerous Exec Commands tab). |
 | `AGENTICGO_TOOL_ALLOWLIST` | *(empty = all)* | Restrict which tools are exposed |
 | `AGENTICGO_MAX_ITERATIONS` | `12` | Max agent loop iterations |
 | `AGENTICGO_OBSERVATION_TTL_DAYS` | `14` | Prune observations older than this |
@@ -191,6 +192,12 @@ Health check: `curl http://localhost:8080/healthz`
 
 ### Built-in tools
 - `GET /api/tools` — list registered built-in tools.
+
+### Extra dangerous exec commands
+- `GET /api/extra-commands` — list commands declared via `AGENTICGO_EXTRA_EXEC_COMMANDS`.
+- `GET /api/agents/{key}/extra-commands` — list them with this agent's enabled state.
+- `PUT /api/agents/{key}/extra-commands/{name}` — enable one for the agent.
+- `DELETE /api/agents/{key}/extra-commands/{name}` — disable it.
 
 ### Providers
 - `GET /api/providers` — list provider configs.
