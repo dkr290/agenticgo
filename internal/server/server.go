@@ -100,6 +100,7 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		// Conversations.
 		r.Get("/sessions", s.handleListSessions)
 		r.Get("/sessions/{agent}/{session}/messages", s.handleSessionMessages)
+		r.Delete("/sessions/{agent}/{session}", s.handleDeleteSession)
 
 		// Capabilities.
 		r.Get("/tools", s.handleListTools)
@@ -685,12 +686,22 @@ func (s *Server) handleAddDoc(w http.ResponseWriter, r *http.Request) {
 // --- Sessions ---
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.store.ListSessions(r.Context())
+	sessions, err := s.store.ListSessions(r.Context(), r.URL.Query().Get("agent"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sessions)
+}
+
+// handleDeleteSession removes a whole agent+session conversation.
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	agent, session := chi.URLParam(r, "agent"), chi.URLParam(r, "session")
+	if err := s.store.DeleteSession(r.Context(), agent, session); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"deleted": session})
 }
 
 func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {

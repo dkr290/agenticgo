@@ -445,11 +445,18 @@ type Session struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
-// ListSessions returns all known agent+session pairs, most recent first.
-func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT agent, session, COUNT(*), MAX(created_at)
-		 FROM messages GROUP BY agent, session ORDER BY MAX(created_at) DESC`)
+// ListSessions returns known agent+session pairs, most recent first.
+// An empty agent returns sessions for all agents.
+func (s *Store) ListSessions(ctx context.Context, agent string) ([]Session, error) {
+	query := `SELECT agent, session, COUNT(*), MAX(created_at) FROM messages`
+	args := []any{}
+	if agent != "" {
+		query += ` WHERE agent = ?`
+		args = append(args, agent)
+	}
+	query += ` GROUP BY agent, session ORDER BY MAX(created_at) DESC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query sessions: %w", err)
 	}
@@ -464,6 +471,19 @@ func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 		out = append(out, sess)
 	}
 	return out, rows.Err()
+}
+
+// DeleteSession removes all messages of one agent+session conversation.
+func (s *Store) DeleteSession(ctx context.Context, agent, session string) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM messages WHERE agent = ? AND session = ?`, agent, session)
+	if err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("session %q for agent %q not found", session, agent)
+	}
+	return nil
 }
 
 // Message is a stored conversation turn.

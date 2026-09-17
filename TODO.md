@@ -24,6 +24,18 @@ this lists what's still needed to make the project fully functional).
   DANGEROUS warning), and surfaced in the system prompt once enabled.
   (The runtime-install-into-/data variant was deliberately not built.)
 
+- ~~**Fix the chat conversations**~~ **DONE**: conversations are now first-class in the UI.
+  All chat-header controls are labeled uniformly (**Agent** / **Provider** / **Conversation**);
+  the Conversation field stays free-text (type any name — no dropdown). The standalone
+  Load-history button is gone: the sidebar **Chat History** section lists all conversations
+  grouped by agent (menu-style rows with an icon, name + message count, 10 most recent per
+  agent, DOM-built so names are XSS-safe); clicking one opens the chat with that
+  agent+conversation and auto-loads its history, and a hover ✕ deletes it
+  (`DELETE /api/sessions/{agent}/{session}` → `store.DeleteSession`, 404 when unknown).
+  The Overview sessions table links into the same open-conversation flow. The sidebar list
+  refreshes on page load, after each completed chat turn (WS `done`), and after a delete.
+  Covered by `internal/store/sessions_test.go`.
+
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
   registered against the global `cfg.WorkspaceDir` (`cmd/agenticgo/main.go:74`). Wire per-agent
@@ -137,7 +149,8 @@ this lists what's still needed to make the project fully functional).
   `config.json` `enabled_skills` (`PUT/DELETE /api/agents/{k}/skills/{skill}`, Agents →
   Skills tab checkboxes). Legacy per-agent `skills/` dirs are migrated + kept enabled on
   first startup.
-- **Agent-scoped session listing**: `GET /api/sessions` returns everything; filter by agent.
+- ~~**Agent-scoped session listing**~~ **DONE**: `GET /api/sessions?agent=X` filters by
+  agent (`store.ListSessions(ctx, agent)`, empty = all).
 - **Observation creation in the UI**: `POST /api/agents/{k}/observations` exists; the Memory
   page has no control that calls it.
 - **WebSocket hardening**: the SPA has no client-side reconnect/backoff when the socket drops,

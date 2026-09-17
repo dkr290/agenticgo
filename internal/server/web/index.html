@@ -87,8 +87,12 @@
   .msg.system { align-self: center; color: var(--muted); font-size: 12px; }
   #composer { display: flex; gap: 8px; padding: 14px 28px; border-top: 1px solid var(--border); background: var(--bg); }
   #input { flex: 1; resize: none; }
-  .chat-meta { display: flex; gap: 10px; align-items: center; padding: 12px 28px 0; flex-wrap: wrap; }
+  .chat-meta { display: flex; gap: 10px; align-items: flex-end; padding: 12px 28px 0; flex-wrap: wrap; }
   .chat-meta select { width: auto; min-width: 150px; }
+  .chat-meta .field { display: flex; flex-direction: column; gap: 2px; }
+  .chat-meta .field label { font-size: 10px; letter-spacing: .07em; color: var(--muted); text-transform: uppercase; }
+  .sess-link { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .sess-link:hover { text-decoration: underline; }
 
   /* ---------- Agents page ---------- */
   #agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
@@ -154,6 +158,7 @@
     <div class="section">Core</div>
     <div class="item" data-page="overview"><span class="icon">▦</span> Overview</div>
     <div class="item" data-page="chat"><span class="icon">💬</span> Chat</div>
+    <div class="item" data-page="history"><span class="icon">📜</span> History</div>
     <div class="item" data-page="agents"><span class="icon">🤖</span> Agents</div>
     <div class="section">Capabilities</div>
     <div class="item" data-page="skills"><span class="icon">⚡</span> Skills</div>
@@ -181,10 +186,13 @@
   <!-- Chat -->
   <div class="page" id="page-chat">
     <div class="chat-meta">
-      <select id="chat-agent" title="Agent"></select>
-      <select id="chat-provider" title="Provider"><option value="">Default provider</option></select>
-      <input id="chat-session" placeholder="session" value="default" style="width:130px">
-      <button class="ghost" id="chat-load">Load history</button>
+      <span class="field"><label for="chat-agent">Agent</label>
+        <select id="chat-agent" title="Agent"></select></span>
+      <span class="field"><label for="chat-provider">Provider</label>
+        <select id="chat-provider" title="Provider"><option value="">Default provider</option></select></span>
+      <span class="field"><label for="chat-session">Conversation</label>
+        <input id="chat-session" placeholder="name" value="default" style="width:150px"
+                title="Name of this conversation — type any name; reopen it later from the History page"></span>
       <div class="spacer" style="flex:1"></div>
       <button class="ghost" id="chat-evolve" title="Extract learnings from this session">Evolve</button>
       <button class="ghost" id="chat-clear">Clear</button>
@@ -197,6 +205,22 @@
       <button id="send">Send</button>
     </div>
     <div id="attach-bar" style="display:none; padding:6px 28px; background:var(--bg); border-top:1px solid var(--border); font-size:12px"></div>
+  </div>
+
+  <!-- Chat History -->
+  <div class="page" id="page-history">
+    <div class="page-head"><h1>Chat History</h1><div class="sub">All past conversations, across every agent. Click one to reopen it in Chat.</div></div>
+    <div class="page-body">
+      <div class="toolbar">
+        <select id="hist-agent" style="max-width:220px"><option value="">All agents</option></select>
+        <input id="hist-search" placeholder="Filter by name…" style="max-width:280px">
+        <div class="spacer"></div>
+        <button class="ghost" id="hist-refresh">Refresh</button>
+      </div>
+      <table class="list"><thead><tr><th>Agent</th><th>Conversation</th><th>Messages</th><th>Updated</th><th></th></tr></thead>
+      <tbody id="hist-tbody"></tbody></table>
+      <div class="empty" id="hist-empty" style="display:none">No conversations yet.</div>
+    </div>
   </div>
 
   <!-- Agents list -->
@@ -447,11 +471,12 @@
 
   // ---------- navigation ----------
   let currentAgent = null;
-  const pages = ['overview','chat','agents','agent-detail','skills','tools','commands','mcp','cron','memory','kb','providers'];
+  const pages = ['overview','chat','history','agents','agent-detail','skills','tools','commands','mcp','cron','memory','kb','providers'];
   function show(page) {
     pages.forEach(p => $('page-' + p).classList.toggle('active', p === page));
     document.querySelectorAll('.nav .item').forEach(i => i.classList.toggle('active', i.dataset.page === page));
     if (page === 'overview') loadOverview();
+    if (page === 'history') loadHistory();
     if (page === 'agents') loadAgents();
     if (page === 'skills') loadSkills();
     if (page === 'tools') loadTools();
@@ -487,6 +512,7 @@
         addMsg('tool', '→ ' + (ev.tool_result || '').slice(0, 800));
       } else if (ev.kind === 'done') {
         currentAssistant = null; setBusy(false);
+        if ($('page-history').classList.contains('active')) loadHistory();
       } else if (ev.kind === 'error') {
         addMsg('system', '⚠ ' + (ev.error || 'unknown error'));
         currentAssistant = null; setBusy(false);
@@ -520,14 +546,12 @@
       .then(() => addMsg('system', '✓ Evolution complete — learnings saved.'))
       .catch(e => addMsg('system', '⚠ Evolution failed: ' + e.message));
   });
-  $('chat-load').addEventListener('click', () => {
-    const agent = $('chat-agent').value, session = $('chat-session').value || 'default';
-    if (!agent) return;
-    $('chat').innerHTML='';
+  function loadConversationMessages(agent, session){
+    $('chat').innerHTML=''; currentAssistant = null;
     api('/api/sessions/' + encodeURIComponent(agent) + '/' + encodeURIComponent(session) + '/messages')
       .then(msgs => { (msgs||[]).forEach(m => addMsg(m.role === 'user' ? 'user' : m.role === 'assistant' ? 'assistant' : 'system', m.content)); })
       .catch(e => toast('Load failed: ' + e.message));
-  });
+  }
 
   function fillChatAgents(){
     api('/api/agents').then(list => {
@@ -552,6 +576,64 @@
       sel.value = prev;
       refreshAttach();
     }).catch(()=>{});
+  }
+  // ---------- chat history page ----------
+  // All sessions are listed on a dedicated page (agent dropdown + name filter)
+  // instead of the sidebar, so a long history doesn't bloat the navigation.
+  let histSessions = [];
+  function loadHistory(){
+    Promise.all([api('/api/sessions').catch(()=>[]), api('/api/agents').catch(()=>[])])
+      .then(([list, agents]) => {
+        histSessions = list || [];
+        const sel = $('hist-agent'); const prev = sel.value;
+        sel.innerHTML = '<option value="">All agents</option>';
+        (agents||[]).forEach(a => {
+          const o = document.createElement('option'); o.value = a.key; o.textContent = a.name + ' (' + a.key + ')';
+          sel.appendChild(o);
+        });
+        sel.value = prev;
+        renderHistory();
+      });
+  }
+  function renderHistory(){
+    const agent = $('hist-agent').value;
+    const q = ($('hist-search').value || '').toLowerCase();
+    const rows = histSessions.filter(s =>
+      (!agent || s.agent === agent) && (!q || s.session.toLowerCase().includes(q)));
+    const tbody = $('hist-tbody'); tbody.innerHTML = '';
+    $('hist-empty').style.display = rows.length ? 'none' : '';
+    rows.forEach(s => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + esc(s.agent) + '</td>' +
+        '<td><a class="sess-link">' + esc(s.session) + '</a></td>' +
+        '<td>' + s.messages + '</td>' +
+        '<td>' + new Date(s.updated_at*1000).toLocaleString() + '</td>' +
+        '<td><button class="danger" style="padding:4px 10px">Delete</button></td>';
+      tr.querySelector('.sess-link').addEventListener('click', () => openConversation(s.agent, s.session));
+      tr.querySelector('button').addEventListener('click', () => deleteConversation(s.agent, s.session));
+      tbody.appendChild(tr);
+    });
+  }
+  $('hist-agent').addEventListener('change', renderHistory);
+  $('hist-search').addEventListener('input', renderHistory);
+  $('hist-refresh').addEventListener('click', loadHistory);
+  function openConversation(agent, session){
+    show('chat');
+    $('chat-agent').value = agent;
+    $('chat-session').value = session;
+    refreshAttach();
+    loadConversationMessages(agent, session);
+  }
+  function deleteConversation(agent, session){
+    if (!confirm('Delete conversation "' + session + '" (' + agent + ')? This cannot be undone.')) return;
+    api('/api/sessions/' + encodeURIComponent(agent) + '/' + encodeURIComponent(session), { method: 'DELETE' })
+      .then(() => {
+        if ($('chat-agent').value === agent && ($('chat-session').value || 'default') === session) {
+          $('chat').innerHTML=''; currentAssistant = null;
+        }
+        loadHistory();
+      })
+      .catch(e => toast('Delete failed: ' + e.message));
   }
 
   // ---------- chat image attach (vision) ----------
@@ -609,10 +691,15 @@
         '<div class="card" style="margin-top:16px"><b>Default provider:</b> ' +
           (def ? esc(def.display_name || def.name) + ' — <code>' + esc(def.base_url) + '</code> model <code>' + esc(def.model) + '</code>'
                : '<span style="color:var(--muted)">none configured</span>') + '</div>' +
-        '<div class="card" style="margin-top:14px"><b>Chat history sessions</b>' +
+        '<div class="card" style="margin-top:14px"><b>Recent conversations</b> ' +
+          ((sessions||[]).length > 10 ? '<a class="sess-link" id="ov-history-link" style="font-size:12px">view all ' + sessions.length + ' →</a>' : '') +
           ((sessions||[]).length ? '<table class="list" style="margin-top:10px"><thead><tr><th>Agent</th><th>Session</th><th>Messages</th><th>Updated</th></tr></thead><tbody>' +
-            sessions.map(s => '<tr><td>'+esc(s.agent)+'</td><td>'+esc(s.session)+'</td><td>'+s.messages+'</td><td>'+new Date(s.updated_at*1000).toLocaleString()+'</td></tr>').join('') +
+            sessions.slice(0, 10).map((s, i) => '<tr><td>'+esc(s.agent)+'</td><td><a class="sess-link" data-idx="'+i+'">'+esc(s.session)+'</a></td><td>'+s.messages+'</td><td>'+new Date(s.updated_at*1000).toLocaleString()+'</td></tr>').join('') +
             '</tbody></table>' : '<div class="empty">No conversations yet.</div>') + '</div>';
+      el.querySelectorAll('.sess-link[data-idx]').forEach(a => a.addEventListener('click', () => {
+        const s = sessions[+a.dataset.idx]; if (s) openConversation(s.agent, s.session);
+      }));
+      const hl = $('ov-history-link'); if (hl) hl.addEventListener('click', () => show('history'));
     });
     function stat(label, n){ return '<div class="card"><div style="font-size:26px; font-weight:650">'+n+'</div><div style="color:var(--muted); font-size:12.5px">'+label+'</div></div>'; }
   }
