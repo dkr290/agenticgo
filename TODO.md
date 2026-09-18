@@ -50,6 +50,27 @@ this lists what's still needed to make the project fully functional).
   from `internal/agents/agents.go`. Covered by `internal/agenttemplates/agenttemplates_test.go`
   and `internal/agents/agents_test.go`.
 
+- ~~**Agent memory-write tool + knowledge delete + core-tools visibility.**~~ **DONE**:
+  agents can now persist durable learnings themselves via a new always-on `memory_save`
+  tool (`tools.NewMemorySave` → `store.AddKnowledge`), complementing the background
+  `Evolve` pass — the AGENTS.md template's "remember this → save in this turn" instruction
+  is now backed by a real tool. `store.AddKnowledge` dedupes exact-match content per agent
+  (`ErrKnowledgeDuplicate`, treated as a no-op) and caps entries at 500 bytes. Knowledge
+  entries now carry stable IDs (`store.KnowledgeEntry{ID,Content,CreatedAt}`; `Knowledge()`
+  returns entries), and wrong/outdated memories can be deleted from the Memory tab
+  (`DELETE /api/agents/{k}/knowledge/{id}` → `store.DeleteKnowledge`, agent-scoped, 404 when
+  unknown). Fixed a latent bug: the FTS5 "special delete" triggers (`knowledge_ad`,
+  `kdocs_ad`) errored in this build — they now delete the FTS row by `rowid` (recreated
+  idempotently in `migrate`, which also fixes the pre-existing broken document delete).
+  The always-on memory/knowledge tools (`memory_search`, `memory_save`, `record_observation`,
+  `search_docs`, `read_doc`) are listed read-only as **Core agent tools** on the Built-in
+  Tools page via `GET /api/tools/core` (single source of truth: `tools.CoreTools()`); they
+  cannot be enabled/disabled/removed. The AGENTS.md template was trimmed to the features
+  agenticgo actually has (single-user chat; cron is scaffolded) — no group-chat/NO_REPLY/
+  scheduling instructions. Covered by `internal/store/knowledge_test.go`,
+  `internal/server/knowledge_test.go`, `internal/tools/memory_test.go`, and
+  `internal/agent/agent_test.go`.
+
 
 
 
@@ -159,8 +180,9 @@ this lists what's still needed to make the project fully functional).
 
 ## 4. API / UI hardening gaps
 
-- **Knowledge delete endpoint + UI button**: the Memory page is read-only today
-  (no DELETE for knowledge entries). (Skill delete is done: `DELETE /api/skills/{key}`.)
+- ~~**Knowledge delete endpoint + UI button**~~ **DONE**: `DELETE /api/agents/{k}/knowledge/{id}`
+  + a per-row ✕ on the Memory page (see §1 memory-write item above). (Skill delete is done:
+  `DELETE /api/skills/{key}`.)
 - ~~**Skill enable/disable per agent**~~ **DONE**: skills now live in a global library
   (`data/skills/`, upload via `POST /api/skills/upload`) and are enabled per agent via
   `config.json` `enabled_skills` (`PUT/DELETE /api/agents/{k}/skills/{skill}`, Agents →

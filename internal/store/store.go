@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,11 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// ErrKnowledgeDuplicate is returned by AddKnowledge when the agent already has
+// an identical knowledge entry. Callers can treat it as a no-op ("already
+// known") rather than a failure.
+var ErrKnowledgeDuplicate = errors.New("knowledge entry already exists")
 
 // Store wraps the SQLite database.
 type Store struct {
@@ -78,8 +84,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(content, agent UNIND
 CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
     INSERT INTO knowledge_fts(rowid, content, agent) VALUES (new.id, new.content, new.agent);
 END;
+-- Note: the FTS5 "special delete" INSERT ... VALUES('delete',...) form errors
+-- in this build, so the delete triggers remove the FTS row by rowid directly.
 CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
-    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, agent) VALUES('delete', old.id, old.content, old.agent);
+    DELETE FROM knowledge_fts WHERE rowid = old.id;
 END;
 
 -- Knowledge-base documents: user-uploaded reference text, full-text indexed
@@ -97,7 +105,7 @@ CREATE TRIGGER IF NOT EXISTS kdocs_ai AFTER INSERT ON knowledge_docs BEGIN
     INSERT INTO knowledge_docs_fts(rowid, title, content, agent) VALUES (new.id, new.title, new.content, new.agent);
 END;
 CREATE TRIGGER IF NOT EXISTS kdocs_ad AFTER DELETE ON knowledge_docs BEGIN
-    INSERT INTO knowledge_docs_fts(knowledge_docs_fts, rowid, title, content, agent) VALUES('delete', old.id, old.title, old.content, old.agent);
+    DELETE FROM knowledge_docs_fts WHERE rowid = old.id;
 END;
 `
 	if _, err := s.db.Exec(schema); err != nil {
@@ -106,6 +114,20 @@ END;
 	// Idempotent column additions for DBs created before per-agent scoping.
 	s.addColumnIfMissing("messages", "agent", `ALTER TABLE messages ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`)
 	s.addColumnIfMissing("knowledge", "agent", `ALTER TABLE knowledge ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`)
+	// Replace the broken FTS5 "special delete" triggers (from older DBs) with
+	// rowid deletes. CREATE TRIGGER IF NOT EXISTS won't overwrite them, so drop
+	// then recreate. Idempotent.
+	if _, err := s.db.Exec(`
+DROP TRIGGER IF EXISTS knowledge_ad;
+CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+    DELETE FROM knowledge_fts WHERE rowid = old.id;
+END;
+DROP TRIGGER IF EXISTS kdocs_ad;
+CREATE TRIGGER IF NOT EXISTS kdocs_ad AFTER DELETE ON knowledge_docs BEGIN
+    DELETE FROM knowledge_docs_fts WHERE rowid = old.id;
+END;`); err != nil {
+		return fmt.Errorf("recreate fts delete triggers: %w", err)
+	}
 	// Backfill the FTS index for knowledge rows that predate it.
 	if _, err := s.db.Exec(`
 		INSERT INTO knowledge_fts(rowid, content, agent)
@@ -167,8 +189,38 @@ func (s *Store) Messages(ctx context.Context, agent, session string, limit int) 
 	return rev, rows.Err()
 }
 
-// AddKnowledge appends a knowledge entry (self-evolution memory) for an agent.
+// KnowledgeEntry is one curated long-term knowledge row for an agent. The ID
+// lets callers (e.g. the Memory UI) delete a specific entry.
+type KnowledgeEntry struct {
+	ID        int64  `json:"id"`
+	Content   string `json:"content"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// maxKnowledgeBytes caps a single knowledge entry so one save cannot bloat the
+// curated table (knowledge is selectively recalled, so entries should be
+// concise one-liners).
+const maxKnowledgeBytes = 500
+
+// AddKnowledge appends a knowledge entry (self-evolution or agent-saved
+// memory) for an agent. It dedupes exact-match content for the agent (a repeat
+// "remember X" is a no-op) and rejects over-long content. Returns
+// ErrKnowledgeDuplicate when the entry already exists.
 func (s *Store) AddKnowledge(ctx context.Context, agent, content string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return fmt.Errorf("knowledge content must not be empty")
+	}
+	if len(content) > maxKnowledgeBytes {
+		return fmt.Errorf("knowledge content too long (%d bytes, max %d)", len(content), maxKnowledgeBytes)
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM knowledge WHERE agent = ? AND content = ? LIMIT 1`, agent, content).Scan(&exists); err == nil {
+		return ErrKnowledgeDuplicate
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("check knowledge duplicate: %w", err)
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO knowledge (agent, content, created_at) VALUES (?,?,?)`,
 		agent, content, time.Now().Unix())
@@ -179,29 +231,44 @@ func (s *Store) AddKnowledge(ctx context.Context, agent, content string) error {
 }
 
 // Knowledge returns recent knowledge entries for an agent, oldest first.
-func (s *Store) Knowledge(ctx context.Context, agent string, limit int) ([]string, error) {
+func (s *Store) Knowledge(ctx context.Context, agent string, limit int) ([]KnowledgeEntry, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT content FROM knowledge WHERE agent = ? ORDER BY id DESC LIMIT ?`, agent, limit)
+		`SELECT id, content, created_at FROM knowledge WHERE agent = ? ORDER BY id DESC LIMIT ?`, agent, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query knowledge: %w", err)
 	}
 	defer rows.Close()
 
-	var rev []string
+	var rev []KnowledgeEntry
 	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
+		var e KnowledgeEntry
+		if err := rows.Scan(&e.ID, &e.Content, &e.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan knowledge: %w", err)
 		}
-		rev = append(rev, c)
+		rev = append(rev, e)
 	}
 	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
 		rev[i], rev[j] = rev[j], rev[i]
 	}
 	return rev, rows.Err()
+}
+
+// DeleteKnowledge removes one knowledge entry by id, scoped to the agent so
+// one agent cannot delete another's memory. The knowledge_ad AFTER DELETE
+// trigger keeps the FTS index in sync. Returns sql.ErrNoRows when the entry is
+// not found for the agent.
+func (s *Store) DeleteKnowledge(ctx context.Context, id int64, agent string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM knowledge WHERE id = ? AND agent = ?`, id, agent)
+	if err != nil {
+		return fmt.Errorf("delete knowledge: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // SearchKnowledge runs an FTS5 keyword search over an agent's curated

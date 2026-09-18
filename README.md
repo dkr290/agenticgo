@@ -45,7 +45,9 @@ single static binary, in Docker, or on Kubernetes.
   Two memory kinds, designed so a recurring agent (e.g. a k8s cron watcher) doesn't
   hallucinate from stale data:
   - **Curated knowledge** — durable learnings, full-text searchable (SQLite FTS5) via
-    the `memory_search` tool; only selectively recalled, not bulk-injected.
+    the `memory_search` tool; only selectively recalled, not bulk-injected. The agent
+    also saves durable facts itself via the `memory_save` tool, and entries can be
+    deleted from the Memory page.
   - **Observations** — timestamped, time-bound findings (cluster state, etc.). Only the
     *latest* is injected into prompts; old ones are pruned by retention
     (`AGENTICGO_OBSERVATION_TTL_DAYS` / `AGENTICGO_OBSERVATION_KEEP`).
@@ -185,13 +187,15 @@ Health check: `curl http://localhost:8080/healthz`
 ### Conversations & memory
 - `GET /api/sessions` — list agent+session pairs.
 - `GET /api/sessions/{agent}/{session}/messages` — stored messages.
-- `GET /api/agents/{key}/knowledge` — accumulated per-agent knowledge.
+- `GET /api/agents/{key}/knowledge` — accumulated per-agent knowledge (entries with `id`/`content`/`created_at`).
 - `GET /api/agents/{key}/knowledge/search?q=...` — FTS5 keyword search over knowledge.
+- `DELETE /api/agents/{key}/knowledge/{id}` — delete a knowledge entry (Memory page).
 - `GET /api/agents/{key}/observations` — recent observations (newest first).
 - `POST /api/agents/{key}/observations` — record one. Body: `{ "content": "..." }`.
 
 ### Built-in tools
 - `GET /api/tools` — list registered built-in tools.
+- `GET /api/tools/core` — list the always-on core agent tools (memory/knowledge; read-only).
 
 ### Extra dangerous exec commands
 - `GET /api/extra-commands` — list commands declared via `AGENTICGO_EXTRA_EXEC_COMMANDS`.

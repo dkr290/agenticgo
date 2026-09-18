@@ -329,6 +329,11 @@
     <div class="page-body">
       <table class="list"><thead><tr><th>Name</th><th>Description</th></tr></thead>
       <tbody id="tools-tbody"></tbody></table>
+
+      <h3 style="margin:22px 0 8px; font-size:14px">Core agent tools <span class="pill" title="Always on — cannot be changed">always on</span></h3>
+      <div style="color:var(--muted); font-size:12.5px; margin:0 0 10px">These memory &amp; knowledge tools are built-in and wired for every agent. They cannot be enabled, disabled, or removed.</div>
+      <table class="list"><thead><tr><th>Name</th><th>Description</th></tr></thead>
+      <tbody id="core-tools-tbody"></tbody></table>
     </div>
   </div>
 
@@ -986,7 +991,7 @@
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/knowledge').then(list => {
       if (!list || !list.length) { el.innerHTML = '<div class="empty">No learnings yet. Run Evolve after a chat session and the agent will extract reusable facts here.</div>'; return; }
       el.innerHTML = '<div class="card"><ul style="margin:0; padding-left:18px">' +
-        list.map(k => '<li style="margin:6px 0; font-size:13px">' + esc(k) + '</li>').join('') + '</ul></div>';
+        list.map(k => '<li style="margin:6px 0; font-size:13px">' + esc(k.content) + '</li>').join('') + '</ul></div>';
     }).catch(() => { el.innerHTML = '<div class="empty">Failed to load learnings.</div>'; });
   }
 
@@ -1094,6 +1099,15 @@
         tbody.appendChild(tr);
       });
     }).catch(e => toast('Load tools failed: ' + e.message));
+    // Core agent tools (always-on memory/knowledge) — read-only visibility.
+    api('/api/tools/core').then(list => {
+      const tbody = $('core-tools-tbody'); tbody.innerHTML = '';
+      (list||[]).forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="namecell">' + esc(t.name) + '</td><td>' + esc(t.description) + '</td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(()=>{});
   }
 
   // ---------- extra dangerous exec commands page (read-only) ----------
@@ -1231,9 +1245,30 @@
     const agent = $('mem-agent').value; if (!agent) return;
     $('mem-results').innerHTML = '';
     api('/api/agents/' + encodeURIComponent(agent) + '/knowledge').then(list => {
-      $('mem-knowledge').innerHTML = (list && list.length)
-        ? '<div class="card"><ul style="margin:0; padding-left:18px">' + list.map(k => '<li style="margin:5px 0; font-size:13px">' + esc(k) + '</li>').join('') + '</ul></div>'
-        : '<div class="empty">No curated knowledge yet. Use Evolve after a chat, or the agent can store learnings.</div>';
+      const box = $('mem-knowledge'); box.innerHTML = '';
+      if (!list || !list.length) {
+        box.innerHTML = '<div class="empty">No curated knowledge yet. Use Evolve after a chat, or the agent can store learnings via memory_save.</div>';
+        return;
+      }
+      const card = document.createElement('div'); card.className = 'card';
+      const ul = document.createElement('ul'); ul.style.cssText = 'margin:0; padding-left:18px; list-style:none';
+      list.forEach(k => {
+        const li = document.createElement('li');
+        li.style.cssText = 'margin:5px 0; font-size:13px; display:flex; align-items:baseline; gap:8px';
+        const span = document.createElement('span'); span.style.flex = '1'; span.textContent = k.content;
+        const del = document.createElement('button');
+        del.className = 'danger'; del.title = 'Delete this memory'; del.textContent = '✕';
+        del.style.cssText = 'padding:1px 8px; font-size:11px; line-height:1.6; border-radius:6px';
+        del.onclick = () => {
+          if (!confirm('Delete this memory?')) return;
+          api('/api/agents/' + encodeURIComponent(agent) + '/knowledge/' + k.id, { method: 'DELETE' })
+            .then(() => { toast('Memory deleted'); loadMemory(); })
+            .catch(e => toast('Delete failed: ' + e.message));
+        };
+        li.appendChild(span); li.appendChild(del);
+        ul.appendChild(li);
+      });
+      card.appendChild(ul); box.appendChild(card);
     }).catch(()=>{});
     api('/api/agents/' + encodeURIComponent(agent) + '/observations').then(list => {
       $('mem-observations').innerHTML = (list && list.length)

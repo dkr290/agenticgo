@@ -106,14 +106,21 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - **Memory**: SQLite (`modernc.org/sqlite`, no cgo). Two kinds, scoped **per agent**:
   - `knowledge` — curated durable learnings. Full-text searchable via an FTS5
     virtual table (`knowledge_fts`, kept in sync by triggers) and the
-    `memory_search` tool; selectively recalled, not bulk-injected.
+    `memory_search` tool; selectively recalled, not bulk-injected. The agent writes
+    durable facts itself via the always-on `memory_save` tool (complementing the
+    background `Evolve` pass); `AddKnowledge` dedupes exact matches per agent and caps
+    entries at 500 bytes. Entries carry IDs (`KnowledgeEntry`) and can be deleted from
+    the Memory tab (`DELETE /api/agents/{k}/knowledge/{id}` → `store.DeleteKnowledge`).
   - `observations` — high-churn, timestamped findings from recurring agents (e.g. a
     k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`)
     and only the *latest* is injected into prompts, so stale state doesn't mislead the
     model. Recorded via the `record_observation` tool.
-  Both memory tools are built per-run in `Engine.callTool` (scoped to the agent), not
-  registered in the shared `tools.Registry`. The same per-run pattern is used for
-  `search_docs` + `read_doc` (knowledge-base documents).
+  These **core agent tools** (`memory_search`, `memory_save`, `record_observation`,
+  `search_docs`, `read_doc`) are built per-run in `Engine.callTool` (scoped to the
+  agent), not registered in the shared `tools.Registry` and not gated by
+  `AGENTICGO_TOOL_ALLOWLIST` — they are always on. They are listed read-only on the
+  Built-in Tools page via `GET /api/tools/core` (single source of truth:
+  `tools.CoreTools()`).
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
 - **Scaffolding**: `internal/scaffold` holds the in-memory cron-job registry backing
@@ -247,7 +254,8 @@ curl localhost:18099/api/agents             # list agents
 - `internal/llm/openai.go` — OpenAI-compatible provider on the official SDK
   (streaming + tool calls); `openai.go.bak` = pre-SDK reference copy (not compiled)
 - `internal/tools/{tools,fs,exec,memory}.go` — registry, filesystem jail,
-  allow-listed exec, memory tools (`memory_search`, `record_observation`)
+  allow-listed exec, core memory/knowledge tools (`memory_search`, `memory_save`,
+  `record_observation`, `search_docs`, `read_doc`) + `CoreTools()` metadata
 - `internal/store/store.go` — SQLite schema + queries (per-agent; FTS5 knowledge +
   observations)
 - `internal/server/server.go` — chi routes, `/ws` streaming, embedded SPA

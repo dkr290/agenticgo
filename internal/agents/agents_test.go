@@ -104,7 +104,7 @@ func TestCreateSeedsContextFilesFromTemplates(t *testing.T) {
 		!strings.Contains(got["IDENTITY.md"], "**Role:** test agent") {
 		t.Fatalf("IDENTITY.md not seeded from template:\n%s", got["IDENTITY.md"])
 	}
-	if !strings.Contains(got["AGENTS.md"], "# Operating Instructions") {
+	if !strings.Contains(got["AGENTS.md"], "How You Operate") {
 		t.Fatalf("AGENTS.md not seeded from template:\n%s", got["AGENTS.md"])
 	}
 }
