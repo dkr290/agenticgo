@@ -36,6 +36,23 @@ this lists what's still needed to make the project fully functional).
   refreshes on page load, after each completed chat turn (WS `done`), and after a delete.
   Covered by `internal/store/sessions_test.go`.
 
+
+- ~~**Move the initial agent context-file templates out of `agents.go` into embedded template files.**~~ **DONE**:
+  all seven context files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`,
+  `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`) now live as template files in
+  `internal/agenttemplates/templates/`, embedded into the binary via `go:embed`
+  (`internal/agenttemplates`). `Registry.Create` renders them through
+  `agenttemplates.Render(name, Data{Name, Role})` — `SOUL.md`/`IDENTITY.md` substitute
+  `{{.Name}}`/`{{.Role}}`, the rest are verbatim. The templates are the **initial content
+  only**: after creation the files live on disk under `data/agents/<key>/` and are edited
+  through the GUI as before. `Registry.Create`'s `soul` override still wins over the
+  `SOUL.md` template. `defaultSoul()`/`defaultAgents()` and the inline strings are gone
+  from `internal/agents/agents.go`. Covered by `internal/agenttemplates/agenttemplates_test.go`
+  and `internal/agents/agents_test.go`.
+
+
+
+
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
   registered against the global `cfg.WorkspaceDir` (`cmd/agenticgo/main.go:74`). Wire per-agent

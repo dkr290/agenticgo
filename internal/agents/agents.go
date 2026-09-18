@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/dkr290/agenticgo/internal/agenttemplates"
 )
 
 // ContextFile is a single markdown file that shapes an agent.
@@ -417,20 +419,21 @@ func (r *Registry) Create(key, name, description, soul string, cfg AgentConfig) 
 	if strings.TrimSpace(name) == "" {
 		name = key
 	}
-	if strings.TrimSpace(soul) == "" {
-		soul = defaultSoul(name)
-	}
-	identity := fmt.Sprintf("# Identity\n\n**Name:** %s\n\n**Role:** %s\n", name, strings.TrimSpace(description))
 
-	files := map[string]string{
-		"SOUL.md":     soul,
-		"IDENTITY.md": identity,
-		"AGENTS.md":   defaultAgents(),
-		// Scaffolded empty; fill in via the Files tab in the UI.
-		"USER.md":            "# User\n\nNotes about the user this agent serves.\n",
-		"USER_PREDEFINED.md": "# Predefined User Context\n\nCanned user context injected into every session.\n",
-		"CAPABILITIES.md":    "# Capabilities\n\nWhat this agent can and cannot do.\n",
-		"HEARTBEAT.md":       "",
+	// Render the initial context files from the embedded templates. These are
+	// the starting content only; afterwards the files live on disk and are
+	// edited through the GUI. A non-empty soul argument overrides the template.
+	tplData := agenttemplates.Data{Name: name, Role: strings.TrimSpace(description)}
+	files := map[string]string{}
+	for _, fname := range contextFileNames {
+		content, err := agenttemplates.Render(fname, tplData)
+		if err != nil {
+			return nil, err
+		}
+		files[fname] = content
+	}
+	if strings.TrimSpace(soul) != "" {
+		files["SOUL.md"] = soul
 	}
 	for fname, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, fname), []byte(content), 0o644); err != nil {
@@ -580,41 +583,4 @@ func parseIdentity(content, key string) (name, desc string) {
 		}
 	}
 	return name, desc
-}
-
-func defaultSoul(name string) string {
-	return fmt.Sprintf(`# Soul
-
-You are %s, an AI agent built with agenticgo.
-
-## Personality
-- Clear, direct, and helpful.
-- Curious and methodical when solving problems.
-
-## Values
-- Be honest about uncertainty.
-- Prefer doing over describing when tools can help.
-
-## Behavior
-- Think step by step.
-- Use tools when they help accomplish the user's task.
-`, name)
-}
-
-func defaultAgents() string {
-	return `# Operating Instructions
-
-## How you work
-- Read the user's task carefully.
-- Break it into steps.
-- Use your tools to read/write files and run allow-listed commands in your workspace.
-
-## Tool use
-- Prefer read_file/list_files to understand context before changing things.
-- Use write_file to create or update files.
-- Use exec only for allow-listed commands.
-
-## Output
-- Be concise. Show your reasoning briefly, then the result.
-`
 }

@@ -20,6 +20,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   dir (reference pictures/screenshots for vision models), and a per-agent
   `workspace/` (tool jail).
   Files that don't exist yet are still listed (empty) in the UI so they can be created.
+  The **initial content** for these context files comes from embedded templates
+  (`internal/agenttemplates/templates/`, loaded via `go:embed`) rendered by
+  `Registry.Create`; after creation they live on disk and are edited via the GUI.
 - **Skills (shared library + per-agent enable)**: a skill is a folder with
   `SKILL.md` (optional YAML-ish front-matter with `name`/`description` + markdown
   instructions). Skills live in **one global library** (`data/skills/`,
@@ -123,7 +126,11 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   agent) → store → llm.Provider → providers.Store (seeded from env) →
   mcp.Manager + scaffold.Store → tools.Registry → agent.Engine → server.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
-  `AgentsDir`. `Agent.SystemPrompt()` composes context files.
+  `AgentsDir`. `Agent.SystemPrompt()` composes context files. `Registry.Create`
+  seeds the initial context files from `internal/agenttemplates`.
+- `internal/agenttemplates` — embedded (`go:embed`) initial context-file
+  templates (`templates/*.md`); `Render(name, Data)` substitutes `{{.Name}}` /
+  `{{.Role}}` for SOUL.md / IDENTITY.md.
 - `internal/skills` — `Load(skillsDir)` → `[]Skill`; `Prompt(skills, enabled)` →
   system-prompt section.
 - `internal/mcp` — MCP client: JSON-persisted server registry
@@ -230,6 +237,7 @@ curl localhost:18099/api/agents             # list agents
 - `cmd/agenticgo/main.go` — wiring
 - `internal/agent/agent.go` — `Engine` tool loop + `Evolve` (self-evolution)
 - `internal/agents/agents.go` — agent registry + context files
+- `internal/agenttemplates/agenttemplates.go` — `go:embed` initial context-file templates (`templates/`)
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition
 - `internal/providers/providers.go` — named provider configs (JSON store)
 - `internal/crypto/crypto.go` — AES-256-GCM encryption of secrets at rest (`AGENTICGO_SECRET_KEY` or `data/secret.key`)
