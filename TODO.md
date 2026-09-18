@@ -173,10 +173,16 @@ this lists what's still needed to make the project fully functional).
   signature (harness's `map[string]any` dispatch has no context — do not regress
   cancellation). Pure ergonomics; do after the per-run registry refactor in §1.
 
-- **Cron scheduler.** Jobs stored in-memory only (`internal/scaffold/scaffold.go:101`);
-  `Enabled` is serialized but unused. Add a scheduler (e.g. robfig/cron or a simple ticker),
-  persist jobs, and wire execution into `Engine.Run` per agent/session/prompt. Recurring agents
-  should feed `record_observation` — the memory design anticipates this.
+- **Cron scheduler — currently a non-functional placeholder.** The Cron UI/API only stores job
+  definitions in memory (`internal/scaffold/scaffold.go`); **nothing executes them** (no
+  scheduler/ticker exists), `Enabled` is serialized but unused, and jobs are **lost on restart**
+  (not persisted). Today only a human can create jobs via the UI — there is intentionally **no
+  `cron` agent tool**, which is why the AGENTS.md template omits any scheduling instructions.
+  To make it real: add a scheduler (e.g. robfig/cron or a simple ticker), persist jobs
+  (SQLite/JSON), and wire execution into `Engine.Run` per agent/session/prompt. Recurring agents
+  should feed `record_observation` — the memory design anticipates this. **Open decision:** whether
+  agents may also self-create/manage jobs via a `cron` tool (some systems allow it), and if so how
+  it is gated; if added, re-add a Scheduling section to the AGENTS.md template.
 
 ## 4. API / UI hardening gaps
 
