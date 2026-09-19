@@ -418,7 +418,8 @@ func (e *Engine) docReader(agentKey string) tools.DocReader {
 // callTool routes a tool call: per-agent memory tools are constructed on the
 // fly (scoped to the agent); custom (MCP) tools go to the MCP manager (gated
 // by the agent's enabled_tools); extra (dangerous) exec commands are gated by
-// the agent's enabled_commands; everything else goes to the shared registry.
+// the agent's enabled_commands; built-in fs/exec tools are constructed per-run
+// and jailed to the agent's own workspace.
 func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.RawMessage) (string, error) {
 	switch name {
 	case "memory_search":
@@ -432,6 +433,42 @@ func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.
 	case "read_doc":
 		return tools.NewReadDoc(e.docReader(agentKey)).Call(ctx, args)
 	}
+
+	// Resolve the agent's workspace; fall back to the global one.
+	workspace, err := e.agents.WorkspaceDir(agentKey)
+	if err != nil {
+		workspace = e.cfg.WorkspaceDir
+	}
+
+	// Built-in filesystem tools — constructed per-run, jailed to the agent's workspace.
+	switch name {
+	case "read_file":
+		t, err := tools.NewReadFile(workspace)
+		if err != nil {
+			return "", fmt.Errorf("read_file: %w", err)
+		}
+		return t.Call(ctx, args)
+	case "write_file":
+		t, err := tools.NewWriteFile(workspace)
+		if err != nil {
+			return "", fmt.Errorf("write_file: %w", err)
+		}
+		return t.Call(ctx, args)
+	case "list_files":
+		t, err := tools.NewListFiles(workspace)
+		if err != nil {
+			return "", fmt.Errorf("list_files: %w", err)
+		}
+		return t.Call(ctx, args)
+	}
+
+	// Exec tool — safe built-in commands use the agent's workspace; extra
+	// (dangerous) commands are gated by the agent's enabled_commands.
+	if name == "exec" {
+		return e.callExec(ctx, agentKey, args, workspace)
+	}
+
+	// Custom (MCP) tools go to the MCP manager.
 	if mcp.IsMCPToolName(name) {
 		if e.mcp == nil {
 			return "", fmt.Errorf("MCP tools are not configured")
@@ -445,19 +482,17 @@ func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.
 		}
 		return e.mcp.CallTool(ctx, name, args)
 	}
-	if name == "exec" {
-		return e.callExec(ctx, agentKey, args)
-	}
-	return e.tools.Call(ctx, name, args)
+
+	return "", fmt.Errorf("unknown or disallowed tool: %q", name)
 }
 
 // callExec runs the exec tool, extending it with the agent's enabled extra
-// (dangerous) commands. Safe built-in commands are handled by the shared exec
-// tool (global AGENTICGO_EXEC_ALLOWLIST). Extra commands from
-// AGENTICGO_EXTRA_EXEC_COMMANDS are executed only when the agent has ticked
-// them (config.json enabled_commands), via a per-run exec tool scoped to that
-// one command and jailed to the agent's own workspace.
-func (e *Engine) callExec(ctx context.Context, agentKey string, args json.RawMessage) (string, error) {
+// (dangerous) commands. Safe built-in commands are handled by a per-run exec
+// tool (global AGENTICGO_EXEC_ALLOWLIST) jailed to the agent's workspace.
+// Extra commands from AGENTICGO_EXTRA_EXEC_COMMANDS are executed only when
+// the agent has ticked them (config.json enabled_commands), via a per-run
+// exec tool scoped to that one command and jailed to the agent's own workspace.
+func (e *Engine) callExec(ctx context.Context, agentKey string, args json.RawMessage, workspace string) (string, error) {
 	var in struct {
 		Command string `json:"command"`
 	}
@@ -470,10 +505,10 @@ func (e *Engine) callExec(ctx context.Context, agentKey string, args json.RawMes
 	}
 	cmdName := fields[0]
 
-	// Not an extra command: fall through to the shared exec tool, which
-	// enforces the global AGENTICGO_EXEC_ALLOWLIST.
+	// Not an extra command: fall through to the per-run exec tool, which
+	// enforces the global AGENTICGO_EXEC_ALLOWLIST, jailed to the agent's workspace.
 	if !slices.Contains(e.cfg.ExtraExecCommands, cmdName) {
-		return e.tools.Call(ctx, "exec", args)
+		return tools.NewExec(workspace, e.cfg.ExecAllowList).Call(ctx, args)
 	}
 
 	ag, err := e.agents.Get(agentKey)
@@ -484,11 +519,7 @@ func (e *Engine) callExec(ctx context.Context, agentKey string, args json.RawMes
 		return "", fmt.Errorf("command %q is not enabled for agent %q (tick it on the Extra Dangerous Exec Commands tab)", cmdName, agentKey)
 	}
 
-	// Jail to the agent's own workspace; fall back to the global one.
-	workspace, err := e.agents.WorkspaceDir(agentKey)
-	if err != nil {
-		workspace = e.cfg.WorkspaceDir
-	}
+	// Jail to the agent's own workspace.
 	return tools.NewExec(workspace, []string{cmdName}).Call(ctx, args)
 }
 
