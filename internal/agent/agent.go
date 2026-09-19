@@ -156,7 +156,7 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 			"before relying on them:\n")
 		for _, k := range knowledge {
 			b.WriteString("- ")
-			b.WriteString(strings.TrimSpace(k))
+			b.WriteString(strings.TrimSpace(k.Content))
 			b.WriteString("\n")
 		}
 	}
@@ -228,9 +228,11 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	}
 
 	// Give this run access to the per-agent memory tools (search curated
-	// knowledge + knowledge-base docs, record timestamped observations).
+	// knowledge, save durable learnings, search/read knowledge-base docs,
+	// record timestamped observations).
 	specs := append(e.tools.Specs(),
 		toolSpec(tools.NewMemorySearch(e.store, ag.Key)),
+		toolSpec(tools.NewMemorySave(e.store, ag.Key)),
 		toolSpec(tools.NewRecordObservation(e.store, ag.Key)),
 		toolSpec(tools.NewSearchDocs(e.docSearcher(ag.Key))),
 		toolSpec(tools.NewReadDoc(e.docReader(ag.Key))),
@@ -421,6 +423,8 @@ func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.
 	switch name {
 	case "memory_search":
 		return tools.NewMemorySearch(e.store, agentKey).Call(ctx, args)
+	case "memory_save":
+		return tools.NewMemorySave(e.store, agentKey).Call(ctx, args)
 	case "record_observation":
 		return tools.NewRecordObservation(e.store, agentKey).Call(ctx, args)
 	case "search_docs":

@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+
+	"database/sql"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -83,6 +85,7 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Get("/agents/{key}/vision", s.handleVisionStatus)
 		r.Get("/agents/{key}/knowledge", s.handleListKnowledge)
 		r.Get("/agents/{key}/knowledge/search", s.handleSearchKnowledge)
+		r.Delete("/agents/{key}/knowledge/{id}", s.handleDeleteKnowledge)
 		r.Get("/agents/{key}/observations", s.handleListObservations)
 		r.Post("/agents/{key}/observations", s.handleAddObservation)
 		r.Get("/agents/{key}/docs", s.handleListDocs)
@@ -104,6 +107,7 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 
 		// Capabilities.
 		r.Get("/tools", s.handleListTools)
+		r.Get("/tools/core", s.handleListCoreTools)
 		r.Get("/extra-commands", s.handleListExtraCommands)
 
 		// Providers (OpenAI-compatible endpoints).
@@ -535,9 +539,28 @@ func (s *Server) handleListKnowledge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if k == nil {
-		k = []string{}
+		k = []store.KnowledgeEntry{}
 	}
 	writeJSON(w, http.StatusOK, k)
+}
+
+// handleDeleteKnowledge removes one curated knowledge entry (scoped to the
+// agent) so wrong/outdated memories can be deleted from the Memory UI.
+func (s *Server) handleDeleteKnowledge(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid knowledge id"))
+		return
+	}
+	if err := s.store.DeleteKnowledge(r.Context(), id, chi.URLParam(r, "key")); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("knowledge entry not found"))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handleSearchKnowledge(w http.ResponseWriter, r *http.Request) {
@@ -731,6 +754,13 @@ func (s *Server) handleListTools(w http.ResponseWriter, _ *http.Request) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleListCoreTools returns the always-on built-in agent tools (memory +
+// knowledge recall/save). These are wired per run for every agent and cannot
+// be enabled, disabled, or removed — listed here read-only for visibility.
+func (s *Server) handleListCoreTools(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, tools.CoreTools())
 }
 
 // --- Providers ---

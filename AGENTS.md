@@ -20,6 +20,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   dir (reference pictures/screenshots for vision models), and a per-agent
   `workspace/` (tool jail).
   Files that don't exist yet are still listed (empty) in the UI so they can be created.
+  The **initial content** for these context files comes from embedded templates
+  (`internal/agenttemplates/templates/`, loaded via `go:embed`) rendered by
+  `Registry.Create`; after creation they live on disk and are edited via the GUI.
 - **Skills (shared library + per-agent enable)**: a skill is a folder with
   `SKILL.md` (optional YAML-ish front-matter with `name`/`description` + markdown
   instructions). Skills live in **one global library** (`data/skills/`,
@@ -103,14 +106,21 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - **Memory**: SQLite (`modernc.org/sqlite`, no cgo). Two kinds, scoped **per agent**:
   - `knowledge` — curated durable learnings. Full-text searchable via an FTS5
     virtual table (`knowledge_fts`, kept in sync by triggers) and the
-    `memory_search` tool; selectively recalled, not bulk-injected.
+    `memory_search` tool; selectively recalled, not bulk-injected. The agent writes
+    durable facts itself via the always-on `memory_save` tool (complementing the
+    background `Evolve` pass); `AddKnowledge` dedupes exact matches per agent and caps
+    entries at 500 bytes. Entries carry IDs (`KnowledgeEntry`) and can be deleted from
+    the Memory tab (`DELETE /api/agents/{k}/knowledge/{id}` → `store.DeleteKnowledge`).
   - `observations` — high-churn, timestamped findings from recurring agents (e.g. a
     k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`)
     and only the *latest* is injected into prompts, so stale state doesn't mislead the
     model. Recorded via the `record_observation` tool.
-  Both memory tools are built per-run in `Engine.callTool` (scoped to the agent), not
-  registered in the shared `tools.Registry`. The same per-run pattern is used for
-  `search_docs` + `read_doc` (knowledge-base documents).
+  These **core agent tools** (`memory_search`, `memory_save`, `record_observation`,
+  `search_docs`, `read_doc`) are built per-run in `Engine.callTool` (scoped to the
+  agent), not registered in the shared `tools.Registry` and not gated by
+  `AGENTICGO_TOOL_ALLOWLIST` — they are always on. They are listed read-only on the
+  Built-in Tools page via `GET /api/tools/core` (single source of truth:
+  `tools.CoreTools()`).
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
 - **Scaffolding**: `internal/scaffold` holds the in-memory cron-job registry backing
@@ -123,7 +133,11 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   agent) → store → llm.Provider → providers.Store (seeded from env) →
   mcp.Manager + scaffold.Store → tools.Registry → agent.Engine → server.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
-  `AgentsDir`. `Agent.SystemPrompt()` composes context files.
+  `AgentsDir`. `Agent.SystemPrompt()` composes context files. `Registry.Create`
+  seeds the initial context files from `internal/agenttemplates`.
+- `internal/agenttemplates` — embedded (`go:embed`) initial context-file
+  templates (`templates/*.md`); `Render(name, Data)` substitutes `{{.Name}}` /
+  `{{.Role}}` for SOUL.md / IDENTITY.md.
 - `internal/skills` — `Load(skillsDir)` → `[]Skill`; `Prompt(skills, enabled)` →
   system-prompt section.
 - `internal/mcp` — MCP client: JSON-persisted server registry
@@ -230,6 +244,7 @@ curl localhost:18099/api/agents             # list agents
 - `cmd/agenticgo/main.go` — wiring
 - `internal/agent/agent.go` — `Engine` tool loop + `Evolve` (self-evolution)
 - `internal/agents/agents.go` — agent registry + context files
+- `internal/agenttemplates/agenttemplates.go` — `go:embed` initial context-file templates (`templates/`)
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition
 - `internal/providers/providers.go` — named provider configs (JSON store)
 - `internal/crypto/crypto.go` — AES-256-GCM encryption of secrets at rest (`AGENTICGO_SECRET_KEY` or `data/secret.key`)
@@ -239,7 +254,8 @@ curl localhost:18099/api/agents             # list agents
 - `internal/llm/openai.go` — OpenAI-compatible provider on the official SDK
   (streaming + tool calls); `openai.go.bak` = pre-SDK reference copy (not compiled)
 - `internal/tools/{tools,fs,exec,memory}.go` — registry, filesystem jail,
-  allow-listed exec, memory tools (`memory_search`, `record_observation`)
+  allow-listed exec, core memory/knowledge tools (`memory_search`, `memory_save`,
+  `record_observation`, `search_docs`, `read_doc`) + `CoreTools()` metadata
 - `internal/store/store.go` — SQLite schema + queries (per-agent; FTS5 knowledge +
   observations)
 - `internal/server/server.go` — chi routes, `/ws` streaming, embedded SPA

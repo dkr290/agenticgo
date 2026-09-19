@@ -11,6 +11,7 @@ import (
 // Implemented by *store.Store.
 type MemoryStore interface {
 	SearchKnowledge(ctx context.Context, agent, query string, limit int) ([]string, error)
+	AddKnowledge(ctx context.Context, agent, content string) error
 	AddObservation(ctx context.Context, agent, content string) error
 }
 
@@ -73,6 +74,55 @@ func (t *memorySearchTool) Call(ctx context.Context, args json.RawMessage) (stri
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String()), nil
+}
+
+// memorySaveTool lets the agent persist a durable fact, preference, or lesson
+// to its curated long-term knowledge. This is the agent-initiated write path
+// (complementing the background self-evolution pass): when the user says
+// "remember this", the agent saves it in the same turn. Stored knowledge is
+// full-text searchable via memory_search and selectively recalled, not
+// bulk-injected.
+type memorySaveTool struct {
+	store MemoryStore
+	agent string
+}
+
+// NewMemorySave creates the memory_save tool scoped to an agent.
+func NewMemorySave(store MemoryStore, agentKey string) Tool {
+	return &memorySaveTool{store: store, agent: agentKey}
+}
+
+func (t *memorySaveTool) Name() string { return "memory_save" }
+func (t *memorySaveTool) Description() string {
+	return "Save a durable fact, user preference, or lesson to your long-term curated " +
+		"knowledge. Use when the user asks you to remember something, or when you learn " +
+		"something worth keeping across sessions. Not for time-bound state — use " +
+		"record_observation for that. Saved knowledge is searchable via memory_search."
+}
+func (t *memorySaveTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"content": map[string]any{"type": "string", "description": "One concise durable fact, preference, or lesson to remember."},
+		},
+		"required": []string{"content"},
+	}
+}
+
+func (t *memorySaveTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	var in struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	if strings.TrimSpace(in.Content) == "" {
+		return "", fmt.Errorf("content must not be empty")
+	}
+	if err := t.store.AddKnowledge(ctx, t.agent, in.Content); err != nil {
+		return "", err
+	}
+	return "saved to long-term memory", nil
 }
 
 // recordObservationTool lets a recurring agent (e.g. a cron job) record a
@@ -175,6 +225,35 @@ func (t *searchDocsTool) Call(ctx context.Context, args json.RawMessage) (string
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String()), nil
+}
+
+// CoreTool is the metadata (name + description) of an always-on built-in
+// agent capability. These are the per-run memory/knowledge tools the engine
+// wires for every agent — not the allow-listed filesystem/exec tools in the
+// shared registry. Core tools cannot be enabled, disabled, or removed.
+type CoreTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// CoreTools returns the always-on built-in agent tools. It is the single
+// source of truth for their names and descriptions: the engine wires these
+// per run (scoped to the calling agent) and the server lists them read-only.
+// Instances are store/agent-scoped, so metadata is produced by lightweight
+// constructors with a nil store (Call is never invoked here).
+func CoreTools() []CoreTool {
+	probes := []Tool{
+		NewMemorySearch(nil, ""),
+		NewMemorySave(nil, ""),
+		NewRecordObservation(nil, ""),
+		NewSearchDocs(nil),
+		NewReadDoc(nil),
+	}
+	out := make([]CoreTool, 0, len(probes))
+	for _, t := range probes {
+		out = append(out, CoreTool{Name: t.Name(), Description: t.Description()})
+	}
+	return out
 }
 
 // DocReader fetches one document's content by ID, scoped to the agent.

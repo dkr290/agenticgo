@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,6 +98,26 @@ func TestMCPToolSpecsRespectsEnabledTools(t *testing.T) {
 	ag, _ = ar.Get("demo")
 	if specs := e.mcpToolSpecs(ag); len(specs) != 0 {
 		t.Fatalf("specs with undiscovered tool = %v", specs)
+	}
+}
+
+func TestCallToolMemorySavePersistsPerAgent(t *testing.T) {
+	e, _ := newTestEngine(t)
+	ctx := context.Background()
+
+	if _, err := e.callTool(ctx, "demo", "memory_save", json.RawMessage(`{"content":"demo durable fact"}`)); err != nil {
+		t.Fatalf("memory_save: %v", err)
+	}
+	entries, err := e.store.Knowledge(ctx, "demo", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Content != "demo durable fact" {
+		t.Fatalf("memory_save should persist for demo, got %+v", entries)
+	}
+	// Scoped: nothing written for another agent.
+	if other, _ := e.store.Knowledge(ctx, "other", 10); len(other) != 0 {
+		t.Fatalf("memory_save leaked to other agent: %+v", other)
 	}
 }
 

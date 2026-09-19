@@ -36,6 +36,44 @@ this lists what's still needed to make the project fully functional).
   refreshes on page load, after each completed chat turn (WS `done`), and after a delete.
   Covered by `internal/store/sessions_test.go`.
 
+
+- ~~**Move the initial agent context-file templates out of `agents.go` into embedded template files.**~~ **DONE**:
+  all seven context files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`,
+  `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`) now live as template files in
+  `internal/agenttemplates/templates/`, embedded into the binary via `go:embed`
+  (`internal/agenttemplates`). `Registry.Create` renders them through
+  `agenttemplates.Render(name, Data{Name, Role})` — `SOUL.md`/`IDENTITY.md` substitute
+  `{{.Name}}`/`{{.Role}}`, the rest are verbatim. The templates are the **initial content
+  only**: after creation the files live on disk under `data/agents/<key>/` and are edited
+  through the GUI as before. `Registry.Create`'s `soul` override still wins over the
+  `SOUL.md` template. `defaultSoul()`/`defaultAgents()` and the inline strings are gone
+  from `internal/agents/agents.go`. Covered by `internal/agenttemplates/agenttemplates_test.go`
+  and `internal/agents/agents_test.go`.
+
+- ~~**Agent memory-write tool + knowledge delete + core-tools visibility.**~~ **DONE**:
+  agents can now persist durable learnings themselves via a new always-on `memory_save`
+  tool (`tools.NewMemorySave` → `store.AddKnowledge`), complementing the background
+  `Evolve` pass — the AGENTS.md template's "remember this → save in this turn" instruction
+  is now backed by a real tool. `store.AddKnowledge` dedupes exact-match content per agent
+  (`ErrKnowledgeDuplicate`, treated as a no-op) and caps entries at 500 bytes. Knowledge
+  entries now carry stable IDs (`store.KnowledgeEntry{ID,Content,CreatedAt}`; `Knowledge()`
+  returns entries), and wrong/outdated memories can be deleted from the Memory tab
+  (`DELETE /api/agents/{k}/knowledge/{id}` → `store.DeleteKnowledge`, agent-scoped, 404 when
+  unknown). Fixed a latent bug: the FTS5 "special delete" triggers (`knowledge_ad`,
+  `kdocs_ad`) errored in this build — they now delete the FTS row by `rowid` (recreated
+  idempotently in `migrate`, which also fixes the pre-existing broken document delete).
+  The always-on memory/knowledge tools (`memory_search`, `memory_save`, `record_observation`,
+  `search_docs`, `read_doc`) are listed read-only as **Core agent tools** on the Built-in
+  Tools page via `GET /api/tools/core` (single source of truth: `tools.CoreTools()`); they
+  cannot be enabled/disabled/removed. The AGENTS.md template was trimmed to the features
+  agenticgo actually has (single-user chat; cron is scaffolded) — no group-chat/NO_REPLY/
+  scheduling instructions. Covered by `internal/store/knowledge_test.go`,
+  `internal/server/knowledge_test.go`, `internal/tools/memory_test.go`, and
+  `internal/agent/agent_test.go`.
+
+
+
+
 - **Per-agent workspaces exist but are not used by tools.**
   `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
   registered against the global `cfg.WorkspaceDir` (`cmd/agenticgo/main.go:74`). Wire per-agent
@@ -135,15 +173,22 @@ this lists what's still needed to make the project fully functional).
   signature (harness's `map[string]any` dispatch has no context — do not regress
   cancellation). Pure ergonomics; do after the per-run registry refactor in §1.
 
-- **Cron scheduler.** Jobs stored in-memory only (`internal/scaffold/scaffold.go:101`);
-  `Enabled` is serialized but unused. Add a scheduler (e.g. robfig/cron or a simple ticker),
-  persist jobs, and wire execution into `Engine.Run` per agent/session/prompt. Recurring agents
-  should feed `record_observation` — the memory design anticipates this.
+- **Cron scheduler — currently a non-functional placeholder.** The Cron UI/API only stores job
+  definitions in memory (`internal/scaffold/scaffold.go`); **nothing executes them** (no
+  scheduler/ticker exists), `Enabled` is serialized but unused, and jobs are **lost on restart**
+  (not persisted). Today only a human can create jobs via the UI — there is intentionally **no
+  `cron` agent tool**, which is why the AGENTS.md template omits any scheduling instructions.
+  To make it real: add a scheduler (e.g. robfig/cron or a simple ticker), persist jobs
+  (SQLite/JSON), and wire execution into `Engine.Run` per agent/session/prompt. Recurring agents
+  should feed `record_observation` — the memory design anticipates this. **Open decision:** whether
+  agents may also self-create/manage jobs via a `cron` tool (some systems allow it), and if so how
+  it is gated; if added, re-add a Scheduling section to the AGENTS.md template.
 
 ## 4. API / UI hardening gaps
 
-- **Knowledge delete endpoint + UI button**: the Memory page is read-only today
-  (no DELETE for knowledge entries). (Skill delete is done: `DELETE /api/skills/{key}`.)
+- ~~**Knowledge delete endpoint + UI button**~~ **DONE**: `DELETE /api/agents/{k}/knowledge/{id}`
+  + a per-row ✕ on the Memory page (see §1 memory-write item above). (Skill delete is done:
+  `DELETE /api/skills/{key}`.)
 - ~~**Skill enable/disable per agent**~~ **DONE**: skills now live in a global library
   (`data/skills/`, upload via `POST /api/skills/upload`) and are enabled per agent via
   `config.json` `enabled_skills` (`PUT/DELETE /api/agents/{k}/skills/{skill}`, Agents →
