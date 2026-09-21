@@ -227,20 +227,16 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		messages = append(messages, msg)
 	}
 
-	// Give this run access to the per-agent memory tools (search curated
-	// knowledge, save durable learnings, search/read knowledge-base docs,
-	// record timestamped observations).
-	specs := append(e.tools.Specs(),
-		toolSpec(tools.NewMemorySearch(e.store, ag.Key)),
-		toolSpec(tools.NewMemorySave(e.store, ag.Key)),
-		toolSpec(tools.NewRecordObservation(e.store, ag.Key)),
-		toolSpec(tools.NewSearchDocs(e.docSearcher(ag.Key))),
-		toolSpec(tools.NewReadDoc(e.docReader(ag.Key))),
-	)
-
-	// Custom (MCP) tools enabled for this agent. Only ticked tools are
-	// exposed; callTool re-checks the allow-list before executing.
-	specs = append(specs, e.mcpToolSpecs(ag)...)
+	// Build the per-run tool registry: the single source of truth for both the
+	// tool specs offered to the model and the dispatch of its tool calls.
+	// It composes the always-on core memory/docs tools (scoped to this agent),
+	// the built-in fs/exec tools (jailed to the agent's own workspace), and the
+	// MCP tools this agent has enabled.
+	reg, err := e.runRegistry(ag)
+	if err != nil {
+		return "", fmt.Errorf("build tool registry: %w", err)
+	}
+	specs := reg.Specs()
 
 	for iter := 0; iter < e.cfg.MaxAgentIterations; iter++ {
 		req := llm.ChatRequest{
@@ -288,7 +284,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		for _, tc := range assistantMsg.ToolCalls {
 			emit(Event{Kind: "tool_call", ToolName: tc.Name, ToolArgs: tc.Arguments})
 
-			result, callErr := e.callTool(ctx, ag.Key, tc.Name, json.RawMessage(tc.Arguments))
+			result, callErr := reg.Call(ctx, tc.Name, json.RawMessage(tc.Arguments))
 			if callErr != nil {
 				result = "error: " + callErr.Error()
 			}
@@ -307,45 +303,111 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	return "", fmt.Errorf("agent reached max iterations (%d) without a final answer", e.cfg.MaxAgentIterations)
 }
 
-// toolSpec renders a single tool as an OpenAI-compatible spec.
-func toolSpec(t tools.Tool) llm.ToolSpec {
-	return llm.ToolSpec{
-		Type: "function",
-		Function: llm.FunctionSpec{
-			Name:        t.Name(),
-			Description: t.Description(),
-			Parameters:  t.Parameters(),
-		},
+// runRegistry builds the per-run tool registry for an agent: the single
+// source of truth for both the tool specs offered to the model and the
+// dispatch of tool calls. It composes, in one place:
+//
+//   - the always-on core memory/docs tools (scoped to this agent),
+//   - the built-in fs tools (read_file/write_file/list_files) and exec,
+//     jailed to the agent's own workspace and gated by the global
+//     AGENTICGO_TOOL_ALLOWLIST; exec's allow-list additionally includes the
+//     agent's enabled extra (dangerous) commands,
+//   - the MCP tools this agent has enabled (config.json enabled_tools),
+//     soft-failing per call when their server is unreachable.
+//
+// Building this per run means every tool is constructed once (not per call)
+// and specs can never drift from dispatch, which the old callTool switch
+// allowed. Tools absent from the registry are invisible to the model and
+// rejected by Registry.Call, so per-agent gating is enforced by construction.
+func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
+	registry := tools.NewRegistry(e.cfg.ToolAllowList)
+
+	// Core memory/knowledge tools: always on, scoped to the calling agent.
+	registry.Register(tools.NewMemorySearch(e.store, ag.Key))
+	registry.Register(tools.NewMemorySave(e.store, ag.Key))
+	registry.Register(tools.NewRecordObservation(e.store, ag.Key))
+	registry.Register(tools.NewSearchDocs(e.docSearcher(ag.Key)))
+	registry.Register(tools.NewReadDoc(e.docReader(ag.Key)))
+
+	// Built-in filesystem tools, jailed to the agent's workspace.
+	workspace := e.workspaceFor(ag.Key)
+	for _, make := range []func(string) (tools.Tool, error){
+		tools.NewReadFile, tools.NewWriteFile, tools.NewListFiles,
+	} {
+		t, err := make(workspace)
+		if err != nil {
+			return nil, err
+		}
+		registry.Register(t)
 	}
+
+	// Exec: safe commands from the global AGENTICGO_EXEC_ALLOWLIST plus the
+	// agent's enabled extra (dangerous) commands, jailed to the workspace.
+	// The extras are named in the tool description so the model can see which
+	// dangerous commands it may run.
+	execAllow := append([]string{}, e.cfg.ExecAllowList...)
+	var execExtra []string
+	for _, cmd := range e.cfg.ExtraExecCommands {
+		if slices.Contains(ag.Config.EnabledCommands, cmd) {
+			execAllow = append(execAllow, cmd)
+			execExtra = append(execExtra, cmd)
+		}
+	}
+	registry.Register(tools.NewExecWithExtra(workspace, execAllow, execExtra))
+
+	// Custom (MCP) tools enabled for this agent. Tools whose server is not
+	// connected are silently skipped — they become visible once the server is
+	// connected and the tool is discovered. A tool that fails at call time
+	// returns its error as a string the model can read (soft-fail per tool).
+	if e.mcp != nil {
+		for _, name := range ag.Config.EnabledTools {
+			t, ok := e.mcp.Lookup(name)
+			if !ok {
+				continue // not discovered (server offline or tool removed)
+			}
+			registry.Register(newMCPTool(name, t, e.mcp))
+		}
+	}
+
+	return registry, nil
 }
 
-// mcpToolSpecs renders the specs of the custom (MCP) tools the agent has
-// enabled. Tools whose server is not connected are silently skipped — they
-// become visible once the server is connected and the tool is discovered.
-func (e *Engine) mcpToolSpecs(ag *agents.Agent) []llm.ToolSpec {
-	if e.mcp == nil || len(ag.Config.EnabledTools) == 0 {
-		return nil
+// workspaceFor resolves the agent's workspace jail, falling back to the
+// global workspace when the per-agent one cannot be resolved.
+func (e *Engine) workspaceFor(agentKey string) string {
+	workspace, err := e.agents.WorkspaceDir(agentKey)
+	if err != nil {
+		return e.cfg.WorkspaceDir
 	}
-	out := make([]llm.ToolSpec, 0, len(ag.Config.EnabledTools))
-	for _, name := range ag.Config.EnabledTools {
-		t, ok := e.mcp.Lookup(name)
-		if !ok {
-			continue // not discovered (server offline or tool removed)
-		}
-		desc := t.Description
-		if desc == "" {
-			desc = "Tool from MCP server " + t.Server
-		}
-		out = append(out, llm.ToolSpec{
-			Type: "function",
-			Function: llm.FunctionSpec{
-				Name:        name,
-				Description: desc,
-				Parameters:  t.Schema,
-			},
-		})
+	return workspace
+}
+
+// mcpTool adapts one discovered MCP tool to the tools.Tool interface so it
+// can live in the per-run registry alongside the built-in and core tools.
+type mcpTool struct {
+	name   string // namespaced: mcp_<server>_<tool>
+	desc   string
+	schema map[string]any
+	mgr    *mcp.Manager
+}
+
+func newMCPTool(name string, info mcp.ToolInfo, mgr *mcp.Manager) tools.Tool {
+	desc := info.Description
+	if desc == "" {
+		desc = "Tool from MCP server " + info.Server
 	}
-	return out
+	return &mcpTool{name: name, desc: desc, schema: info.Schema, mgr: mgr}
+}
+
+func (t *mcpTool) Name() string               { return t.name }
+func (t *mcpTool) Description() string        { return t.desc }
+func (t *mcpTool) Parameters() map[string]any { return t.schema }
+
+// Call forwards to the MCP manager, which lazily reconnects a configured but
+// disconnected server. Errors are returned for the engine loop to wrap into
+// tool-result strings, so a dead server never breaks the chat.
+func (t *mcpTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	return t.mgr.CallTool(ctx, t.name, args)
 }
 
 // resolveProvider picks the provider for a run: a per-request override wins,
@@ -413,114 +475,6 @@ func (e *Engine) docReader(agentKey string) tools.DocReader {
 		}
 		return d.Title, d.Content, nil
 	}
-}
-
-// callTool routes a tool call: per-agent memory tools are constructed on the
-// fly (scoped to the agent); custom (MCP) tools go to the MCP manager (gated
-// by the agent's enabled_tools); extra (dangerous) exec commands are gated by
-// the agent's enabled_commands; built-in fs/exec tools are constructed per-run
-// and jailed to the agent's own workspace.
-func (e *Engine) callTool(ctx context.Context, agentKey, name string, args json.RawMessage) (string, error) {
-	switch name {
-	case "memory_search":
-		return tools.NewMemorySearch(e.store, agentKey).Call(ctx, args)
-	case "memory_save":
-		return tools.NewMemorySave(e.store, agentKey).Call(ctx, args)
-	case "record_observation":
-		return tools.NewRecordObservation(e.store, agentKey).Call(ctx, args)
-	case "search_docs":
-		return tools.NewSearchDocs(e.docSearcher(agentKey)).Call(ctx, args)
-	case "read_doc":
-		return tools.NewReadDoc(e.docReader(agentKey)).Call(ctx, args)
-	}
-
-	// Resolve the agent's workspace; fall back to the global one.
-	workspace, err := e.agents.WorkspaceDir(agentKey)
-	if err != nil {
-		workspace = e.cfg.WorkspaceDir
-	}
-
-	// Built-in filesystem tools — constructed per-run, jailed to the agent's workspace.
-	switch name {
-	case "read_file":
-		t, err := tools.NewReadFile(workspace)
-		if err != nil {
-			return "", fmt.Errorf("read_file: %w", err)
-		}
-		return t.Call(ctx, args)
-	case "write_file":
-		t, err := tools.NewWriteFile(workspace)
-		if err != nil {
-			return "", fmt.Errorf("write_file: %w", err)
-		}
-		return t.Call(ctx, args)
-	case "list_files":
-		t, err := tools.NewListFiles(workspace)
-		if err != nil {
-			return "", fmt.Errorf("list_files: %w", err)
-		}
-		return t.Call(ctx, args)
-	}
-
-	// Exec tool — safe built-in commands use the agent's workspace; extra
-	// (dangerous) commands are gated by the agent's enabled_commands.
-	if name == "exec" {
-		return e.callExec(ctx, agentKey, args, workspace)
-	}
-
-	// Custom (MCP) tools go to the MCP manager.
-	if mcp.IsMCPToolName(name) {
-		if e.mcp == nil {
-			return "", fmt.Errorf("MCP tools are not configured")
-		}
-		ag, err := e.agents.Get(agentKey)
-		if err != nil {
-			return "", err
-		}
-		if !slices.Contains(ag.Config.EnabledTools, name) {
-			return "", fmt.Errorf("tool %q is not enabled for agent %q (tick it on the MCP Tools tab)", name, agentKey)
-		}
-		return e.mcp.CallTool(ctx, name, args)
-	}
-
-	return "", fmt.Errorf("unknown or disallowed tool: %q", name)
-}
-
-// callExec runs the exec tool, extending it with the agent's enabled extra
-// (dangerous) commands. Safe built-in commands are handled by a per-run exec
-// tool (global AGENTICGO_EXEC_ALLOWLIST) jailed to the agent's workspace.
-// Extra commands from AGENTICGO_EXTRA_EXEC_COMMANDS are executed only when
-// the agent has ticked them (config.json enabled_commands), via a per-run
-// exec tool scoped to that one command and jailed to the agent's own workspace.
-func (e *Engine) callExec(ctx context.Context, agentKey string, args json.RawMessage, workspace string) (string, error) {
-	var in struct {
-		Command string `json:"command"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	fields := strings.Fields(in.Command)
-	if len(fields) == 0 {
-		return "", fmt.Errorf("empty command")
-	}
-	cmdName := fields[0]
-
-	// Not an extra command: fall through to the per-run exec tool, which
-	// enforces the global AGENTICGO_EXEC_ALLOWLIST, jailed to the agent's workspace.
-	if !slices.Contains(e.cfg.ExtraExecCommands, cmdName) {
-		return tools.NewExec(workspace, e.cfg.ExecAllowList).Call(ctx, args)
-	}
-
-	ag, err := e.agents.Get(agentKey)
-	if err != nil {
-		return "", err
-	}
-	if !slices.Contains(ag.Config.EnabledCommands, cmdName) {
-		return "", fmt.Errorf("command %q is not enabled for agent %q (tick it on the Extra Dangerous Exec Commands tab)", cmdName, agentKey)
-	}
-
-	// Jail to the agent's own workspace.
-	return tools.NewExec(workspace, []string{cmdName}).Call(ctx, args)
 }
 
 // Evolve summarizes the session and appends learnings to the agent's knowledge
