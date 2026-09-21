@@ -74,12 +74,11 @@ this lists what's still needed to make the project fully functional).
 
 
 
-- **Per-agent workspaces exist but are not used by tools.**
-  `agents/<key>/workspace/` is created (`internal/agents/agents.go:105`) but fs/exec tools are
-  registered against the global `cfg.WorkspaceDir` (`cmd/agenticgo/main.go:74`). Wire per-agent
-  workspaces into the tool loop: construct fs/exec tools scoped to the agent's `WorkspaceDir`
-  per run. This is the "per-agent tool jail" the README promises. This requires the per-run
-  registry refactor below.
+- ~~**Per-agent workspaces exist but are not used by tools.**~~ **DONE**: built-in tools
+  (`read_file`, `write_file`, `list_files`, `exec`) are now constructed per-run and jailed
+  to each agent's own workspace (`AgentsDir/<key>/workspace/`) in `Engine.callTool`, the
+  same way extra dangerous exec commands already worked. Falls back to the global workspace
+  if the agent workspace resolution fails. (See PR #1)
 
 - **Per-run tool registry instead of the `callTool` switch.**
   `Engine.callTool` hardcodes a 3-case switch (`internal/agent/agent.go:304`) and per-agent
