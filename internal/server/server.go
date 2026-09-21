@@ -79,6 +79,10 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		r.Get("/agents/{key}/extra-commands", s.handleListAgentExtraCommands)
 		r.Put("/agents/{key}/extra-commands/{name}", s.handleEnableExtraCommand)
 		r.Delete("/agents/{key}/extra-commands/{name}", s.handleDisableExtraCommand)
+		r.Get("/agents/{key}/builtin-tools", s.handleListAgentBuiltinTools)
+		r.Put("/agents/{key}/builtin-tools/{name}", s.handleEnableBuiltinTool)
+		r.Delete("/agents/{key}/builtin-tools/{name}", s.handleDisableBuiltinTool)
+		r.Delete("/agents/{key}/builtin-tools", s.handleResetBuiltinTools)
 		r.Get("/agents/{key}/images", s.handleListImages)
 		r.Post("/agents/{key}/images", s.handleUploadImage)
 		r.Delete("/agents/{key}/images/{name}", s.handleDeleteImage)
@@ -1069,6 +1073,125 @@ func (s *Server) setExtraCommandEnabled(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "command": name, "enabled": on})
+}
+
+// --- Built-in tools: per-agent narrowing of the global allow-list ---
+
+// builtinTools lists every built-in tool name (the ceiling is the global
+// AGENTICGO_TOOL_ALLOWLIST; this is the full set the UI can render).
+var builtinTools = []string{"exec", "list_files", "read_file", "write_file"}
+
+// builtinToolWithState is one built-in tool plus the agent's state for it.
+type builtinToolWithState struct {
+	Name string `json:"name"`
+	// Allowed reports whether the global AGENTICGO_TOOL_ALLOWLIST ceiling
+	// permits the tool at all. A tool not allowed globally can never be
+	// enabled per agent.
+	Allowed bool `json:"allowed"`
+	// Enabled reports whether the tool is effective for the agent right now
+	// (allowed globally and not narrowed away per agent).
+	Enabled bool `json:"enabled"`
+}
+
+// handleListAgentBuiltinTools lists the built-in tools annotated with the
+// agent's state (Agents → Built-in Tools tab).
+func (s *Server) handleListAgentBuiltinTools(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	ceiling := map[string]bool{}
+	for _, n := range s.cfg.ToolAllowList {
+		ceiling[n] = true
+	}
+	allowed := func(n string) bool { return len(ceiling) == 0 || ceiling[n] }
+
+	narrowed := map[string]bool{}
+	if ag.Config.EnabledBuiltinTools != nil {
+		for _, n := range *ag.Config.EnabledBuiltinTools {
+			narrowed[n] = true
+		}
+	}
+	out := make([]builtinToolWithState, 0, len(builtinTools))
+	for _, n := range builtinTools {
+		a := allowed(n)
+		enabled := a && (ag.Config.EnabledBuiltinTools == nil || narrowed[n])
+		out = append(out, builtinToolWithState{Name: n, Allowed: a, Enabled: enabled})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleEnableBuiltinTool(w http.ResponseWriter, r *http.Request) {
+	s.setBuiltinToolEnabled(w, r, true)
+}
+
+func (s *Server) handleDisableBuiltinTool(w http.ResponseWriter, r *http.Request) {
+	s.setBuiltinToolEnabled(w, r, false)
+}
+
+func (s *Server) setBuiltinToolEnabled(w http.ResponseWriter, r *http.Request, on bool) {
+	key := chi.URLParam(r, "key")
+	name := chi.URLParam(r, "name")
+
+	if !slices.Contains(builtinTools, name) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown built-in tool %q", name))
+		return
+	}
+	// The global allow-list is the ceiling: a tool not permitted there can
+	// never be enabled per agent.
+	if on && len(s.cfg.ToolAllowList) > 0 && !slices.Contains(s.cfg.ToolAllowList, name) {
+		writeError(w, http.StatusConflict, fmt.Errorf("tool %q is not on the global AGENTICGO_TOOL_ALLOWLIST", name))
+		return
+	}
+
+	ag, err := s.agents.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+
+	// Materialize the current effective set (inherit = the global ceiling,
+	// or all built-ins when no ceiling is configured), then apply the change.
+	effective := map[string]bool{}
+	if ag.Config.EnabledBuiltinTools != nil {
+		for _, n := range *ag.Config.EnabledBuiltinTools {
+			effective[n] = true
+		}
+	} else {
+		for _, n := range builtinTools {
+			if len(s.cfg.ToolAllowList) == 0 || slices.Contains(s.cfg.ToolAllowList, n) {
+				effective[n] = true
+			}
+		}
+	}
+	if on {
+		effective[name] = true
+	} else {
+		delete(effective, name)
+	}
+	names := make([]string, 0, len(effective))
+	for n := range effective {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if _, err := s.agents.SetEnabledBuiltinTools(key, &names); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "tool": name, "enabled": on})
+}
+
+// handleResetBuiltinTools clears the per-agent narrowing so the agent
+// inherits the global allow-list again (the default for new agents).
+func (s *Server) handleResetBuiltinTools(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	if _, err := s.agents.SetEnabledBuiltinTools(key, nil); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "builtin_tools": "inherit"})
 }
 
 // --- Cron jobs (scaffolding) ---

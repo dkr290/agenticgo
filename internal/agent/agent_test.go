@@ -41,7 +41,12 @@ func newTestEngine(t *testing.T) (*Engine, *agents.Registry) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	cfg := &config.Config{MaxAgentIterations: 1}
+	cfg := &config.Config{
+		MaxAgentIterations: 1,
+		// Mirror the production default: all built-ins on the global ceiling.
+		ToolAllowList: []string{"read_file", "write_file", "list_files", "exec"},
+		ExecAllowList: []string{"ls", "echo"},
+	}
 	return New(cfg, stubProvider{}, tools.NewRegistry(nil), st, ar), ar
 }
 
@@ -161,6 +166,97 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+func specNames(reg *tools.Registry) map[string]bool {
+	out := map[string]bool{}
+	for _, sp := range reg.Specs() {
+		out[sp.Function.Name] = true
+	}
+	return out
+}
+
+func TestRunRegistryBuiltinToolsInherit(t *testing.T) {
+	e, ar := newTestEngine(t)
+	reg := registryFor(t, e, ar, "demo")
+	names := specNames(reg)
+	for _, want := range []string{"read_file", "write_file", "list_files", "exec",
+		"memory_search", "memory_save", "record_observation", "search_docs", "read_doc"} {
+		if !names[want] {
+			t.Errorf("inherited registry missing %q (got %v)", want, names)
+		}
+	}
+}
+
+func TestRunRegistryBuiltinToolsNarrowed(t *testing.T) {
+	e, ar := newTestEngine(t)
+
+	// Narrow the agent to read-only built-ins (no write_file, no exec).
+	if _, err := ar.SetEnabledBuiltinTools("demo", &[]string{"read_file", "list_files"}); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryFor(t, e, ar, "demo")
+	names := specNames(reg)
+	if names["exec"] || names["write_file"] {
+		t.Fatalf("narrowed registry must drop exec/write_file, got %v", names)
+	}
+	if !names["read_file"] || !names["list_files"] {
+		t.Fatalf("narrowed registry must keep read_file/list_files, got %v", names)
+	}
+	// Core tools are always on regardless of narrowing.
+	if !names["memory_search"] || !names["read_doc"] {
+		t.Fatalf("core tools must survive narrowing, got %v", names)
+	}
+	// Dispatch enforces the same gate: exec is unknown to this agent.
+	if _, err := reg.Call(context.Background(), "exec", json.RawMessage(`{"command":"ls"}`)); err == nil {
+		t.Fatal("exec must not be callable when narrowed away")
+	}
+
+	// Empty list = no built-ins at all.
+	if _, err := ar.SetEnabledBuiltinTools("demo", &[]string{}); err != nil {
+		t.Fatal(err)
+	}
+	names = specNames(registryFor(t, e, ar, "demo"))
+	if names["read_file"] || names["exec"] {
+		t.Fatalf("empty enabled_builtin_tools must remove all built-ins, got %v", names)
+	}
+
+	// Reset to nil: inherits again.
+	if _, err := ar.SetEnabledBuiltinTools("demo", nil); err != nil {
+		t.Fatal(err)
+	}
+	names = specNames(registryFor(t, e, ar, "demo"))
+	if !names["exec"] {
+		t.Fatalf("reset to nil must restore inheritance, got %v", names)
+	}
+}
+
+func TestRunRegistryExecExtraCommands(t *testing.T) {
+	e, ar := newTestEngine(t)
+	// A command guaranteed absent from PATH so the post-gate exec always fails.
+	e.cfg.ExtraExecCommands = []string{"definitely-not-a-real-cmd-xyz"}
+
+	// Not enabled for the agent: the command is not on exec's allow-list.
+	reg := registryFor(t, e, ar, "demo")
+	if _, err := reg.Call(context.Background(), "exec", json.RawMessage(`{"command":"definitely-not-a-real-cmd-xyz foo"}`)); err == nil {
+		t.Fatal("extra command must not run until enabled per agent")
+	} else if !strings.Contains(err.Error(), "not on the exec allow-list") {
+		t.Fatalf("expected allow-list rejection, got: %v", err)
+	}
+
+	// Enabled: the gate passes (the command itself fails — it does not exist —
+	// but the error must not be an allow-list rejection).
+	if _, err := ar.SetEnabledCommands("demo", []string{"definitely-not-a-real-cmd-xyz"}); err != nil {
+		t.Fatal(err)
+	}
+	reg = registryFor(t, e, ar, "demo")
+	_, err := reg.Call(context.Background(), "exec", json.RawMessage(`{"command":"definitely-not-a-real-cmd-xyz foo"}`))
+	if err == nil {
+		t.Fatal("a nonexistent command should fail, but only after passing the gate")
+	}
+	if strings.Contains(err.Error(), "not on the exec allow-list") {
+		t.Fatalf("enabled extra command must not hit the allow-list rejection: %v", err)
+	}
 }
 
 // newTestMCPManager returns an MCP manager with no servers (discovery catalog

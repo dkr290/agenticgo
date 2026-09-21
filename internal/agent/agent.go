@@ -320,7 +320,11 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 // allowed. Tools absent from the registry are invisible to the model and
 // rejected by Registry.Call, so per-agent gating is enforced by construction.
 func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
-	registry := tools.NewRegistry(e.cfg.ToolAllowList)
+	// The registry itself allows everything registered into it; gating happens
+	// when composing it (below). This keeps the always-on core tools and the
+	// per-agent MCP tools out of the global AGENTICGO_TOOL_ALLOWLIST, which
+	// only governs the built-in fs/exec tools.
+	registry := tools.NewRegistry(nil)
 
 	// Core memory/knowledge tools: always on, scoped to the calling agent.
 	registry.Register(tools.NewMemorySearch(e.store, ag.Key))
@@ -329,12 +333,28 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 	registry.Register(tools.NewSearchDocs(e.docSearcher(ag.Key)))
 	registry.Register(tools.NewReadDoc(e.docReader(ag.Key)))
 
-	// Built-in filesystem tools, jailed to the agent's workspace.
+	// Built-in filesystem tools, jailed to the agent's workspace. The global
+	// AGENTICGO_TOOL_ALLOWLIST is the ceiling; the agent may narrow it further
+	// (config.json enabled_builtin_tools; nil = inherit the global allow-list).
+	// Narrowing can only remove tools, never add ones the ceiling doesn't permit.
+	builtin := e.builtinAllowed(ag)
 	workspace := e.workspaceFor(ag.Key)
-	for _, make := range []func(string) (tools.Tool, error){
-		tools.NewReadFile, tools.NewWriteFile, tools.NewListFiles,
-	} {
-		t, err := make(workspace)
+	if builtin["read_file"] {
+		t, err := tools.NewReadFile(workspace)
+		if err != nil {
+			return nil, err
+		}
+		registry.Register(t)
+	}
+	if builtin["write_file"] {
+		t, err := tools.NewWriteFile(workspace)
+		if err != nil {
+			return nil, err
+		}
+		registry.Register(t)
+	}
+	if builtin["list_files"] {
+		t, err := tools.NewListFiles(workspace)
 		if err != nil {
 			return nil, err
 		}
@@ -345,15 +365,17 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 	// agent's enabled extra (dangerous) commands, jailed to the workspace.
 	// The extras are named in the tool description so the model can see which
 	// dangerous commands it may run.
-	execAllow := append([]string{}, e.cfg.ExecAllowList...)
-	var execExtra []string
-	for _, cmd := range e.cfg.ExtraExecCommands {
-		if slices.Contains(ag.Config.EnabledCommands, cmd) {
-			execAllow = append(execAllow, cmd)
-			execExtra = append(execExtra, cmd)
+	if builtin["exec"] {
+		execAllow := append([]string{}, e.cfg.ExecAllowList...)
+		var execExtra []string
+		for _, cmd := range e.cfg.ExtraExecCommands {
+			if slices.Contains(ag.Config.EnabledCommands, cmd) {
+				execAllow = append(execAllow, cmd)
+				execExtra = append(execExtra, cmd)
+			}
 		}
+		registry.Register(tools.NewExecWithExtra(workspace, execAllow, execExtra))
 	}
-	registry.Register(tools.NewExecWithExtra(workspace, execAllow, execExtra))
 
 	// Custom (MCP) tools enabled for this agent. Tools whose server is not
 	// connected are silently skipped — they become visible once the server is
@@ -380,6 +402,34 @@ func (e *Engine) workspaceFor(agentKey string) string {
 		return e.cfg.WorkspaceDir
 	}
 	return workspace
+}
+
+// builtinAllowed resolves which built-in tools the agent may use: the global
+// AGENTICGO_TOOL_ALLOWLIST ceiling, narrowed by the agent's
+// enabled_builtin_tools when that override is set (nil = inherit). Narrowing
+// can only remove tools, never add ones the ceiling does not permit.
+func (e *Engine) builtinAllowed(ag *agents.Agent) map[string]bool {
+	ceiling := map[string]bool{}
+	for _, n := range e.cfg.ToolAllowList {
+		ceiling[n] = true
+	}
+	permitted := func(n string) bool { return len(ceiling) == 0 || ceiling[n] }
+
+	if ag.Config.EnabledBuiltinTools == nil {
+		// Inherit the global ceiling.
+		out := map[string]bool{}
+		for _, n := range []string{"read_file", "write_file", "list_files", "exec"} {
+			out[n] = permitted(n)
+		}
+		return out
+	}
+	out := map[string]bool{}
+	for _, n := range *ag.Config.EnabledBuiltinTools {
+		if permitted(n) {
+			out[n] = true
+		}
+	}
+	return out
 }
 
 // mcpTool adapts one discovered MCP tool to the tools.Tool interface so it
