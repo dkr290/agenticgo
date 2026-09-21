@@ -16,7 +16,8 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
   a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens/vision,
-  nil = inherit, plus `enabled_skills`, `enabled_tools` and `enabled_commands`), a per-agent `images/`
+  nil = inherit, plus `enabled_skills`, `enabled_tools`, `enabled_commands` and
+  `enabled_builtin_tools`), a per-agent `images/`
   dir (reference pictures/screenshots for vision models), and a per-agent
   `workspace/` (tool jail).
   Files that don't exist yet are still listed (empty) in the UI so they can be created.
@@ -57,13 +58,14 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   spawns at startup. On connect, `internal/mcp` discovers the server's tools and
   caches them namespaced as `mcp_<server>_<tool>`. Agents then enable exactly the
   tools they may use via `config.json` `enabled_tools` (Agents → MCP Tools tab,
-  or `PUT/DELETE /api/agents/{k}/custom-tools/{name}`); only enabled tools are
-  exposed to the LLM, and `Engine.callTool` re-checks the allow-list server-side
-  before delegating to `mcp.Manager.CallTool` (which lazily reconnects a
-  configured-but-disconnected server). Tool names resolve back by longest-prefix
-  matching against known server names, so underscores in tool names are safe.
-  Built-in tools stay gated by the global `AGENTICGO_TOOL_ALLOWLIST`; MCP tools
-  are purely additive per agent.
+  or `PUT/DELETE /api/agents/{k}/custom-tools/{name}`); only enabled tools enter
+  the per-run registry, so anything else is invisible to the model and rejected
+  at dispatch. Calls delegate to `mcp.Manager.CallTool` (which lazily reconnects
+  a configured-but-disconnected server; failures come back as error strings the
+  model can read — a dead server never breaks chat). Tool names resolve back by
+  longest-prefix matching against known server names, so underscores in tool
+  names are safe. Built-in tools stay gated by the global
+  `AGENTICGO_TOOL_ALLOWLIST`; MCP tools are purely additive per agent.
 - **LLM providers**: OpenAI-compatible endpoints only (Ollama / LM Studio / vLLM /
   OpenAI), behind a `llm.Provider` interface. Named provider configs are managed
   from the UI, persisted to `data/providers.json`, and seeded from env on first
@@ -84,7 +86,13 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   adopted. Secrets are redacted (`****` + last 4) before logging.
 - **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`. The `exec`
   tool's safe commands come from `AGENTICGO_EXEC_ALLOWLIST`; additional dangerous
-  commands (`AGENTICGO_EXTRA_EXEC_COMMANDS`) are enabled per agent.
+  commands (`AGENTICGO_EXTRA_EXEC_COMMANDS`) are enabled per agent. The global
+  `AGENTICGO_TOOL_ALLOWLIST` is the ceiling for which built-ins exist at all;
+  an agent may **narrow** its own set via `config.json` `enabled_builtin_tools`
+  (nil = inherit the global allow-list, the common case; a list = exactly those;
+  `[]` = no built-ins — Agents → Built-in Tools tab, or
+  `GET/PUT/DELETE /api/agents/{k}/builtin-tools[/{name}]`). Narrowing can never
+  exceed the global ceiling, and the always-on core tools are unaffected.
 - **Vision / images**: a provider can be flagged `vision` (its model understands
   images — set manually, there's no reliable API to detect it). An agent's
   `config.json` `vision` tri-state overrides it (nil = inherit) for when the agent
@@ -99,7 +107,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   Extra, dangerous commands (e.g. `kubectl`, `git`) are declared via
   `AGENTICGO_EXTRA_EXEC_COMMANDS` but are **never** runnable until an agent enables
   them via `config.json` `enabled_commands` (Agents → Extra Dangerous Exec Commands
-  tab); `Engine.callExec` re-checks per run and runs them jailed to the agent's own
+  tab); `Engine.runRegistry` re-checks per run and runs them jailed to the agent's own
   workspace. Context-file names are validated
   against an allow-list (`validContextFile`) to prevent path traversal; agent keys are
   validated (`ValidKey`) since they're used as directory names.
@@ -116,11 +124,17 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
     and only the *latest* is injected into prompts, so stale state doesn't mislead the
     model. Recorded via the `record_observation` tool.
   These **core agent tools** (`memory_search`, `memory_save`, `record_observation`,
-  `search_docs`, `read_doc`) are built per-run in `Engine.callTool` (scoped to the
-  agent), not registered in the shared `tools.Registry` and not gated by
-  `AGENTICGO_TOOL_ALLOWLIST` — they are always on. They are listed read-only on the
-  Built-in Tools page via `GET /api/tools/core` (single source of truth:
-  `tools.CoreTools()`).
+  `search_docs`, `read_doc`) are built per-run in `Engine.runRegistry` (scoped to the
+  agent) and registered unconditionally — they are not gated by
+  `AGENTICGO_TOOL_ALLOWLIST` and cannot be disabled per agent. They are listed
+  read-only on the Built-in Tools page via `GET /api/tools/core` (single source of
+  truth: `tools.CoreTools()`).
+- **Per-run tool registry**: `Engine.runRegistry` composes every tool a run sees —
+  core memory/docs tools, workspace-jailed built-ins (narrowed per agent), exec
+  (safe + enabled extra commands), and enabled MCP tools — into one
+  `tools.Registry`. `Run` uses its `Specs()` for the LLM request and `Call()` for
+  dispatch, so the spec list and execution can never drift, and a tool absent
+  from the registry is invisible to the model and rejected at dispatch.
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
 - **Scaffolding**: `internal/scaffold` holds the in-memory cron-job registry backing
@@ -151,8 +165,11 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - `internal/agent` — `Engine` resolves an agent, builds the system prompt
   (base + context files + skills + per-agent knowledge) and runs the tool loop,
   persisting turns under `(agent, session)`. `SetProviderLookup` enables
-  per-request provider overrides; `SetMCPManager` enables per-agent MCP tools,
-  gated by `AgentConfig.EnabledTools` in `callTool`.
+  per-request provider overrides; `SetMCPManager` enables per-agent MCP tools.
+  `runRegistry` composes the per-run tool set (core memory/docs tools,
+  workspace-jailed built-ins narrowed by `enabled_builtin_tools`, exec with
+  enabled extra commands, enabled MCP tools) whose `Specs()`/`Call()` serve
+  both the LLM request and dispatch.
 - `internal/server` — chi routes for agent CRUD / context files / skills /
   providers / tools / sessions / MCP / cron / evolve, plus `/ws` streaming chat.
   The agent key (and optional provider name) flows through WS messages and API
