@@ -63,6 +63,13 @@ type AgentConfig struct {
 	// or this field). Safe built-in commands are gated by the global
 	// AGENTICGO_EXEC_ALLOWLIST instead.
 	EnabledCommands []string `json:"enabled_commands,omitempty"`
+	// EnabledBuiltinTools narrows which built-in tools (read_file, write_file,
+	// list_files, exec) this agent may use, intersected with the global
+	// AGENTICGO_TOOL_ALLOWLIST ceiling. nil = inherit the global allow-list
+	// (the common case); an explicit list = exactly those; an empty list = no
+	// built-in tools at all (the agent still gets the always-on core
+	// memory/docs tools and any enabled MCP tools).
+	EnabledBuiltinTools *[]string `json:"enabled_builtin_tools,omitempty"`
 }
 
 // configFileName is where a per-agent LLM config is stored on disk.
@@ -210,6 +217,26 @@ func (r *Registry) SetEnabledCommands(key string, cmds []string) (*Agent, error)
 	}
 	cfg := r.loadConfig(dir)
 	cfg.EnabledCommands = cmds
+	if err := r.saveConfig(dir, cfg); err != nil {
+		return nil, err
+	}
+	return r.Get(key)
+}
+
+// SetEnabledBuiltinTools replaces the agent's enabled built-in-tools
+// narrowing in its config.json and returns the refreshed agent. Passing nil
+// clears the override so the agent inherits the global allow-list again;
+// passing a pointer to an empty list disables all built-in tools for it.
+func (r *Registry) SetEnabledBuiltinTools(key string, names *[]string) (*Agent, error) {
+	dir, err := r.dirFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Exists(key) {
+		return nil, fmt.Errorf("agent %q not found", key)
+	}
+	cfg := r.loadConfig(dir)
+	cfg.EnabledBuiltinTools = names
 	if err := r.saveConfig(dir, cfg); err != nil {
 		return nil, err
 	}

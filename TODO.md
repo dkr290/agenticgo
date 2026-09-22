@@ -80,32 +80,31 @@ this lists what's still needed to make the project fully functional).
   same way extra dangerous exec commands already worked. Falls back to the global workspace
   if the agent workspace resolution fails. (See PR #1)
 
-- **Per-run tool registry instead of the `callTool` switch.**
-  `Engine.callTool` (`internal/agent/agent.go:423`) has grown from the original 3-case
-  switch into ~100 lines across **three** switch/if blocks (core memory/docs tools,
-  per-agent-workspace fs tools, exec + extra commands + MCP routing), and per-agent
-  memory tools are re-constructed on **every tool call** instead of once per run.
-  Worse, the LLM-facing spec list is now assembled separately in `Run`
-  (`toolSpec(...)` × 5 + `mcpToolSpecs`) while dispatch lives in the switch — two
-  hand-maintained lists that can drift. Meanwhile the global registry passed to the
-  engine is only used for `Specs()`: its built-in tool *instances* are bypassed at
-  execution time since `callTool` builds jailed per-run ones (half-migrated state).
-  This does not scale: per-agent tool allow-lists (below) and MCP tools (§3) both
-  need per-run composition. Refactor: build a per-run `tools.Registry` (agent-scoped
-  fs/exec jailed to the agent's workspace + core memory/docs tools + MCP tools
-  gated by `enabled_tools` + exec gated by `enabled_commands`), expose it via a
-  single `Specs()`/`Call()` so specs and dispatch share one source of truth, and
-  drop the switch entirely. MCP tool-lifecycle note from the k8s-mcp-server
-  analysis: failure of one source must not break the rest (soft-fail per tool —
-  an unreachable server's tool should return an error string from `Call`, not a
-  routing failure).
+- ~~**Per-run tool registry instead of the `callTool` switch.**~~ **DONE**:
+  `Engine.runRegistry` now builds a per-run `tools.Registry` for every run — the
+  always-on core memory/docs tools, the workspace-jailed fs/exec tools (exec's
+  allow-list = global `AGENTICGO_EXEC_ALLOWLIST` + the agent's enabled extra
+  commands, named in its description so the model can see them), and the agent's
+  enabled MCP tools via a `tools.Tool` adapter (soft-fail: call errors return as
+  strings the model can read). `Run` uses the registry's `Specs()` for the LLM
+  request and `Call()` for dispatch, so specs and execution share one source of
+  truth; the three-block `callTool`/`callExec`/`mcpToolSpecs` switch is gone, and
+  per-agent tools are built once per run instead of per call. Gating is enforced
+  by construction: a tool absent from the registry is invisible to the model and
+  rejected by `Registry.Call`.
 
-- **Per-agent tool allow-list.**
-  `cfg.ToolAllowList` is global-only (`internal/config/config.go:41`). With per-agent
-  workspaces and MCP tools, agents need individual gating (the k8s-mcp-server "toolsets"
-  idea, but per agent): add an allow-list field to the agent's `config.json` (nil = inherit
-  global), and apply it in the per-run registry. Also consider a `read_only`-style mode per
-  agent (no `write_file`/`exec`) — k8s-mcp-server's `--read-only` is the same concept.
+- ~~**Per-agent tool allow-list.**~~ **DONE** (scoped to built-ins; skills, MCP
+  tools and extra exec commands were already per-agent): `config.json`
+  `enabled_builtin_tools` narrows which built-in tools (`read_file`, `write_file`,
+  `list_files`, `exec`) an agent gets — nil = inherit the global
+  `AGENTICGO_TOOL_ALLOWLIST` (the common case), a list = exactly those, `[]` = no
+  built-ins at all. Narrowing can only remove tools, never exceed the global
+  ceiling, and the core memory/docs tools are always on. Wire-up: applied in
+  `runRegistry`; API `GET/PUT/DELETE /api/agents/{k}/builtin-tools[/{name}]`
+  (DELETE without a name resets to inherit); Agents → Built-in Tools tab with
+  per-tool checkboxes, global-ceiling indication and a reset button. This also
+  subsumes the per-agent `read_only` idea — `["read_file", "list_files"]` *is*
+  read-only mode.
 
 - **Conversation history loses the tool trace.**
   `messages` only persists role+content (`internal/store/store.go:44`); intermediate
@@ -153,28 +152,14 @@ this lists what's still needed to make the project fully functional).
 
 ## 3. Scaffolded features (UI + API shape only — nothing executes)
 
-- **MCP client (Phase 3) — make GUI-registered servers actually usable by agents.**
-  Today `POST /api/mcp-servers` only writes to an in-memory map
-  (`internal/scaffold/scaffold.go:60`); nothing connects, discovers, or registers tools, so
-  the agent cannot use any registered server. The full chain:
-  - **Persist config** (JSON file like providers, or new SQLite tables) so servers survive
-    restarts. The in-memory scaffold store loses everything.
-  - **Connect** with `github.com/modelcontextprotocol/go-sdk/mcp`: stdio transport (spawn
-    `command`+`args`) and HTTP/SSE transport (`url`). Connect (or reconnect) when a server is
-    added via the GUI/API, not only at startup.
-  - **Discover tools**: call `tools/list`; each MCP tool already carries name, description
-    and a JSON Schema — pass it through ~1:1 into `llm.ToolSpec` (no reflection/generics
-    needed for MCP tools; that go-harness pattern is only for hand-written Go tools).
-  - **Adapter**: wrap each discovered tool as a `tools.Tool` whose `Call(ctx, args)` forwards
-    to the MCP client's `CallTool` and returns the text content; errors come back as strings
-    the model can read.
-  - **Merge into the per-run registry** (see §1) namespaced as `mcp_<server>_<tool>` and
-    gated by the same allow-list (global + per-agent).
-  - **Soft-fail**: an unreachable/dead server must not break chat — its tools return error
-    strings; tool-list refresh on reconnect (tools can change between runs).
-  - First dogfood target: `containers/kubernetes-mcp-server` via stdio (it is a plain MCP
-    server; its own `--toolsets`/`--read-only` flags go into the server `args`, not into
-    agenticgo).
+- ~~**MCP client (Phase 3)**~~ **DONE** (see the README roadmap): `internal/mcp`
+  persists servers to `data/mcp_servers.json`, connects manually (stdio + HTTP via
+  `modelcontextprotocol/go-sdk`), discovers tools on Connect, namespaces them
+  `mcp_<server>_<tool>`, and merges them into the per-run registry via a
+  `tools.Tool` adapter gated by the agent's `enabled_tools`. Soft-fail holds: a
+  dead/unreachable server's calls return error strings the model can read, and a
+  configured-but-disconnected server is lazily reconnected on first call. First
+  dogfood target remains `containers/kubernetes-mcp-server` via stdio.
 
 - **Optional: generics-based tool registration for hand-written Go tools.**
   Borrow the `RegisterTool[T, R]` + `invopop/jsonschema` pattern from

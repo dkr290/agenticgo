@@ -244,6 +244,7 @@
     <div class="tabs">
       <button class="tab active" data-atab="files">Files</button>
       <button class="tab" data-atab="skills">Skills</button>
+      <button class="tab" data-atab="builtin-tools">Built-in Tools</button>
       <button class="tab" data-atab="custom-tools">MCP Tools</button>
       <button class="tab" data-atab="commands">Extra Dangerous Exec Commands</button>
       <button class="tab" data-atab="knowledge">Learnings</button>
@@ -264,6 +265,7 @@
       </div>
     </div>
     <div id="atab-skills" style="display:none" class="page-body"></div>
+    <div id="atab-builtin-tools" style="display:none" class="page-body"></div>
     <div id="atab-custom-tools" style="display:none" class="page-body"></div>
     <div id="atab-commands" style="display:none" class="page-body"></div>
     <div id="atab-knowledge" style="display:none" class="page-body"></div>
@@ -755,6 +757,11 @@
       show('agent-detail');
     }).catch(e => toast('Load agent failed: ' + e.message));
   }
+  // Refresh the cached agent detail (e.g. after a config-affecting toggle).
+  function reloadAgentDetail(){
+    if (!detailAgent) return;
+    return api('/api/agents/' + encodeURIComponent(detailAgent)).then(a => { agentDetail = a; });
+  }
   $('agent-back').addEventListener('click', () => show('agents'));
   $('agent-delete').addEventListener('click', () => {
     if (!detailAgent || !confirm('Delete agent "' + detailAgent + '" and all its files?')) return;
@@ -768,12 +775,14 @@
     document.querySelectorAll('[data-atab]').forEach(x => x.classList.toggle('active', x.dataset.atab === tab));
     $('atab-files').style.display = tab === 'files' ? '' : 'none';
     $('atab-skills').style.display = tab === 'skills' ? '' : 'none';
+    $('atab-builtin-tools').style.display = tab === 'builtin-tools' ? '' : 'none';
     $('atab-custom-tools').style.display = tab === 'custom-tools' ? '' : 'none';
     $('atab-commands').style.display = tab === 'commands' ? '' : 'none';
     $('atab-knowledge').style.display = tab === 'knowledge' ? '' : 'none';
     $('atab-images').style.display = tab === 'images' ? '' : 'none';
     $('atab-config').style.display = tab === 'config' ? '' : 'none';
     if (tab === 'skills') renderAgentSkills();
+    if (tab === 'builtin-tools') renderAgentBuiltinTools();
     if (tab === 'custom-tools') renderAgentCustomTools();
     if (tab === 'commands') renderAgentCommands();
     if (tab === 'knowledge') renderAgentKnowledge();
@@ -883,6 +892,64 @@
         el.appendChild(d);
       });
     }).catch(() => { el.innerHTML = '<div class="empty">Failed to load skills.</div>'; });
+  }
+
+  // Render the Built-in Tools tab: read_file/write_file/list_files/exec.
+  // Agents inherit the global allow-list by default; ticking/unticking narrows
+  // it for this agent only (a tool off the global allow-list can never be
+  // enabled here). "Reset to default" clears the narrowing.
+  function renderAgentBuiltinTools(){
+    const el = $('atab-builtin-tools');
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/builtin-tools').then(list => {
+      const c = (agentDetail && agentDetail.config) || {};
+      const narrowed = c.enabled_builtin_tools != null; // nil = inherit global
+      el.innerHTML = '<div style="color:var(--muted); font-size:12.5px; margin-bottom:12px">' +
+        'These are the built-in system tools. By default an agent inherits the global ' +
+        '<code>AGENTICGO_TOOL_ALLOWLIST</code>; untick a tool to remove it from this agent only ' +
+        '(e.g. drop <code>exec</code> for a read-only agent). The always-on memory/knowledge tools ' +
+        'are not listed here — they cannot be disabled (see the Built-in Tools page).</div>' +
+        '<div style="margin-bottom:12px; display:flex; align-items:center; gap:10px">' +
+          '<span class="pill">' + (narrowed ? 'custom per-agent set' : 'inheriting global allow-list') + '</span>' +
+          (narrowed ? '<button class="ghost" id="bt-reset" style="padding:4px 12px; font-size:12px">Reset to default (inherit global)</button>' : '') +
+        '</div>';
+      const resetBtn = el.querySelector('#bt-reset');
+      if (resetBtn) resetBtn.addEventListener('click', () => {
+        if (!confirm('Reset built-in tools for ' + detailAgent + ' to inherit the global allow-list?')) return;
+        api('/api/agents/' + encodeURIComponent(detailAgent) + '/builtin-tools', { method:'DELETE' })
+          .then(() => { toast('✓ Reset to global default'); reloadAgentDetail(); renderAgentBuiltinTools(); })
+          .catch(e => toast('Failed: ' + e.message));
+      });
+      const descs = {
+        read_file: 'Read the contents of a file in the workspace.',
+        write_file: 'Write content to a file in the workspace (overwrites).',
+        list_files: 'List files and directories under a path in the workspace.',
+        exec: 'Run an allow-listed shell command inside the workspace.'
+      };
+      list.forEach(t => {
+        const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
+        if (!t.allowed) d.style.opacity = '.55';
+        d.innerHTML =
+          '<div style="display:flex; align-items:flex-start; gap:10px">' +
+            '<input type="checkbox" id="btc-' + esc(t.name) + '"' + (t.enabled ? ' checked' : '') +
+              (t.allowed ? '' : ' disabled') + ' style="width:auto; margin-top:2px; flex:none">' +
+            '<div style="flex:1; min-width:0">' +
+              '<label for="btc-' + esc(t.name) + '" style="cursor:pointer; font-weight:600; font-size:14px; margin:0">' + esc(t.name) + '</label> ' +
+              (t.allowed ? '' : '<span class="pill" style="color:var(--danger); border-color:var(--danger)">not on global allow-list</span>') +
+              '<div style="color:var(--muted); font-size:12px; margin-top:2px">' + esc(descs[t.name] || '') + '</div>' +
+            '</div>' +
+          '</div>';
+        if (t.allowed) {
+          d.querySelector('input').addEventListener('change', ev => {
+            const on = ev.target.checked;
+            api('/api/agents/' + encodeURIComponent(detailAgent) + '/builtin-tools/' + encodeURIComponent(t.name),
+                { method: on ? 'PUT' : 'DELETE' })
+              .then(() => { toast((on ? '✓ Enabled ' : '✓ Disabled ') + t.name + ' for ' + detailAgent); reloadAgentDetail(); renderAgentBuiltinTools(); })
+              .catch(e => { ev.target.checked = !on; toast('Failed: ' + e.message); });
+          });
+        }
+        el.appendChild(d);
+      });
+    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load built-in tools.</div>'; });
   }
 
   // Render the MCP Tools tab: discovered MCP tools, ticked per agent.

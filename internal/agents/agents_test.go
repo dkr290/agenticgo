@@ -68,6 +68,54 @@ func TestSetEnabledToolsUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestSetEnabledBuiltinToolsRoundTrip(t *testing.T) {
+	reg, err := NewRegistry(filepath.Join(t.TempDir(), "agents"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Create("demo", "Demo", "test agent", "", AgentConfig{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// nil by default: inherit the global allow-list.
+	ag, err := reg.Get("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ag.Config.EnabledBuiltinTools != nil {
+		t.Fatalf("EnabledBuiltinTools default = %v, want nil", *ag.Config.EnabledBuiltinTools)
+	}
+
+	// Narrow to read-only; persisted to disk.
+	if _, err := reg.SetEnabledBuiltinTools("demo", &[]string{"read_file", "list_files"}); err != nil {
+		t.Fatal(err)
+	}
+	ag, _ = reg.Get("demo")
+	if ag.Config.EnabledBuiltinTools == nil ||
+		!slices.Equal(*ag.Config.EnabledBuiltinTools, []string{"read_file", "list_files"}) {
+		t.Fatalf("EnabledBuiltinTools = %+v", ag.Config.EnabledBuiltinTools)
+	}
+
+	// Empty list (not nil) = no built-ins at all; the distinction must survive
+	// the JSON round trip.
+	if _, err := reg.SetEnabledBuiltinTools("demo", &[]string{}); err != nil {
+		t.Fatal(err)
+	}
+	ag, _ = reg.Get("demo")
+	if ag.Config.EnabledBuiltinTools == nil || len(*ag.Config.EnabledBuiltinTools) != 0 {
+		t.Fatalf("EnabledBuiltinTools empty-vs-nil lost: %+v", ag.Config.EnabledBuiltinTools)
+	}
+
+	// nil again = inherit.
+	if _, err := reg.SetEnabledBuiltinTools("demo", nil); err != nil {
+		t.Fatal(err)
+	}
+	ag, _ = reg.Get("demo")
+	if ag.Config.EnabledBuiltinTools != nil {
+		t.Fatalf("EnabledBuiltinTools after reset = %v", *ag.Config.EnabledBuiltinTools)
+	}
+}
+
 // TestCreateSeedsContextFilesFromTemplates verifies that Create writes all
 // seven context files with the embedded template content, substituting the
 // agent name/role into SOUL.md and IDENTITY.md.

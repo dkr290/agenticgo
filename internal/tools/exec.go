@@ -15,6 +15,9 @@ type execTool struct {
 	workspace string
 	allow     map[string]bool
 	timeout   time.Duration
+	// extra lists the dangerous-but-enabled commands beyond the base
+	// allow-list, so the model can see them in the tool description.
+	extra []string
 }
 
 // NewExec creates the exec tool. allowList contains permitted command names
@@ -27,9 +30,24 @@ func NewExec(workspace string, allowList []string) Tool {
 	return &execTool{workspace: workspace, allow: allow, timeout: 30 * time.Second}
 }
 
+// NewExecWithExtra creates the exec tool like NewExec but records which
+// commands came from the extra (dangerous) allow-list so the description can
+// name them — otherwise the model cannot tell which extra commands it may run.
+func NewExecWithExtra(workspace string, allowList, extra []string) Tool {
+	t := NewExec(workspace, allowList).(*execTool)
+	t.extra = extra
+	return t
+}
+
 func (t *execTool) Name() string { return "exec" }
 func (t *execTool) Description() string {
-	return "Run an allow-listed shell command inside the workspace."
+	d := "Run an allow-listed shell command inside the workspace."
+	if len(t.extra) > 0 {
+		d += " In addition to the standard safe commands, you may run these " +
+			"extra commands (use with care — they can modify or delete real state): " +
+			strings.Join(t.extra, ", ") + "."
+	}
+	return d
 }
 func (t *execTool) Parameters() map[string]any {
 	return map[string]any{
