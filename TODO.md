@@ -81,13 +81,24 @@ this lists what's still needed to make the project fully functional).
   if the agent workspace resolution fails. (See PR #1)
 
 - **Per-run tool registry instead of the `callTool` switch.**
-  `Engine.callTool` hardcodes a 3-case switch (`internal/agent/agent.go:304`) and per-agent
-  memory tools are constructed per call, while built-ins live in one shared global registry.
-  This does not scale: per-agent workspaces (above), per-agent tool allow-lists (below) and
-  MCP tools (§3) all need per-run composition. Refactor: build a per-run `tools.Registry`
-  (global built-ins + agent-scoped fs/exec + memory/docs tools + MCP tools), expose it via
-  a single `Specs()`/`Call()` and drop the switch entirely. MCP tool-lifecycle note from the
-  k8s-mcp-server analysis: failure of one source must not break the rest (soft-fail per tool).
+  `Engine.callTool` (`internal/agent/agent.go:423`) has grown from the original 3-case
+  switch into ~100 lines across **three** switch/if blocks (core memory/docs tools,
+  per-agent-workspace fs tools, exec + extra commands + MCP routing), and per-agent
+  memory tools are re-constructed on **every tool call** instead of once per run.
+  Worse, the LLM-facing spec list is now assembled separately in `Run`
+  (`toolSpec(...)` × 5 + `mcpToolSpecs`) while dispatch lives in the switch — two
+  hand-maintained lists that can drift. Meanwhile the global registry passed to the
+  engine is only used for `Specs()`: its built-in tool *instances* are bypassed at
+  execution time since `callTool` builds jailed per-run ones (half-migrated state).
+  This does not scale: per-agent tool allow-lists (below) and MCP tools (§3) both
+  need per-run composition. Refactor: build a per-run `tools.Registry` (agent-scoped
+  fs/exec jailed to the agent's workspace + core memory/docs tools + MCP tools
+  gated by `enabled_tools` + exec gated by `enabled_commands`), expose it via a
+  single `Specs()`/`Call()` so specs and dispatch share one source of truth, and
+  drop the switch entirely. MCP tool-lifecycle note from the k8s-mcp-server
+  analysis: failure of one source must not break the rest (soft-fail per tool —
+  an unreachable server's tool should return an error string from `Call`, not a
+  routing failure).
 
 - **Per-agent tool allow-list.**
   `cfg.ToolAllowList` is global-only (`internal/config/config.go:41`). With per-agent
