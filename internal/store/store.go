@@ -25,6 +25,10 @@ type Store struct {
 	db *sql.DB
 }
 
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
 // Open opens (creating if needed) the SQLite database at path.
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -114,6 +118,10 @@ END;
 	// Idempotent column additions for DBs created before per-agent scoping.
 	s.addColumnIfMissing("messages", "agent", `ALTER TABLE messages ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`)
 	s.addColumnIfMissing("knowledge", "agent", `ALTER TABLE knowledge ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`)
+	// Idempotent column additions for tool-call trace in conversation history.
+	s.addColumnIfMissing("messages", "tool_calls", `ALTER TABLE messages ADD COLUMN tool_calls TEXT`)
+	s.addColumnIfMissing("messages", "tool_call_id", `ALTER TABLE messages ADD COLUMN tool_call_id TEXT`)
+	s.addColumnIfMissing("messages", "name", `ALTER TABLE messages ADD COLUMN name TEXT`)
 	// Replace the broken FTS5 "special delete" triggers (from older DBs) with
 	// rowid deletes. CREATE TRIGGER IF NOT EXISTS won't overwrite them, so drop
 	// then recreate. Idempotent.
@@ -147,18 +155,23 @@ func (s *Store) addColumnIfMissing(table, column, alter string) {
 	}
 }
 
-// Close closes the database.
-func (s *Store) Close() error { return s.db.Close() }
-
-// AppendMessage stores a message for an agent in a session.
-func (s *Store) AppendMessage(ctx context.Context, agent, session, role, content string) error {
+// AppendMessageWithToolCalls stores a message for an agent in a session,
+// optionally including tool-call metadata for assistant turns that invoked
+// tools or for tool-result messages that reference a specific tool call.
+// Pass empty strings / nil for the extra fields when not applicable.
+func (s *Store) AppendMessageWithToolCalls(ctx context.Context, agent, session, role, content, toolCalls, toolCallID, name string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (agent, session, role, content, created_at) VALUES (?,?,?,?,?)`,
-		agent, session, role, content, time.Now().Unix())
+		`INSERT INTO messages (agent, session, role, content, tool_calls, tool_call_id, name, created_at) VALUES (?,?,?,?,?,?,?,?)`,
+		agent, session, role, content, toolCalls, toolCallID, name, time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("insert message: %w", err)
 	}
 	return nil
+}
+
+// AppendMessage stores a message for an agent in a session.
+func (s *Store) AppendMessage(ctx context.Context, agent, session, role, content string) error {
+	return s.AppendMessageWithToolCalls(ctx, agent, session, role, content, "", "", "")
 }
 
 // Messages returns the stored messages for an agent+session, oldest first.
@@ -167,7 +180,7 @@ func (s *Store) Messages(ctx context.Context, agent, session string, limit int) 
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT role, content FROM messages WHERE agent = ? AND session = ? ORDER BY id DESC LIMIT ?`,
+		`SELECT role, content, tool_calls, tool_call_id, name FROM messages WHERE agent = ? AND session = ? ORDER BY id DESC LIMIT ?`,
 		agent, session, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query messages: %w", err)
@@ -177,7 +190,7 @@ func (s *Store) Messages(ctx context.Context, agent, session string, limit int) 
 	var rev []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.Role, &m.Content); err != nil {
+		if err := rows.Scan(&m.Role, &m.Content, &m.ToolCalls, &m.ToolCallID, &m.Name); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		rev = append(rev, m)
@@ -555,6 +568,9 @@ func (s *Store) DeleteSession(ctx context.Context, agent, session string) error 
 
 // Message is a stored conversation turn.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	ToolCalls  string `json:"tool_calls,omitempty"`   // JSON array of tool calls (assistant turns that invoked tools)
+	ToolCallID string `json:"tool_call_id,omitempty"` // links a tool result to the assistant's tool call
+	Name       string `json:"name,omitempty"`         // tool name for tool-result messages
 }

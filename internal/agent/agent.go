@@ -277,6 +277,19 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 			return finalText, nil
 		}
 
+		// Serialize tool calls for persistence.
+		toolCallsJSON, err := json.Marshal(assistantMsg.ToolCalls)
+		if err != nil {
+			emit(Event{Kind: "error", Err: err})
+			return "", fmt.Errorf("marshal tool calls: %w", err)
+		}
+
+		// Persist the assistant turn that requested tools (with tool_calls metadata).
+		if err := e.store.AppendMessageWithToolCalls(ctx, agentKey, session,
+			string(llm.RoleAssistant), assistantMsg.Content, string(toolCallsJSON), "", ""); err != nil {
+			emit(Event{Kind: "error", Err: err})
+		}
+
 		// Record the assistant turn that requested tools.
 		messages = append(messages, assistantMsg)
 
@@ -289,6 +302,12 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 				result = "error: " + callErr.Error()
 			}
 			emit(Event{Kind: "tool_result", ToolName: tc.Name, ToolResult: result})
+
+			// Persist the tool result as a separate message row.
+			if err := e.store.AppendMessageWithToolCalls(ctx, agentKey, session,
+				string(llm.RoleTool), result, "", tc.ID, tc.Name); err != nil {
+				emit(Event{Kind: "error", Err: err})
+			}
 
 			messages = append(messages, llm.Message{
 				Role:       llm.RoleTool,
@@ -538,7 +557,15 @@ func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
 
 	var transcript strings.Builder
 	for _, m := range history {
-		fmt.Fprintf(&transcript, "%s: %s\n", m.Role, m.Content)
+		if m.ToolCalls != "" {
+			// Assistant turn that invoked tools — include the tool calls for context.
+			fmt.Fprintf(&transcript, "%s: %s [tool_calls: %s]\n", m.Role, m.Content, m.ToolCalls)
+		} else if m.ToolCallID != "" {
+			// Tool result — include the tool name and call ID for context.
+			fmt.Fprintf(&transcript, "%s [%s]: %s\n", m.Role, m.Name, m.Content)
+		} else {
+			fmt.Fprintf(&transcript, "%s: %s\n", m.Role, m.Content)
+		}
 	}
 
 	prompt := "From the following conversation, extract at most 3 durable, reusable facts, " +
