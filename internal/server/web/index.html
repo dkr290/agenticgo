@@ -555,7 +555,24 @@
   function loadConversationMessages(agent, session){
     $('chat').innerHTML=''; currentAssistant = null;
     api('/api/sessions/' + encodeURIComponent(agent) + '/' + encodeURIComponent(session) + '/messages')
-      .then(msgs => { (msgs||[]).forEach(m => addMsg(m.role === 'user' ? 'user' : m.role === 'assistant' ? 'assistant' : 'system', m.content)); })
+      .then(msgs => { (msgs||[]).forEach(m => {
+        if (m.role === 'tool') {
+          // Tool result message — show the tool name and result.
+          addMsg('tool', '→ ' + (m.name || 'tool') + ' (id=' + (m.tool_call_id || '?') + '): ' + (m.content || '').slice(0, 800));
+        } else if (m.role === 'assistant' && m.tool_calls) {
+          // Assistant turn that invoked tools — show the tool calls.
+          let label = m.content || '';
+          try {
+            const tcs = JSON.parse(m.tool_calls);
+            if (Array.isArray(tcs)) {
+              label += '\n' + tcs.map(tc => '⚙ ' + (tc.name || '?') + '(' + (tc.arguments || '') + ')').join('\n');
+            }
+          } catch(e) {}
+          addMsg('assistant', label);
+        } else {
+          addMsg(m.role === 'user' ? 'user' : m.role === 'assistant' ? 'assistant' : 'system', m.content);
+        }
+      }); })
       .catch(e => toast('Load failed: ' + e.message));
   }
 

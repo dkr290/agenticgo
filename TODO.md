@@ -106,12 +106,13 @@ this lists what's still needed to make the project fully functional).
   subsumes the per-agent `read_only` idea — `["read_file", "list_files"]` *is*
   read-only mode.
 
-- **Conversation history loses the tool trace.**
-  `messages` only persists role+content (`internal/store/store.go:44`); intermediate
-  assistant tool-call turns and `tool` results are kept in memory only (`internal/agent/agent.go:231`).
-  On the next turn the model can't see what tools were called. Persist tool calls/results
-  (add `tool_calls`, `tool_call_id`, `name` columns) so multi-turn sessions stay correct and
-  the UI "Load history" shows tool activity.
+- ~~**Conversation history loses the tool trace.**~~ **DONE**: `messages` table now persists
+  tool-call metadata — added `tool_calls` (JSON), `tool_call_id`, and `name` columns via
+  idempotent migration. `Engine.Run` persists assistant turns with tool calls and tool result
+  messages (`role=tool`). `Engine.Evolve` formats tool-call turns in the transcript. The UI
+  `loadConversationMessages` renders tool-call and tool-result messages when loading history,
+  matching the real-time WebSocket rendering pattern. `Store.Close()` method added (was
+  missing).
 
 - **Evolve ignores provider resolution and agent config.**
   `Evolve` hardcodes `e.cfg.LLMModel` + `e.llm` (`internal/agent/agent.go:335`). Use the same
