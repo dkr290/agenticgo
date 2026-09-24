@@ -17,7 +17,7 @@ import (
 
 // stubProvider satisfies llm.Provider without any network calls; the tests
 // here only exercise the per-run registry directly, so it never actually gets
-// invoked.
+// invoked. It is handed out by fakeLookup.
 type stubProvider struct{}
 
 func (stubProvider) ChatCompletion(context.Context, llm.ChatRequest, llm.StreamFunc) (llm.Message, error) {
@@ -25,6 +25,12 @@ func (stubProvider) ChatCompletion(context.Context, llm.ChatRequest, llm.StreamF
 }
 func (stubProvider) Name() string  { return "stub" }
 func (stubProvider) Model() string { return "stub" }
+
+// stubLookup is a minimal ProviderLookup: any name (including "" = default)
+// resolves to the stub provider.
+type stubLookup struct{}
+
+func (stubLookup) GetLLM(string) (llm.Provider, error) { return stubProvider{}, nil }
 
 func newTestEngine(t *testing.T) (*Engine, *agents.Registry) {
 	t.Helper()
@@ -47,7 +53,9 @@ func newTestEngine(t *testing.T) (*Engine, *agents.Registry) {
 		ToolAllowList: []string{"read_file", "write_file", "list_files", "exec"},
 		ExecAllowList: []string{"ls", "echo"},
 	}
-	return New(cfg, stubProvider{}, tools.NewRegistry(nil), st, ar), ar
+	e := New(cfg, tools.NewRegistry(nil), st, ar)
+	e.SetProviderLookup(stubLookup{})
+	return e, ar
 }
 
 // registryFor builds the per-run registry for an agent, failing the test on error.
@@ -156,6 +164,63 @@ func TestCallToolMemorySavePersistsPerAgent(t *testing.T) {
 	// Scoped: nothing written for another agent.
 	if other, _ := e.store.Knowledge(ctx, "other", 10); len(other) != 0 {
 		t.Fatalf("memory_save leaked to other agent: %+v", other)
+	}
+}
+
+// trackingLookup records the names it was asked to resolve.
+type trackingLookup struct{ got []string }
+
+func (f *trackingLookup) GetLLM(name string) (llm.Provider, error) {
+	f.got = append(f.got, name)
+	return stubProvider{}, nil
+}
+
+func TestResolveProviderRoutesEmptyNameToStoreDefault(t *testing.T) {
+	e, ar := newTestEngine(t)
+	tl := &trackingLookup{}
+	e.SetProviderLookup(tl)
+
+	ag, err := ar.Get("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No override, agent pins nothing: empty name reaches the store, which
+	// resolves it to its default provider.
+	if _, err := e.resolveProvider(ag, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Agent config provider wins when set.
+	if _, err := ar.UpdateConfig("demo", agents.AgentConfig{Provider: strPtr("pinned")}); err != nil {
+		t.Fatal(err)
+	}
+	ag, err = ar.Get("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.resolveProvider(ag, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Per-request override beats the agent pin.
+	if _, err := e.resolveProvider(ag, "adhoc"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"", "pinned", "adhoc"}
+	if len(tl.got) != len(want) {
+		t.Fatalf("lookups = %v, want %v", tl.got, want)
+	}
+	for i := range want {
+		if tl.got[i] != want[i] {
+			t.Fatalf("lookups = %v, want %v", tl.got, want)
+		}
+	}
+
+	// Without a provider lookup, resolution fails loudly instead of silently
+	// falling back to an env-built provider.
+	bare := New(e.cfg, tools.NewRegistry(nil), e.store, ar)
+	if _, err := bare.resolveProvider(ag, ""); err == nil {
+		t.Fatal("resolveProvider without lookup must fail")
 	}
 }
 

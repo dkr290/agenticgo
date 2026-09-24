@@ -114,20 +114,37 @@ this lists what's still needed to make the project fully functional).
   matching the real-time WebSocket rendering pattern. `Store.Close()` method added (was
   missing).
 
-- **Evolve ignores provider resolution and agent config.**
-  `Evolve` hardcodes `e.cfg.LLMModel` + `e.llm` (`internal/agent/agent.go:335`). Use the same
-  provider resolution as `Run` (per-request + agent config) and pass temperature/max_tokens.
+- **Evolve ignores provider resolution and agent config.** ~~Partially done~~:
+  `Evolve` now resolves the provider exactly like `Run` (agent's pinned
+  provider > store default, via `resolveProvider(ag, "")`) and honors the
+  agent's model override (`config.json` model) instead of hardcoding
+  `e.cfg.LLMModel` + the env-built `e.llm`. **Left open by design:** Evolve
+  deliberately does not pass the agent's temperature/max_tokens — extraction
+  quality is better at the provider's defaults, and a chat-tuned temperature
+  (e.g. a creative agent at 1.2) would make summaries noisier. Revisit only if
+  a concrete need appears.
 
-- **Chat bypasses the providers store's "default" marker.**
-  Empty provider name falls back to the env-built `e.llm` (`internal/agent/agent.go:277`), so
-  marking a provider as default in the UI has no effect until you pick one. Route empty-name
-  requests through `providers.Store.GetLLM("")`. After this lands, the `engine.llm` env-built
-  fallback becomes redundant — fold its removal into this item (keep `llm.NewOpenAI` only as
-  the seed for the providers store).
+- ~~**Chat bypasses the providers store's "default" marker.**~~ **DONE**:
+  `resolveProvider` no longer falls back to the env-built `e.llm` for empty
+  provider names — it routes everything through `providers.Store.GetLLM(name)`,
+  where `""` resolves to the store's default, so marking a provider default in
+  the UI takes effect immediately. Precedence is unchanged: per-request
+  override > agent's configured provider > store default. The redundant
+  `Engine.llm` env fallback was folded in and removed: `agent.New` no longer
+  takes a provider, `cmd/agenticgo/main.go` uses env values only to seed the
+  providers store (`llm.NewOpenAI` now lives solely in `Provider.LLM()`), and
+  the startup log prints the store's resolved default. An engine without a
+  provider lookup now fails loudly ("no provider lookup configured") instead of
+  silently using the env provider. Covered by
+  `TestResolveProviderRoutesEmptyNameToStoreDefault` in
+  `internal/agent/agent_test.go`.
 
-- **`AGENTICGO_KNOWLEDGE_FILE` / `cfg.KnowledgeFile` is dead config.**
-  No longer referenced (`internal/config/config.go:33`); self-evolution writes to SQLite.
-  Remove it or document it.
+- ~~**`AGENTICGO_KNOWLEDGE_FILE` / `cfg.KnowledgeFile` is dead config.**~~ **DONE**:
+  removed. It was a leftover from the pre-SQLite self-evolution design (learnings
+  appended to a flat `knowledge/KNOWLEDGE.md`); both knowledge kinds now live in
+  SQLite (`knowledge` + `knowledge_docs` tables), and nothing referenced the field.
+  The `Config.KnowledgeFile` field, its env load line, and the stale "knowledge
+  file" mention in the `DataDir` comment are gone.
 
 ## 2. HUMA REST API (new — `docs` endpoint)
 

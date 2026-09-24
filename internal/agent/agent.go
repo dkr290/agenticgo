@@ -54,22 +54,22 @@ type VisionLookup interface {
 // Engine runs agent-scoped chat loops.
 type Engine struct {
 	cfg        *config.Config
-	llm        llm.Provider
 	tools      *tools.Registry
 	store      *store.Store
 	agents     *agents.Registry
-	providers  ProviderLookup // optional: per-request provider override
+	providers  ProviderLookup // required for chat: resolves the default and named providers
 	mcp        *mcp.Manager   // optional: custom (MCP) tools, enabled per agent
 	basePrompt string
 }
 
 // New creates an Engine.
-func New(cfg *config.Config, p llm.Provider, reg *tools.Registry, st *store.Store, ar *agents.Registry) *Engine {
-	return &Engine{cfg: cfg, llm: p, tools: reg, store: st, agents: ar, basePrompt: cfg.SystemPrompt}
+func New(cfg *config.Config, reg *tools.Registry, st *store.Store, ar *agents.Registry) *Engine {
+	return &Engine{cfg: cfg, tools: reg, store: st, agents: ar, basePrompt: cfg.SystemPrompt}
 }
 
-// SetProviderLookup enables per-request provider overrides (used by the
-// Providers UI; empty provider name falls back to the default provider).
+// SetProviderLookup wires the provider store (used by the Providers UI).
+// An empty provider name resolves to the store's default provider, so marking
+// a provider as default in the UI takes effect immediately.
 func (e *Engine) SetProviderLookup(pl ProviderLookup) { e.providers = pl }
 
 // SetMCPManager wires the MCP manager so agents can use MCP tools they
@@ -480,22 +480,18 @@ func (t *mcpTool) Call(ctx context.Context, args json.RawMessage) (string, error
 }
 
 // resolveProvider picks the provider for a run: a per-request override wins,
-// then the agent's configured provider (if any), then the engine default.
-// If no named provider is requested and no provider lookup is configured,
-// the default engine provider is returned.
+// then the agent's configured provider (if any), then the provider store's
+// default. The store must be wired (SetProviderLookup) before chat runs.
 func (e *Engine) resolveProvider(ag *agents.Agent, perRequest string) (llm.Provider, error) {
+	if e.providers == nil {
+		return nil, fmt.Errorf("no provider lookup configured")
+	}
 	name := perRequest
 	if name == "" && ag.Config.Provider != nil {
 		name = *ag.Config.Provider
 	}
-	if name == "" || e.providers == nil {
-		return e.llm, nil
-	}
-	p, err := e.providers.GetLLM(name)
-	if err != nil {
-		return nil, err
-	}
-	return p, nil
+	// Empty name resolves to the store's default provider.
+	return e.providers.GetLLM(name)
 }
 
 // EffectiveVision reports whether the agent may attach images, given an
@@ -548,11 +544,21 @@ func (e *Engine) docReader(agentKey string) tools.DocReader {
 
 // Evolve summarizes the session and appends learnings to the agent's knowledge
 // store. This is the simplified self-evolution: a background pass extracts
-// durable facts/preferences from the transcript for future prompts.
+// durable facts/preferences from the transcript for future prompts. It uses the
+// same provider resolution as Run (agent config > provider store default).
 func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
 	history, err := e.store.Messages(ctx, agentKey, session, 60)
 	if err != nil || len(history) < 4 {
 		return err // not enough to learn from
+	}
+
+	ag, err := e.agents.Get(agentKey)
+	if err != nil {
+		return err
+	}
+	provider, err := e.resolveProvider(ag, "")
+	if err != nil {
+		return fmt.Errorf("resolve provider: %w", err)
 	}
 
 	var transcript strings.Builder
@@ -574,16 +580,19 @@ func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
 		"remembering, reply with exactly: NONE\n\n" + transcript.String()
 
 	req := llm.ChatRequest{
-		Model: e.cfg.LLMModel,
+		Model: provider.Model(),
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You extract concise, reusable learnings from conversations."},
 			{Role: llm.RoleUser, Content: prompt},
 		},
 		Stream: false,
 	}
+	if ag.Config.Model != nil && *ag.Config.Model != "" {
+		req.Model = *ag.Config.Model
+	}
 
 	// Use a non-streaming call via the streaming API by discarding deltas.
-	msg, err := e.llm.ChatCompletion(ctx, req, func(llm.Delta) error { return nil })
+	msg, err := provider.ChatCompletion(ctx, req, func(llm.Delta) error { return nil })
 	if err != nil {
 		return err
 	}
