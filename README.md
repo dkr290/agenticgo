@@ -117,7 +117,7 @@ go build -o agenticgo ./cmd/agenticgo
 open http://localhost:8080
 ```
 
-A `default` agent is seeded on first run. Create more from the **+ New** button.
+No agent is seeded on first run — configure a provider (Providers page), then create agents from the **+ New** button.
 
 Health check: `curl http://localhost:8080/healthz`
 

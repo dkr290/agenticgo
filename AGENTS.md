@@ -143,8 +143,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 
 ## Architecture map (how it fits together)
 
-- `cmd/agenticgo/main.go` — wiring: config → agents.Registry (seeds a `default`
-  agent) → store → llm.Provider → providers.Store (seeded from env) →
+- `cmd/agenticgo/main.go` — wiring: config → agents.Registry (no agent is
+  seeded; agents are created from the UI once a provider is configured) →
+  store → llm.Provider → providers.Store (seeded from env) →
   mcp.Manager + scaffold.Store → tools.Registry → agent.Engine → server.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
   `AgentsDir`. `Agent.SystemPrompt()` composes context files. `Registry.Create`
