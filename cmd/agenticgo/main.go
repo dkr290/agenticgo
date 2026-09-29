@@ -43,19 +43,12 @@ func main() {
 		log.Fatalf("workspace: %v", err)
 	}
 
-	// Agent registry (one directory per agent under AgentsDir).
+	// Agent registry (one directory per agent under AgentsDir). No agent is
+	// seeded: a provider must be configured first anyway, so agents are
+	// created manually from the UI.
 	agentReg, err := agents.NewRegistry(cfg.AgentsDir)
 	if err != nil {
 		log.Fatalf("agents: %v", err)
-	}
-	// Seed a default agent if none exist so the UI has something to chat with.
-	if list, err := agentReg.List(); err == nil && len(list) == 0 {
-		if _, err := agentReg.Create("default", "AgenticGo",
-			"A helpful general-purpose agent.", "", agents.AgentConfig{}); err != nil {
-			log.Printf("seed default agent: %v", err)
-		} else {
-			log.Printf("seeded default agent at %s/default", cfg.AgentsDir)
-		}
 	}
 
 	// Persistent store (conversations + knowledge), per-agent scoped.
