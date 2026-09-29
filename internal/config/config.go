@@ -19,7 +19,7 @@ type Config struct {
 	LLMAPIKey  string // often unused for local providers
 	LLMModel   string // e.g. qwen2.5, gpt-4o-mini, etc.
 
-	// DataDir is where SQLite, the workspace, and the knowledge file live.
+	// DataDir is where SQLite and the workspace live.
 	DataDir string
 
 	// AgentsDir is the root containing one directory per agent (context files,
@@ -29,10 +29,6 @@ type Config struct {
 	// WorkspaceDir is the fallback jail root for filesystem tools when an agent
 	// has no workspace. Per-agent workspaces live under AgentsDir/<key>/workspace.
 	WorkspaceDir string
-
-	// KnowledgeFile is appended to during self-evolution and injected into the system prompt.
-	// Defaults to DataDir/knowledge/KNOWLEDGE.md.
-	KnowledgeFile string
 
 	// ExecAllowList is the set of command names the exec tool may run.
 	ExecAllowList []string
@@ -92,7 +88,6 @@ func Load() (*Config, error) {
 
 	cfg.AgentsDir = getEnv("AGENTICGO_AGENTS_DIR", dataDir+"/agents")
 	cfg.WorkspaceDir = getEnv("AGENTICGO_WORKSPACE_DIR", dataDir+"/workspace")
-	cfg.KnowledgeFile = getEnv("AGENTICGO_KNOWLEDGE_FILE", dataDir+"/knowledge/KNOWLEDGE.md")
 
 	cfg.ExecAllowList = splitList(getEnv("AGENTICGO_EXEC_ALLOWLIST",
 		"ls,cat,grep,find,echo,pwd,head,tail,wc,mkdir,touch,cp,mv,date"))

@@ -16,7 +16,6 @@ import (
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
 	"github.com/dkr290/agenticgo/internal/crypto"
-	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/logger"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
@@ -72,10 +71,6 @@ func main() {
 		log.Fatalf("skills library: %v", err)
 	}
 
-	// LLM provider (OpenAI-compatible: Ollama / LM Studio / vLLM / OpenAI).
-	provider := llm.NewOpenAI(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
-	provider.SetLogger(lg)
-
 	// Encryption key for provider API keys at rest (AGENTICGO_SECRET_KEY from
 	// config, else a generated data/secret.key file).
 	encKey, err := crypto.LoadKey(cfg.SecretKey, filepath.Join(cfg.DataDir, "secret.key"))
@@ -83,8 +78,10 @@ func main() {
 		log.Fatalf("secret key: %v", err)
 	}
 
-	// Named provider store (editable from the Providers UI). Seeded from env.
-	// API keys are encrypted at rest.
+	// Named provider store (editable from the Providers UI), seeded from env on
+	// first run. This is the single source of LLM providers for chat: the
+	// store's "default" provider backs the engine unless a request or an
+	// agent's config names a specific provider. API keys are encrypted at rest.
 	providerStore, err := providers.Open(filepath.Join(cfg.DataDir, "providers.json"), encKey)
 	if err != nil {
 		log.Fatalf("providers: %v", err)
@@ -112,7 +109,7 @@ func main() {
 	mustRegister(reg, func() (tools.Tool, error) { return tools.NewListFiles(cfg.WorkspaceDir) })
 	reg.Register(tools.NewExec(cfg.WorkspaceDir, cfg.ExecAllowList))
 
-	engine := agent.New(cfg, provider, reg, st, agentReg)
+	engine := agent.New(cfg, reg, st, agentReg)
 	engine.SetProviderLookup(providerStore)
 	engine.SetMCPManager(mcpMgr)
 	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, scaff, mcpMgr)
@@ -121,7 +118,9 @@ func main() {
 	defer stop()
 
 	log.Printf("agenticgo starting")
-	log.Printf("  llm:       %s @ %s (model %s)", provider.Name(), cfg.LLMBaseURL, cfg.LLMModel)
+	if d := providerStore.Default(); d != nil {
+		log.Printf("  llm:       %s @ %s (model %s)", d.Name, d.BaseURL, d.Model)
+	}
 	log.Printf("  data:      %s", cfg.DataDir)
 	log.Printf("  agents:    %s", cfg.AgentsDir)
 	log.Printf("  tools:     %d registered", len(reg.Specs()))
