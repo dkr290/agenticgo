@@ -3,7 +3,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -13,11 +12,6 @@ import (
 type Config struct {
 	// HTTP listen address, e.g. ":8080".
 	Addr string
-
-	// OpenAI-compatible LLM settings.
-	LLMBaseURL string // e.g. http://localhost:11434/v1 (Ollama) or LM Studio / vLLM
-	LLMAPIKey  string // often unused for local providers
-	LLMModel   string // e.g. qwen2.5, gpt-4o-mini, etc.
 
 	// DataDir is where SQLite and the workspace live.
 	DataDir string
@@ -73,18 +67,13 @@ func Load() (*Config, error) {
 	dataDir := getEnv("AGENTICGO_DATA_DIR", "data")
 
 	cfg := &Config{
-		Addr:     getEnv("AGENTICGO_ADDR", ":8080"),
-		DataDir:  dataDir,
-		LLMModel: getEnv("AGENTICGO_LLM_MODEL", "qwen2.5"),
+		Addr:    getEnv("AGENTICGO_ADDR", ":8080"),
+		DataDir: dataDir,
 		SystemPrompt: getEnv("AGENTICGO_SYSTEM_PROMPT",
 			"You are agenticgo, a helpful AI agent. You can use tools to read and write files, "+
 				"list directories, and run allow-listed commands inside a jailed workspace. "+
 				"Think step by step and use tools when they help accomplish the user's task."),
 	}
-
-	// Default to Ollama's OpenAI-compatible endpoint.
-	cfg.LLMBaseURL = getEnv("AGENTICGO_LLM_BASE_URL", "http://localhost:11434/v1")
-	cfg.LLMAPIKey = getEnv("AGENTICGO_LLM_API_KEY", "ollama")
 
 	cfg.AgentsDir = getEnv("AGENTICGO_AGENTS_DIR", dataDir+"/agents")
 	cfg.WorkspaceDir = getEnv("AGENTICGO_WORKSPACE_DIR", dataDir+"/workspace")
@@ -102,13 +91,6 @@ func Load() (*Config, error) {
 
 	// No default: empty means "generate/persist a key under DataDir".
 	cfg.SecretKey = getEnv("AGENTICGO_SECRET_KEY", "")
-
-	if cfg.LLMBaseURL == "" {
-		return nil, fmt.Errorf("AGENTICGO_LLM_BASE_URL must not be empty")
-	}
-	if cfg.LLMModel == "" {
-		return nil, fmt.Errorf("AGENTICGO_LLM_MODEL must not be empty")
-	}
 
 	return cfg, nil
 }

@@ -68,8 +68,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   `AGENTICGO_TOOL_ALLOWLIST`; MCP tools are purely additive per agent.
 - **LLM providers**: OpenAI-compatible endpoints only (Ollama / LM Studio / vLLM /
   OpenAI), behind a `llm.Provider` interface. Named provider configs are managed
-  from the UI, persisted to `data/providers.json`, and seeded from env on first
-  run. A chat request may override the provider (`wsMessage.Provider`); each
+  from the UI, persisted to `data/providers.json` (nothing is seeded — a
+  provider is created manually from the UI before anything can chat). A chat
+  request may override the provider (`wsMessage.Provider`); each
   agent's `config.json` may pin a provider/model/temperature/max_tokens too
   (per-request override > agent config > default);
   `agent.ProviderLookup` (`providers.Store.GetLLM`) resolves names.
@@ -145,7 +146,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 
 - `cmd/agenticgo/main.go` — wiring: config → agents.Registry (no agent is
   seeded; agents are created from the UI once a provider is configured) →
-  store → llm.Provider → providers.Store (seeded from env) →
+  store → llm.Provider → providers.Store (not seeded; created from the UI) →
   mcp.Manager + scaffold.Store → tools.Registry → agent.Engine → server.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
   `AgentsDir`. `Agent.SystemPrompt()` composes context files. `Registry.Create`

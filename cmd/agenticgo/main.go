@@ -71,16 +71,16 @@ func main() {
 		log.Fatalf("secret key: %v", err)
 	}
 
-	// Named provider store (editable from the Providers UI), seeded from env on
-	// first run. This is the single source of LLM providers for chat: the
-	// store's "default" provider backs the engine unless a request or an
-	// agent's config names a specific provider. API keys are encrypted at rest.
+	// Named provider store (editable from the Providers UI). This is the single
+	// source of LLM providers for chat: the store's "default" provider backs the
+	// engine unless a request or an agent's config names a specific provider.
+	// Nothing is seeded — providers are created manually from the UI. API keys
+	// are encrypted at rest.
 	providerStore, err := providers.Open(filepath.Join(cfg.DataDir, "providers.json"), encKey)
 	if err != nil {
 		log.Fatalf("providers: %v", err)
 	}
 	providerStore.SetLogger(lg)
-	providerStore.SeedDefault(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 
 	// Scaffolding for not-yet-implemented features (cron).
 	scaff := scaffold.New()

@@ -110,14 +110,14 @@ Prereqs: Go 1.26+. A running OpenAI-compatible endpoint (e.g. Ollama).
 # Build
 go build -o agenticgo ./cmd/agenticgo
 
-# Run (defaults target Ollama at http://localhost:11434/v1, model qwen2.5)
+# Run
 ./agenticgo
 
 # Open the UI
 open http://localhost:8080
 ```
 
-No agent is seeded on first run — configure a provider (Providers page), then create agents from the **+ New** button.
+Nothing is seeded on first run — configure a provider (Providers page), then create agents from the **+ New** button.
 
 Health check: `curl http://localhost:8080/healthz`
 
@@ -126,9 +126,6 @@ Health check: `curl http://localhost:8080/healthz`
 | Variable | Default | Description |
 |---|---|---|
 | `AGENTICGO_ADDR` | `:8080` | HTTP listen address |
-| `AGENTICGO_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL |
-| `AGENTICGO_LLM_API_KEY` | `ollama` | API key (Bearer), if needed |
-| `AGENTICGO_LLM_MODEL` | `qwen2.5` | Model name |
 | `AGENTICGO_DATA_DIR` | `data` | Where SQLite + agents + workspace live |
 | `AGENTICGO_AGENTS_DIR` | `data/agents` | Root dir containing one folder per agent |
 | `AGENTICGO_WORKSPACE_DIR` | `data/workspace` | Fallback jail root for tools |
