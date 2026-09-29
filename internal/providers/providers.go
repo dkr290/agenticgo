@@ -113,27 +113,6 @@ func (s *Store) SetLogger(l logger.Logger) {
 	s.log = l
 }
 
-// SeedDefault adds a default provider from the env config if the store is empty.
-func (s *Store) SeedDefault(baseURL, apiKey, model string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.list) > 0 {
-		s.log.Debug("providers: store not empty, skipping env seed", "count", len(s.list))
-		return
-	}
-	s.log.Debug("providers: seeding default from env", "base_url", baseURL, "model", model)
-	s.list = append(s.list, &Provider{
-		Name:        "default",
-		DisplayName: "Default (env)",
-		Type:        "openai-compatible",
-		BaseURL:     baseURL,
-		APIKey:      apiKey,
-		Model:       model,
-		Default:     true,
-	})
-	_ = s.saveLocked()
-}
-
 // List returns all providers, sorted by name.
 func (s *Store) List() []Provider {
 	s.mu.RLock()
