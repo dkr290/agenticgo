@@ -10,6 +10,39 @@ import (
 	"github.com/dkr290/agenticgo/internal/skills"
 )
 
+// --- Chat (non-streaming REST) ---
+
+// chatInput is the request for POST /api/chat — one agent turn over plain
+// HTTP (the WebSocket /ws endpoint remains the streaming variant).
+type chatInput struct {
+	Body struct {
+		Agent   string `json:"agent,omitempty" example:"demo" doc:"Agent key (default: default)"`
+		Session string `json:"session,omitempty" example:"my-script" doc:"Conversation/session name (default: default)"`
+		// Message is the user's message for this turn.
+		Message  string   `json:"message" example:"Summarize the workspace" doc:"User message (required)"`
+		Provider string   `json:"provider,omitempty" example:"ollama-local" doc:"Optional provider override"`
+		Images   []string `json:"images,omitempty" doc:"Names of the agent's stored images to attach (vision models only)"`
+		Evolve   bool     `json:"evolve,omitempty" doc:"Run the self-evolution pass after the reply"`
+	}
+}
+
+// chatToolCall is one tool invocation from the turn (tool trace summary).
+type chatToolCall struct {
+	Name string `json:"name" example:"read_file"`
+	Args string `json:"args,omitempty" example:"{\"path\":\".\"}" doc:"Raw JSON arguments"`
+}
+
+// chatOutput is the synchronous chat reply.
+type chatOutput struct {
+	Body struct {
+		Reply     string         `json:"reply" doc:"Final assistant text"`
+		Agent     string         `json:"agent" example:"demo"`
+		Session   string         `json:"session" example:"my-script"`
+		ToolsUsed []chatToolCall `json:"tools_used" doc:"Tool calls made during the turn (in order)"`
+		Evolved   bool           `json:"evolved" doc:"Whether the optional Evolve pass ran successfully"`
+	}
+}
+
 // --- Generic responses ---
 
 // statusBody is the generic {"status": "..."} response.

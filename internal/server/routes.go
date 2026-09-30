@@ -17,6 +17,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
@@ -43,6 +44,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	})
 
 	s.registerAgentRoutes(api)
+	s.registerChatRoutes(api)
 	s.registerContextFileRoutes(api)
 	s.registerSkillRoutes(api)
 	s.registerImageRoutes(api)
@@ -149,6 +151,71 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &struct{ Body *agents.Agent }{Body: ag}, nil
+	})
+}
+
+// --- Chat (non-streaming REST) ---
+
+// registerChatRoutes adds POST /api/chat: one synchronous agent turn over
+// plain HTTP — the same Engine.Run the WebSocket /ws endpoint streams, but
+// with events collected and returned in one response. This is the endpoint
+// for curl/scripts/CI; /ws remains the streaming variant for the UI.
+func (s *Server) registerChatRoutes(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "chat",
+		Method:      http.MethodPost,
+		Path:        "/api/chat",
+		Summary:     "Chat with an agent (non-streaming)",
+		Description: "Runs one agent turn synchronously and returns the final reply plus a tool-trace summary. For streaming, use the /ws WebSocket. Images are names of the agent's stored reference images (only effective with a vision-capable provider).",
+		Tags:        []string{"Chat"},
+	}, func(ctx context.Context, input *chatInput) (*chatOutput, error) {
+		body := input.Body
+		if body.Agent == "" {
+			body.Agent = "default"
+		}
+		if body.Session == "" {
+			body.Session = "default"
+		}
+		if strings.TrimSpace(body.Message) == "" {
+			return nil, s.logErr(huma.Error400BadRequest("message is required"))
+		}
+
+		// Resolve referenced agent images into base64 data-URLs, same as /ws.
+		var images []string
+		for _, name := range body.Images {
+			if dataURL, err := s.imageDataURL(body.Agent, name); err == nil {
+				images = append(images, dataURL)
+			}
+		}
+
+		var toolsUsed []chatToolCall
+		emit := func(ev agent.Event) {
+			if ev.Kind == "tool_call" {
+				toolsUsed = append(toolsUsed, chatToolCall{Name: ev.ToolName, Args: ev.ToolArgs})
+			}
+		}
+		reply, err := s.engine.Run(ctx, body.Agent, body.Session, body.Message, body.Provider, images, emit)
+		if err != nil {
+			return nil, s.logErr(huma.Error502BadGateway(err.Error()))
+		}
+
+		out := &chatOutput{}
+		out.Body.Reply = reply
+		out.Body.Agent = body.Agent
+		out.Body.Session = body.Session
+		if toolsUsed == nil {
+			toolsUsed = []chatToolCall{}
+		}
+		out.Body.ToolsUsed = toolsUsed
+
+		if body.Evolve {
+			if err := s.engine.Evolve(ctx, body.Agent, body.Session); err != nil {
+				s.log.Error("post-chat evolve failed", "agent", body.Agent, "session", body.Session, "error", err)
+			} else {
+				out.Body.Evolved = true
+			}
+		}
+		return out, nil
 	})
 }
 

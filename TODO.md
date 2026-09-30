@@ -148,11 +148,28 @@ this lists what's still needed to make the project fully functional).
 
 ## 2. HUMA REST API (new — `docs` endpoint)
 
-- **Add `POST /api/chat` (non-streaming REST chat) first.**
-  Today chat is WebSocket-only (`/ws`), so the HUMA layer has no chat endpoint to
-  document. Add a thin REST endpoint that wraps `Engine.Run` (+ optional `Evolve`) and
-  returns the final reply; keep `/ws` for streaming. This is what makes the API usable for
-  curl/scripts/CI. **Still open** (was a prerequisite; everything else in this section is done).
+- ~~**Add `POST /api/chat` (non-streaming REST chat) first.**~~ **DONE**:
+  `POST /api/chat` runs one synchronous agent turn via the same `Engine.Run` the
+  `/ws` endpoint streams — `{agent, session, message, provider?, images?,
+  evolve?}` → `{reply, agent, session, tools_used[], evolved}`. The tool loop,
+  memory, session persistence and provider precedence are identical to chat;
+  events are collected instead of streamed (`tools_used` = the ordered
+  tool-call trace). `evolve: true` runs the Evolve pass after the reply
+  (failures are logged, not fatal — the reply still returns). Missing
+  `message` is a huma 422; engine failures surface as 502. Verified end-to-end
+  against a mock OpenAI-compatible provider (incl. SSE streaming, history
+  persistence, and that /ws still streams after REST turns). `/ws` remains the
+  streaming variant for the UI.
+
+- **Later: OpenAI-compatible `POST /v1/chat/completions` (and `/v1/models`).**
+  GoClaw/OpenClaw's gateway and LocalAI both expose the OpenAI wire format so any
+  OpenAI-speaking client (SDKs, LangChain, Cursor, promptfoo) works by just changing
+  `base_url`. agenticgo already *consumes* this protocol; exposing it upstream makes it a
+  drop-in agent layer. Deliberately deferred — it needs real design decisions: map
+  `model` → agent key (e.g. `"agenticgo:demo"`), map `messages[]` → agenticgo session
+  history (stateless pass-through vs. server-side sessions), decide SSE `stream: true`
+  support, and how tool calls are represented. Do `/api/chat` first (simple, Huma-
+  documented, covers scripts/CI); treat this as its own phase.
 
 - ~~**Add HUMA (github.com/danielgtaylor/huma/v2) and build a `/docs` API layer**~~ **DONE**:
   the whole REST API is Huma (v2.34.1, `humago` adapter on a stdlib `http.ServeMux` —

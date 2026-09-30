@@ -273,6 +273,9 @@ go build -o agenticgo ./cmd/agenticgo       # binary
 AGENTICGO_ADDR=:18099 ./agenticgo           # run
 curl localhost:18099/healthz                # health
 curl localhost:18099/api/agents             # list agents
+curl -X POST localhost:18099/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"demo","message":"hello"}'   # non-streaming chat (REST)
 ```
 
 ## Key files
