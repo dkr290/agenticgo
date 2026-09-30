@@ -149,24 +149,45 @@ this lists what's still needed to make the project fully functional).
 ## 2. HUMA REST API (new — `docs` endpoint)
 
 - **Add `POST /api/chat` (non-streaming REST chat) first.**
-  Today chat is WebSocket-only (`/ws`), so the HUMA layer would have no chat endpoint to
+  Today chat is WebSocket-only (`/ws`), so the HUMA layer has no chat endpoint to
   document. Add a thin REST endpoint that wraps `Engine.Run` (+ optional `Evolve`) and
   returns the final reply; keep `/ws` for streaming. This is what makes the API usable for
-  curl/scripts/CI.
+  curl/scripts/CI. **Still open** (was a prerequisite; everything else in this section is done).
 
-- **Add HUMA (github.com/danielgtaylor/huma/v2) and build a `/docs` API layer** covering the
-  existing endpoints so there's a machine-readable API alongside the GUI — do NOT reimplement
-  the GUI or remove the WebSocket chat.
-  - Scaffold huma routers (API + docs) and register current routes: agents CRUD + config,
-    context files, skills (+ upload), providers (+ test), sessions/messages, memory
-    (knowledge/observations), knowledge-base docs, tools list, MCP + cron scaffolds, evolve,
-    and the new `/api/chat`.
-  - Decide the mount/versioning scheme (e.g. `/openapi.json`, `/api/v1/...`) — keep it
-    harmonized with the existing chi router and the WS endpoint.
-  - While redesigning routes, normalize the odd docs search path
-    `/agents/{k}/docs/search/query` → `/agents/{k}/docs/search?q=...`.
-  - Add examples/manual for the chat req/resp shapes if feasible.
-  - This is the single "easy API" the project needs for non-UI clients. Priority after §1.
+- ~~**Add HUMA (github.com/danielgtaylor/huma/v2) and build a `/docs` API layer**~~ **DONE**:
+  the whole REST API is Huma (v2.34.1, `humago` adapter on a stdlib `http.ServeMux` —
+  same pattern as the `daai-aiops-model-image-deployer` reference). Every endpoint is a
+  typed `huma.Register` operation in `internal/server/routes.go` with shared
+  request/response types (carrying `doc`/`example` tags) in `internal/server/types.go`,
+  so the **OpenAPI 3.1 spec** (`/openapi.json`, `/openapi.yaml`) and the generated
+  **docs UI** (`/docs`) are always in sync with the served API. chi is gone entirely.
+  Details:
+  - All routes converted: agents CRUD + config, context files, skills (+ ZIP upload),
+    images, knowledge/observations, knowledge-base docs (JSON + multipart), sessions,
+    tools/core-tools, extra commands, builtin-tools narrowing, providers (+ ad-hoc and
+    named test), MCP servers (+ connect/disconnect) + MCP tools, cron scaffold, evolve.
+    Only `/ws` (WebSocket chat) and the embedded SPA stay on the plain mux.
+  - Errors are `huma.Error4xx/5xx` (RFC 9457 problem+json). The MCP connect failure keeps
+    the legacy `{"error","server"}` 502 body via a custom `connectError`
+    (`huma.StatusError` + `ContentTypeFilter`) because the UI's error toasts read `.error`.
+  - Multipart uploads (skill ZIP, images) use `RawBody multipart.Form`; the dual
+    JSON/multipart doc upload uses `RawBody []byte` + a `Content-Type` header input.
+  - **Huma validation gotcha (fixed):** body fields without `omitempty` are *required*, so
+    optional fields in `providers.Provider` (api_key/type/...), `mcp.ServerConfig`
+    (id/created_at), `scaffold.CronJob` (id/created_at/...) and `agents.Agent.Description`
+    gained `omitempty` — otherwise every UI POST 422s. Pointer `Body *T` = optional body
+    (used by the provider test endpoints).
+  - Mount/versioning decision: kept the existing paths unchanged (no `/api/v1` prefix) so
+    the SPA and any existing clients keep working; huma serves its own `/openapi.*`,
+    `/docs`, `/schemas` at the root.
+  - **Not normalized (deviation):** the odd docs search path `/agents/{k}/docs/search/query`
+    was kept as-is — the SPA calls it and no external clients exist yet; renaming would be
+    churn without payoff. Revisit if a v1 versioned API is ever introduced.
+  - Everything the GUI does goes through these endpoints (chat = `/ws` only), so the GUI
+    surface is now fully machine-readable/self-documented.
+  - Covered by `internal/server/builtin_tools_test.go` and `internal/server/knowledge_test.go`
+    (converted to route through humago instead of chi), plus a full manual smoke test of
+    every route group incl. uploads and the WS chat.
 
 ## 3. Scaffolded features (UI + API shape only — nothing executes)
 
@@ -237,7 +258,7 @@ this lists what's still needed to make the project fully functional).
   - Per-agent LLM config + enabled skills: `data/agents/<key>/config.json`
   - Global skills library (upload once, enable per agent): `data/skills/<skill>/SKILL.md`
   - Legacy per-agent skills (auto-migrated into the library): `data/agents/<key>/skills/`
-  - Per-agent workspace jail: `data/agents/<key>/workspace/` (currently unused — see §1)
+  - Per-agent workspace jail: `data/agents/<key>/workspace/` (tools are jailed here per run)
   - Provider configs: `data/providers.json`
   - Messages / knowledge / observations / knowledge-base docs: `data/agenticgo.db` (SQLite)
   - Global fallback workspace: `data/workspace/`
