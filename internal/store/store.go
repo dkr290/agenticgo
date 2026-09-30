@@ -190,9 +190,13 @@ func (s *Store) Messages(ctx context.Context, agent, session string, limit int) 
 	var rev []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.Role, &m.Content, &m.ToolCalls, &m.ToolCallID, &m.Name); err != nil {
+		// tool_calls/tool_call_id/name were added by a later migration, so
+		// older rows have NULL there — scan them as NULL-able strings.
+		var toolCalls, toolCallID, name sql.NullString
+		if err := rows.Scan(&m.Role, &m.Content, &toolCalls, &toolCallID, &name); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
+		m.ToolCalls, m.ToolCallID, m.Name = toolCalls.String, toolCallID.String, name.String
 		rev = append(rev, m)
 	}
 	// Reverse to chronological order.
