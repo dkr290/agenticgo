@@ -72,7 +72,7 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 	}, func(ctx context.Context, _ *struct{}) (*struct{ Body []agents.Agent }, error) {
 		list, err := s.agents.List()
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		if list == nil {
 			list = []agents.Agent{}
@@ -95,7 +95,7 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 		}
 		ag, err := s.agents.Create(input.Body.Key, input.Body.Name, input.Body.Description, input.Body.Soul, cfg)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &struct{ Body *agents.Agent }{Body: ag}, nil
 	})
@@ -112,7 +112,7 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 	}) (*struct{ Body *agents.Agent }, error) {
 		ag, err := s.agents.Get(input.Key)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &struct{ Body *agents.Agent }{Body: ag}, nil
 	})
@@ -128,7 +128,7 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 		Key string `path:"key" doc:"Agent key"`
 	}) (*statusOutput, error) {
 		if err := s.agents.Delete(input.Key); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil
 	})
@@ -146,7 +146,7 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 	}) (*struct{ Body *agents.Agent }, error) {
 		ag, err := s.agents.UpdateConfig(input.Key, input.Body)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &struct{ Body *agents.Agent }{Body: ag}, nil
 	})
@@ -170,7 +170,7 @@ func (s *Server) registerContextFileRoutes(api huma.API) {
 	}) (*fileContentOutput, error) {
 		content, err := s.agents.ReadFile(input.Key, input.Name)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		out := &fileContentOutput{}
 		out.Body.Name = input.Name
@@ -187,7 +187,7 @@ func (s *Server) registerContextFileRoutes(api huma.API) {
 		Tags:        tag,
 	}, func(ctx context.Context, input *writeFileInput) (*statusOutput, error) {
 		if err := s.agents.WriteFile(input.Key, input.Name, input.Body.Content); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "saved"}}, nil
 	})
@@ -210,11 +210,11 @@ func (s *Server) registerSkillRoutes(api huma.API) {
 	}) (*struct{ Body []skillWithState }, error) {
 		ag, err := s.agents.Get(input.Key)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		lib, err := s.loadLibrary()
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		enabled := map[string]bool{}
 		for _, k := range ag.Config.EnabledSkills {
@@ -269,7 +269,7 @@ func (s *Server) registerSkillRoutes(api huma.API) {
 	}, func(ctx context.Context, _ *struct{}) (*struct{ Body []skills.Skill }, error) {
 		lib, err := s.loadLibrary()
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		if lib == nil {
 			lib = []skills.Skill{}
@@ -291,15 +291,15 @@ func (s *Server) registerSkillRoutes(api huma.API) {
 	}) (*struct{ Body *skills.Skill }, error) {
 		data, err := firstMultipartFile(&input.RawBody, "file", 25<<20)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		lib, err := s.agents.SkillsLibraryDir()
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		sk, err := skills.InstallZip(lib, data)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &struct{ Body *skills.Skill }{Body: sk}, nil
 	})
@@ -320,10 +320,10 @@ func (s *Server) registerSkillRoutes(api huma.API) {
 	}, error) {
 		lib, err := s.agents.SkillsLibraryDir()
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		if err := skills.Delete(lib, input.Key); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		out := &struct {
 			Body struct {
@@ -352,7 +352,7 @@ func (s *Server) registerImageRoutes(api huma.API) {
 	}) (*struct{ Body []agents.Image }, error) {
 		imgs, err := s.agents.ListImages(input.Key)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &struct{ Body []agents.Image }{Body: imgs}, nil
 	})
@@ -372,11 +372,11 @@ func (s *Server) registerImageRoutes(api huma.API) {
 	}) (*struct{ Body *agents.Image }, error) {
 		data, filename, err := firstMultipartFileNamed(&input.RawBody, "file", 9<<20)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		img, err := s.agents.SaveImage(input.Key, filename, data)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &struct{ Body *agents.Image }{Body: img}, nil
 	})
@@ -397,7 +397,7 @@ func (s *Server) registerImageRoutes(api huma.API) {
 		}
 	}, error) {
 		if err := s.agents.DeleteImage(input.Key, input.Name); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		out := &struct {
 			Body struct {
@@ -421,7 +421,7 @@ func (s *Server) registerImageRoutes(api huma.API) {
 	}) (*visionOutput, error) {
 		ag, err := s.agents.Get(input.Key)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		out := &visionOutput{}
 		out.Body.Vision = s.engine.EffectiveVision(ag, input.Provider)
@@ -449,7 +449,7 @@ func (s *Server) registerEvolveRoutes(api huma.API) {
 			session = "default"
 		}
 		if err := s.engine.Evolve(ctx, agentKey, session); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "evolved"}}, nil
 	})
@@ -472,7 +472,7 @@ func (s *Server) registerKnowledgeRoutes(api huma.API) {
 	}) (*struct{ Body []store.KnowledgeEntry }, error) {
 		k, err := s.store.Knowledge(ctx, input.Key, 200)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		if k == nil {
 			k = []store.KnowledgeEntry{}
@@ -493,7 +493,7 @@ func (s *Server) registerKnowledgeRoutes(api huma.API) {
 	}) (*struct{ Body []string }, error) {
 		hits, err := s.store.SearchKnowledge(ctx, input.Key, input.Q, 20)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		if hits == nil {
 			hits = []string{}
@@ -513,13 +513,13 @@ func (s *Server) registerKnowledgeRoutes(api huma.API) {
 		ID  int64  `path:"id" doc:"Knowledge entry ID"`
 	}) (*statusOutput, error) {
 		if input.ID <= 0 {
-			return nil, huma.Error400BadRequest("invalid knowledge id")
+			return nil, s.logErr(huma.Error400BadRequest("invalid knowledge id"))
 		}
 		if err := s.store.DeleteKnowledge(ctx, input.ID, input.Key); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return nil, huma.Error404NotFound("knowledge entry not found")
+				return nil, s.logErr(huma.Error404NotFound("knowledge entry not found"))
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil
 	})
@@ -542,7 +542,7 @@ func (s *Server) registerObservationRoutes(api huma.API) {
 	}) (*struct{ Body []store.Observation }, error) {
 		obs, err := s.store.ListObservations(ctx, input.Key, 100)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		return &struct{ Body []store.Observation }{Body: obs}, nil
 	})
@@ -562,7 +562,7 @@ func (s *Server) registerObservationRoutes(api huma.API) {
 		}
 	}) (*statusOutput, error) {
 		if err := s.store.AddObservation(ctx, input.Key, input.Body.Content); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "recorded"}}, nil
 	})
@@ -585,7 +585,7 @@ func (s *Server) registerDocRoutes(api huma.API) {
 	}) (*struct{ Body []store.KnowledgeDoc }, error) {
 		docs, err := s.store.ListKnowledgeDocs(ctx, input.Key)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		return &struct{ Body []store.KnowledgeDoc }{Body: docs}, nil
 	})
@@ -603,7 +603,7 @@ func (s *Server) registerDocRoutes(api huma.API) {
 	}) (*struct{ Body *store.KnowledgeDoc }, error) {
 		doc, err := s.store.GetKnowledgeDoc(ctx, input.ID)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &struct{ Body *store.KnowledgeDoc }{Body: doc}, nil
 	})
@@ -620,7 +620,7 @@ func (s *Server) registerDocRoutes(api huma.API) {
 		ID  int64  `path:"id" doc:"Document ID"`
 	}) (*statusOutput, error) {
 		if err := s.store.DeleteKnowledgeDoc(ctx, input.ID); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil
 	})
@@ -638,7 +638,7 @@ func (s *Server) registerDocRoutes(api huma.API) {
 	}) (*struct{ Body []store.KnowledgeDoc }, error) {
 		docs, err := s.store.SearchDocs(ctx, input.Key, input.Q, 20)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		if docs == nil {
 			docs = []store.KnowledgeDoc{}
@@ -669,7 +669,7 @@ func (s *Server) registerDocRoutes(api huma.API) {
 		if strings.HasPrefix(input.ContentType, "multipart/form-data") {
 			t, data, err := parseMultipartFileBody(input.ContentType, input.RawBody, "file", 20<<20)
 			if err != nil {
-				return nil, huma.Error400BadRequest(err.Error())
+				return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 			}
 			title = t
 			content = string(data)
@@ -679,17 +679,17 @@ func (s *Server) registerDocRoutes(api huma.API) {
 				Content string `json:"content"`
 			}
 			if err := json.Unmarshal(input.RawBody, &body); err != nil {
-				return nil, huma.Error400BadRequest(err.Error())
+				return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 			}
 			if strings.TrimSpace(body.Title) == "" || strings.TrimSpace(body.Content) == "" {
-				return nil, huma.Error400BadRequest("title and content are required")
+				return nil, s.logErr(huma.Error400BadRequest("title and content are required"))
 			}
 			title = body.Title
 			content = body.Content
 		}
 		id, err := s.store.AddKnowledgeDoc(ctx, input.Key, title, content)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		out := &struct {
 			Body struct {
@@ -720,7 +720,7 @@ func (s *Server) registerSessionRoutes(api huma.API) {
 	}) (*struct{ Body []store.Session }, error) {
 		sessions, err := s.store.ListSessions(ctx, input.Agent)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		return &struct{ Body []store.Session }{Body: sessions}, nil
 	})
@@ -738,7 +738,7 @@ func (s *Server) registerSessionRoutes(api huma.API) {
 	}) (*struct{ Body []store.Message }, error) {
 		msgs, err := s.store.Messages(ctx, input.Agent, input.Session, 200)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, s.logErr(huma.Error500InternalServerError(err.Error()))
 		}
 		if msgs == nil {
 			msgs = []store.Message{}
@@ -758,7 +758,7 @@ func (s *Server) registerSessionRoutes(api huma.API) {
 		Session string `path:"session" doc:"Session name"`
 	}) (*deleteSessionOutput, error) {
 		if err := s.store.DeleteSession(ctx, input.Agent, input.Session); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		out := &deleteSessionOutput{}
 		out.Body.Deleted = input.Session
@@ -826,7 +826,7 @@ func (s *Server) registerToolRoutes(api huma.API) {
 	}) (*struct{ Body []extraCommandWithState }, error) {
 		ag, err := s.agents.Get(input.Key)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		enabled := map[string]bool{}
 		for _, c := range ag.Config.EnabledCommands {
@@ -931,7 +931,7 @@ func (s *Server) registerToolRoutes(api huma.API) {
 		Key string `path:"key" doc:"Agent key"`
 	}) (*resetBuiltinToolsOutput, error) {
 		if _, err := s.agents.SetEnabledBuiltinTools(input.Key, nil); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		out := &resetBuiltinToolsOutput{}
 		out.Body.Agent = input.Key
@@ -968,7 +968,7 @@ func (s *Server) registerProviderRoutes(api huma.API) {
 	}) (*struct{ Body *providers.Provider }, error) {
 		p, err := s.providers.Get(input.Name)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &struct{ Body *providers.Provider }{Body: p}, nil
 	})
@@ -984,7 +984,7 @@ func (s *Server) registerProviderRoutes(api huma.API) {
 		Body providers.Provider
 	}) (*struct{ Body providers.Provider }, error) {
 		if err := s.providers.Upsert(input.Body); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &struct{ Body providers.Provider }{Body: input.Body}, nil
 	})
@@ -1000,7 +1000,7 @@ func (s *Server) registerProviderRoutes(api huma.API) {
 		Name string `path:"name" doc:"Provider name"`
 	}) (*statusOutput, error) {
 		if err := s.providers.Delete(input.Name); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil
 	})
@@ -1033,7 +1033,7 @@ func (s *Server) registerProviderRoutes(api huma.API) {
 func (s *Server) runProviderTest(ctx context.Context, name string, adhoc *providers.Provider) (*testProviderOutput, error) {
 	models, err := s.providers.TestConnection(ctx, name, adhoc)
 	if err != nil {
-		return nil, huma.Error502BadGateway(err.Error())
+		return nil, s.logErr(huma.Error502BadGateway(err.Error()))
 	}
 	if models == nil {
 		models = []string{}
@@ -1074,7 +1074,7 @@ func (s *Server) registerMCPRoutes(api huma.API) {
 	}) (*struct{ Body *mcp.ServerConfig }, error) {
 		created, err := s.mcp.Add(input.Body)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &struct{ Body *mcp.ServerConfig }{Body: created}, nil
 	})
@@ -1092,7 +1092,7 @@ func (s *Server) registerMCPRoutes(api huma.API) {
 	}) (*struct{ Body *mcp.ServerConfig }, error) {
 		updated, err := s.mcp.Update(input.ID, input.Body)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &struct{ Body *mcp.ServerConfig }{Body: updated}, nil
 	})
@@ -1108,7 +1108,7 @@ func (s *Server) registerMCPRoutes(api huma.API) {
 		ID string `path:"id" doc:"Server ID"`
 	}) (*statusOutput, error) {
 		if err := s.mcp.Delete(input.ID); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil
 	})
@@ -1128,10 +1128,10 @@ func (s *Server) registerMCPRoutes(api huma.API) {
 		defer cancel()
 		st, err := s.mcp.Connect(cctx, input.ID)
 		if err != nil {
-			return nil, &connectError{
+			return nil, s.logErr(&connectError{
 				connectErrorBody: connectErrorBody{Error: err.Error(), Server: st},
 				status:           http.StatusBadGateway,
-			}
+			})
 		}
 		return &connectOutput{Body: st}, nil
 	})
@@ -1147,7 +1147,7 @@ func (s *Server) registerMCPRoutes(api huma.API) {
 		ID string `path:"id" doc:"Server ID"`
 	}) (*statusOutput, error) {
 		if err := s.mcp.Disconnect(input.ID); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "disconnected"}}, nil
 	})
@@ -1179,7 +1179,7 @@ func (s *Server) registerMCPRoutes(api huma.API) {
 	}) (*struct{ Body []customToolWithState }, error) {
 		ag, err := s.agents.Get(input.Key)
 		if err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		enabled := map[string]bool{}
 		for _, n := range ag.Config.EnabledTools {
@@ -1256,7 +1256,7 @@ func (s *Server) registerCronRoutes(api huma.API) {
 	}) (*struct{ Body *scaffold.CronJob }, error) {
 		created, err := s.scaffold.AddCronJob(input.Body)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
 		return &struct{ Body *scaffold.CronJob }{Body: created}, nil
 	})
@@ -1272,7 +1272,7 @@ func (s *Server) registerCronRoutes(api huma.API) {
 		ID string `path:"id" doc:"Cron job ID"`
 	}) (*statusOutput, error) {
 		if err := s.scaffold.DeleteCronJob(input.ID); err != nil {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil
 	})

@@ -82,9 +82,14 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - **Logging**: `internal/logger` defines a small `Logger` interface (Info/Error/
   Debug/Warn with slog-style key/value pairs) backed by stdlib `log/slog`
   (human-readable text to stderr). Set `AGENTICGO_DEBUG=true` to enable debug
-  level. Wired into the providers/LLM path for now (`providers.Store.SetLogger`,
-  `llm.OpenAIProvider.SetLogger`); other packages keep `logger.Nop()` until
-  adopted. Secrets are redacted (`****` + last 4) before logging.
+  level. Wired into the providers/LLM path (`providers.Store.SetLogger`,
+  `llm.OpenAIProvider.SetLogger`), MCP (`mcp.Manager.SetLogger`) and the HTTP
+  server (`server.Server.SetLogger`): API handler errors are always logged at
+  error level when they are 5xx (Huma never logs handler errors itself — it
+  only writes them into the response body), 4xx rejections are debug-level, and
+  a per-request access line (method/path/status/duration) is debug-level only.
+  Other packages keep `logger.Nop()` until adopted.
+  Secrets are redacted (`****` + last 4) before logging.
 - **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`. The `exec`
   tool's safe commands come from `AGENTICGO_EXEC_ALLOWLIST`; additional dangerous
   commands (`AGENTICGO_EXTRA_EXEC_COMMANDS`) are enabled per agent. The global

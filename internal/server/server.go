@@ -32,6 +32,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
+	"github.com/dkr290/agenticgo/internal/logger"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
 	"github.com/dkr290/agenticgo/internal/scaffold"
@@ -54,11 +55,12 @@ type Server struct {
 	scaffold  *scaffold.Store
 	mcp       *mcp.Manager
 	http      *http.Server
+	log       logger.Logger
 }
 
 // New builds the server.
 func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.Registry, st *store.Store, ps *providers.Store, sc *scaffold.Store, mm *mcp.Manager) *Server {
-	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, scaffold: sc, mcp: mm}
+	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, scaffold: sc, mcp: mm, log: logger.Nop()}
 
 	mux := http.NewServeMux()
 
@@ -85,6 +87,19 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s
+}
+
+// SetLogger wires structured logging into the server. 5xx handler errors are
+// always logged (huma itself never logs handler errors — it only writes them
+// into the response body, which makes failures invisible on the server side);
+// request logging and 4xx errors are logged at debug level only
+// (AGENTICGO_DEBUG=true).
+func (s *Server) SetLogger(l logger.Logger) {
+	if l == nil {
+		return
+	}
+	s.log = l
+	s.http.Handler = s.logRequests(s.http.Handler)
 }
 
 // Start listens and serves until the context is cancelled.
@@ -452,6 +467,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		_, runErr := s.engine.Run(ctx, msg.Agent, msg.Session, msg.Message, msg.Provider, images, emit)
 		cancel()
 		if runErr != nil {
+			s.log.Error("ws chat run failed", "agent", msg.Agent, "session", msg.Session, "error", runErr)
 			s.sendEvent(r.Context(), conn, wsEvent{Kind: "error", Error: runErr.Error()})
 		}
 	}
@@ -468,6 +484,50 @@ func (s *Server) sendEvent(ctx context.Context, conn *websocket.Conn, ev wsEvent
 }
 
 // --- helpers ---
+
+// logErr logs an API handler error: 5xx at error level (always — these are
+// server-side failures), 4xx at debug level (client mistakes; noisy). It
+// returns err unchanged so handlers can `return nil, s.logErr(err)`.
+func (s *Server) logErr(err error) error {
+	var se huma.StatusError
+	if errors.As(err, &se) {
+		if se.GetStatus() >= 500 {
+			s.log.Error("api handler error", "status", se.GetStatus(), "error", se.Error())
+		} else {
+			s.log.Debug("api request rejected", "status", se.GetStatus(), "error", se.Error())
+		}
+	} else {
+		s.log.Error("api handler error", "error", err)
+	}
+	return err
+}
+
+// statusRecorder captures the response status code for request logging.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests logs one line per request at debug level (method, path, status,
+// duration). Silent unless AGENTICGO_DEBUG=true.
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		s.log.Debug("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
