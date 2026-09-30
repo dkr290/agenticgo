@@ -97,6 +97,9 @@ description: Search and synthesize web sources
 - [x] Phase 2b — **multi-agent + context files + skills**
 - [x] Phase 2c — **sidebar SPA** (Chat/Agents/Skills/Tools/Providers) + provider CRUD +
       MCP/cron API scaffolding
+- [x] Phase 2d — **Huma API** (`danielgtaylor/huma/v2`): every REST route is a typed
+      Huma operation, so the OpenAPI 3.1 spec (`/openapi.json`, `/openapi.yaml`) and
+      the generated docs UI (`/docs`) are always in sync with the served API
 - [ ] Phase 3 — **MCP client** (`modelcontextprotocol/go-sdk`) to attach external tools
       at runtime, gated by the same allow-list; cron scheduler executing stored jobs
 - [x] Phase 4 — SQLite memory + simplified self-evolution
@@ -115,6 +118,9 @@ go build -o agenticgo ./cmd/agenticgo
 
 # Open the UI
 open http://localhost:8080
+
+# API docs (generated from the Huma-registered routes)
+open http://localhost:8080/docs
 ```
 
 Nothing is seeded on first run — configure a provider (Providers page), then create agents from the **+ New** button.

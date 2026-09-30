@@ -32,17 +32,17 @@ func redact(s string) string {
 
 // Provider is a named OpenAI-compatible endpoint configuration.
 type Provider struct {
-	Name        string `json:"name"`         // unique key, e.g. "ollama-local"
-	DisplayName string `json:"display_name"` // shown in the UI
-	Type        string `json:"type"`         // always "openai-compatible" for now
-	BaseURL     string `json:"base_url"`     // e.g. http://localhost:11434/v1
-	APIKey      string `json:"api_key"`      // often unused for local servers
-	Model       string `json:"model"`        // default model for this provider
-	Default     bool   `json:"default"`      // exactly one should be default
+	Name        string `json:"name"`                   // unique key, e.g. "ollama-local"
+	DisplayName string `json:"display_name,omitempty"` // shown in the UI
+	Type        string `json:"type,omitempty"`         // always "openai-compatible" for now
+	BaseURL     string `json:"base_url"`               // e.g. http://localhost:11434/v1
+	APIKey      string `json:"api_key,omitempty"`      // often unused for local servers
+	Model       string `json:"model"`                  // default model for this provider
+	Default     bool   `json:"default,omitempty"`      // exactly one should be default
 	// Vision marks this provider's model as able to understand images
 	// (screenshots, pictures). There is no reliable API to detect this, so it
 	// is set manually. An agent's config may override it (agents.AgentConfig.Vision).
-	Vision bool `json:"vision"`
+	Vision bool `json:"vision,omitempty"`
 }
 
 // LLM builds an llm.Provider for this configuration.

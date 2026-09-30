@@ -31,13 +31,13 @@ const DiscoveredPrefix = "mcp_"
 
 // ServerConfig is a persisted MCP server definition (data/mcp_servers.json).
 type ServerConfig struct {
-	ID        string    `json:"id"`
+	ID        string    `json:"id,omitempty"`
 	Name      string    `json:"name"` // unique key; becomes part of tool names
 	Transport string    `json:"transport"`
 	Command   string    `json:"command,omitempty"`
 	Args      []string  `json:"args,omitempty"`
 	URL       string    `json:"url,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 // ToolInfo is one discovered tool on a connected server.

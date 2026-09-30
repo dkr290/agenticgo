@@ -1,9 +1,12 @@
 // Package server exposes the HTTP API, WebSocket chat endpoint, and the
-// embedded chat UI. It serves agent CRUD, context-file, and skills APIs, and
-// streams agent-scoped chat over WebSocket.
+// embedded chat UI. All REST routes are registered as Huma operations (see
+// routes.go), so the OpenAPI spec (/openapi.json) and the generated docs UI
+// (/docs) are always in sync with the served API. The WebSocket chat endpoint
+// and the embedded SPA stay on the plain mux next to the Huma API.
 package server
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/base64"
@@ -12,19 +15,19 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-
-	"database/sql"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/go-chi/chi/v5"
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
@@ -57,97 +60,28 @@ type Server struct {
 func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.Registry, st *store.Store, ps *providers.Store, sc *scaffold.Store, mm *mcp.Manager) *Server {
 	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, scaffold: sc, mcp: mm}
 
-	r := chi.NewRouter()
-	r.Get("/healthz", s.handleHealth)
-	r.Get("/ws", s.handleWS)
+	mux := http.NewServeMux()
 
-	// API.
-	r.Route("/api", func(r chi.Router) {
-		r.Get("/agents", s.handleListAgents)
-		r.Post("/agents", s.handleCreateAgent)
-		r.Get("/agents/{key}", s.handleGetAgent)
-		r.Delete("/agents/{key}", s.handleDeleteAgent)
-		r.Put("/agents/{key}/config", s.handleUpdateAgentConfig)
-		r.Get("/agents/{key}/files/{name}", s.handleReadFile)
-		r.Put("/agents/{key}/files/{name}", s.handleWriteFile)
-		r.Get("/agents/{key}/skills", s.handleListAgentSkills)
-		r.Put("/agents/{key}/skills/{skill}", s.handleEnableSkill)
-		r.Delete("/agents/{key}/skills/{skill}", s.handleDisableSkill)
-		r.Get("/agents/{key}/custom-tools", s.handleListCustomTools)
-		r.Put("/agents/{key}/custom-tools/{name}", s.handleEnableCustomTool)
-		r.Delete("/agents/{key}/custom-tools/{name}", s.handleDisableCustomTool)
-		r.Get("/agents/{key}/extra-commands", s.handleListAgentExtraCommands)
-		r.Put("/agents/{key}/extra-commands/{name}", s.handleEnableExtraCommand)
-		r.Delete("/agents/{key}/extra-commands/{name}", s.handleDisableExtraCommand)
-		r.Get("/agents/{key}/builtin-tools", s.handleListAgentBuiltinTools)
-		r.Put("/agents/{key}/builtin-tools/{name}", s.handleEnableBuiltinTool)
-		r.Delete("/agents/{key}/builtin-tools/{name}", s.handleDisableBuiltinTool)
-		r.Delete("/agents/{key}/builtin-tools", s.handleResetBuiltinTools)
-		r.Get("/agents/{key}/images", s.handleListImages)
-		r.Post("/agents/{key}/images", s.handleUploadImage)
-		r.Delete("/agents/{key}/images/{name}", s.handleDeleteImage)
-		r.Get("/agents/{key}/vision", s.handleVisionStatus)
-		r.Get("/agents/{key}/knowledge", s.handleListKnowledge)
-		r.Get("/agents/{key}/knowledge/search", s.handleSearchKnowledge)
-		r.Delete("/agents/{key}/knowledge/{id}", s.handleDeleteKnowledge)
-		r.Get("/agents/{key}/observations", s.handleListObservations)
-		r.Post("/agents/{key}/observations", s.handleAddObservation)
-		r.Get("/agents/{key}/docs", s.handleListDocs)
-		r.Post("/agents/{key}/docs", s.handleAddDoc)
-		r.Get("/agents/{key}/docs/{id}", s.handleGetDoc)
-		r.Delete("/agents/{key}/docs/{id}", s.handleDeleteDoc)
-		r.Get("/agents/{key}/docs/search/query", s.handleSearchDocs)
+	// Huma API: every REST route is a registered operation, so the OpenAPI
+	// spec and the docs UI are generated from the actual handlers.
+	humaCfg := huma.DefaultConfig("agenticgo", "1.0.0")
+	humaCfg.Info.Description = "A simplified, self-hosted AI agent gateway: multiple agents with context files, skills, knowledge/docs memory, MCP tools, and OpenAI-compatible providers."
+	humaCfg.Info.Contact = &huma.Contact{Name: "agenticgo"}
+	api := humago.New(mux, humaCfg)
+	s.registerRoutes(api)
 
-		// Global skills library: upload once, enable per agent.
-		r.Get("/skills", s.handleListLibrarySkills)
-		r.Post("/skills/upload", s.handleUploadSkill)
-		r.Delete("/skills/{key}", s.handleDeleteSkill)
-		r.Post("/evolve", s.handleEvolve)
+	// Non-REST surface: WebSocket chat and the embedded chat UI.
+	mux.HandleFunc("GET /ws", s.handleWS)
 
-		// Conversations.
-		r.Get("/sessions", s.handleListSessions)
-		r.Get("/sessions/{agent}/{session}/messages", s.handleSessionMessages)
-		r.Delete("/sessions/{agent}/{session}", s.handleDeleteSession)
-
-		// Capabilities.
-		r.Get("/tools", s.handleListTools)
-		r.Get("/tools/core", s.handleListCoreTools)
-		r.Get("/extra-commands", s.handleListExtraCommands)
-
-		// Providers (OpenAI-compatible endpoints).
-		r.Get("/providers", s.handleListProviders)
-		r.Post("/providers", s.handleUpsertProvider)
-		r.Post("/providers/test", s.handleTestProvider) // ad-hoc test of a posted config
-		r.Get("/providers/{name}", s.handleGetProvider)
-		r.Delete("/providers/{name}", s.handleDeleteProvider)
-		r.Post("/providers/{name}/test", s.handleTestProvider)
-
-		// MCP servers: real connections (Phase 3), tool discovery, per-agent
-		// enablement via the custom-tools endpoints above.
-		r.Get("/mcp-servers", s.handleListMCPServers)
-		r.Post("/mcp-servers", s.handleAddMCPServer)
-		r.Put("/mcp-servers/{id}", s.handleUpdateMCPServer)
-		r.Delete("/mcp-servers/{id}", s.handleDeleteMCPServer)
-		r.Post("/mcp-servers/{id}/connect", s.handleConnectMCPServer)
-		r.Post("/mcp-servers/{id}/disconnect", s.handleDisconnectMCPServer)
-		r.Get("/mcp-tools", s.handleListMCPTools)
-
-		// Scaffolding (not yet functional; UI + API shape only).
-		r.Get("/cron", s.handleListCronJobs)
-		r.Post("/cron", s.handleAddCronJob)
-		r.Delete("/cron/{id}", s.handleDeleteCronJob)
-	})
-
-	// Serve the embedded chat UI at /.
 	static, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Fatalf("embed web: %v", err)
 	}
-	r.Handle("/*", http.FileServer(http.FS(static)))
+	mux.Handle("/", http.FileServer(http.FS(static)))
 
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           r,
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s
@@ -157,7 +91,7 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.R
 func (s *Server) Start(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("agenticgo listening on %s", s.cfg.Addr)
+		log.Printf("agenticgo listening on %s (API docs at /docs)", s.cfg.Addr)
 		if err := s.http.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -173,161 +107,24 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
+// --- Shared business helpers (used by the Huma handlers in routes.go) ---
 
-// --- Agent CRUD ---
-
-func (s *Server) handleListAgents(w http.ResponseWriter, _ *http.Request) {
-	list, err := s.agents.List()
+// loadLibrary loads all skills from the global library dir.
+func (s *Server) loadLibrary() ([]skills.Skill, error) {
+	dir, err := s.agents.SkillsLibraryDir()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, err
 	}
-	if list == nil {
-		list = []agents.Agent{}
-	}
-	writeJSON(w, http.StatusOK, list)
+	return skills.Load(dir)
 }
 
-type createAgentRequest struct {
-	Key         string              `json:"key"`
-	Name        string              `json:"name"`
-	Description string              `json:"description"`
-	Soul        string              `json:"soul"`
-	Config      *agents.AgentConfig `json:"config,omitempty"` // optional LLM settings
-}
-
-func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
-	var req createAgentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	var cfg agents.AgentConfig
-	if req.Config != nil {
-		cfg = *req.Config
-	}
-	ag, err := s.agents.Create(req.Key, req.Name, req.Description, req.Soul, cfg)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, ag)
-}
-
-// handleUpdateAgentConfig replaces an agent's per-agent LLM config.
-func (s *Server) handleUpdateAgentConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg agents.AgentConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	ag, err := s.agents.UpdateConfig(chi.URLParam(r, "key"), cfg)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, ag)
-}
-
-func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
-	ag, err := s.agents.Get(chi.URLParam(r, "key"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, ag)
-}
-
-func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
-	if err := s.agents.Delete(chi.URLParam(r, "key")); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-// --- Context files ---
-
-func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
-	content, err := s.agents.ReadFile(chi.URLParam(r, "key"), chi.URLParam(r, "name"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"name": chi.URLParam(r, "name"), "content": content})
-}
-
-func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.agents.WriteFile(chi.URLParam(r, "key"), chi.URLParam(r, "name"), body.Content); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
-}
-
-// --- Skills ---
-
-// skillWithState is a library skill plus whether the agent in context has it
-// enabled.
-type skillWithState struct {
-	skills.Skill
-	Enabled bool `json:"enabled"`
-}
-
-// handleListAgentSkills lists the global library skills annotated with the
-// agent's enabled state (Agents → Skills tab).
-func (s *Server) handleListAgentSkills(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	lib, err := s.loadLibrary()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	enabled := map[string]bool{}
-	for _, k := range ag.Config.EnabledSkills {
-		enabled[k] = true
-	}
-	out := make([]skillWithState, 0, len(lib))
-	for _, sk := range lib {
-		out = append(out, skillWithState{Skill: sk, Enabled: enabled[sk.Key]})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// handleEnableSkill enables a library skill for an agent.
-func (s *Server) handleEnableSkill(w http.ResponseWriter, r *http.Request) {
-	s.setSkillEnabled(w, r, true)
-}
-
-// handleDisableSkill disables a library skill for an agent.
-func (s *Server) handleDisableSkill(w http.ResponseWriter, r *http.Request) {
-	s.setSkillEnabled(w, r, false)
-}
-
-func (s *Server) setSkillEnabled(w http.ResponseWriter, r *http.Request, on bool) {
-	key := chi.URLParam(r, "key")
-	skillKey := chi.URLParam(r, "skill")
-
+// setSkillEnabled enables or disables a library skill for an agent. The skill
+// must exist in the library. Errors are huma errors with the right status.
+func (s *Server) setSkillEnabled(key, skillKey string, on bool) error {
 	// The skill must exist in the library.
 	lib, err := s.loadLibrary()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return huma.Error500InternalServerError(err.Error())
 	}
 	found := false
 	for _, sk := range lib {
@@ -337,14 +134,12 @@ func (s *Server) setSkillEnabled(w http.ResponseWriter, r *http.Request, on bool
 		}
 	}
 	if !found {
-		writeError(w, http.StatusNotFound, fmt.Errorf("skill %q not found in library", skillKey))
-		return
+		return huma.Error404NotFound(fmt.Sprintf("skill %q not found in library", skillKey))
 	}
 
 	ag, err := s.agents.Get(key)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
+		return huma.Error404NotFound(err.Error())
 	}
 	set := map[string]bool{}
 	for _, k := range ag.Config.EnabledSkills {
@@ -361,615 +156,28 @@ func (s *Server) setSkillEnabled(w http.ResponseWriter, r *http.Request, on bool
 	}
 	sort.Strings(keys)
 	if _, err := s.agents.SetEnabledSkills(key, keys); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return huma.Error500InternalServerError(err.Error())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "skill": skillKey, "enabled": on})
+	return nil
 }
 
-// handleListLibrarySkills lists every skill in the global library (Skills
-// page). No agent inheritance — enabling happens per agent.
-func (s *Server) handleListLibrarySkills(w http.ResponseWriter, _ *http.Request) {
-	lib, err := s.loadLibrary()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if lib == nil {
-		lib = []skills.Skill{}
-	}
-	writeJSON(w, http.StatusOK, lib)
-}
-
-// handleUploadSkill installs a skill from an uploaded ZIP (multipart field
-// "file") into the global skills library. It is not enabled for any agent
-// automatically — enable it per agent afterwards.
-func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(25 << 20); err != nil { // 25 MB
-		writeError(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
-		return
-	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("missing file: %w", err))
-		return
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, 25<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("read upload: %w", err))
-		return
-	}
-	lib, err := s.agents.SkillsLibraryDir()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	sk, err := skills.InstallZip(lib, data)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, sk)
-}
-
-// handleDeleteSkill removes a skill from the global library.
-func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	lib, err := s.agents.SkillsLibraryDir()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := skills.Delete(lib, key); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"deleted": key})
-}
-
-// loadLibrary loads all skills from the global library dir.
-func (s *Server) loadLibrary() ([]skills.Skill, error) {
-	dir, err := s.agents.SkillsLibraryDir()
-	if err != nil {
-		return nil, err
-	}
-	return skills.Load(dir)
-}
-
-// --- Agent images (vision) ---
-
-// handleListImages lists an agent's stored reference images.
-func (s *Server) handleListImages(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	imgs, err := s.agents.ListImages(key)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, imgs)
-}
-
-// handleUploadImage stores one image (multipart field "file") for the agent.
-func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	if err := r.ParseMultipartForm(10 << 20); err != nil { // 10 MB form
-		writeError(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
-		return
-	}
-	file, hdr, err := r.FormFile("file")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("missing file: %w", err))
-		return
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, 9<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("read upload: %w", err))
-		return
-	}
-	img, err := s.agents.SaveImage(key, hdr.Filename, data)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, img)
-}
-
-// handleDeleteImage removes one of the agent's images.
-func (s *Server) handleDeleteImage(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	name := chi.URLParam(r, "name")
-	if err := s.agents.DeleteImage(key, name); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
-}
-
-// handleVisionStatus reports whether the agent may attach images, given the
-// optional ?provider= override the chat UI passes for the selected provider.
-func (s *Server) handleVisionStatus(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	provider := r.URL.Query().Get("provider")
-	writeJSON(w, http.StatusOK, map[string]bool{"vision": s.engine.EffectiveVision(ag, provider)})
-}
-
-// imageDataURL reads one of the agent's images and returns it as a base64
-// data-URL suitable for an OpenAI image_url content part.
-func (s *Server) imageDataURL(agentKey, name string) (string, error) {
-	data, mime, err := s.agents.ReadImage(agentKey, name)
-	if err != nil {
-		return "", err
-	}
-	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data), nil
-}
-
-// --- Evolve ---
-
-func (s *Server) handleEvolve(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Agent   string `json:"agent"`
-		Session string `json:"session"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if body.Agent == "" {
-		body.Agent = "default"
-	}
-	if body.Session == "" {
-		body.Session = "default"
-	}
-	if err := s.engine.Evolve(r.Context(), body.Agent, body.Session); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "evolved"})
-}
-
-// --- Knowledge ---
-
-func (s *Server) handleListKnowledge(w http.ResponseWriter, r *http.Request) {
-	k, err := s.store.Knowledge(r.Context(), chi.URLParam(r, "key"), 200)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if k == nil {
-		k = []store.KnowledgeEntry{}
-	}
-	writeJSON(w, http.StatusOK, k)
-}
-
-// handleDeleteKnowledge removes one curated knowledge entry (scoped to the
-// agent) so wrong/outdated memories can be deleted from the Memory UI.
-func (s *Server) handleDeleteKnowledge(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid knowledge id"))
-		return
-	}
-	if err := s.store.DeleteKnowledge(r.Context(), id, chi.URLParam(r, "key")); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, fmt.Errorf("knowledge entry not found"))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-func (s *Server) handleSearchKnowledge(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	hits, err := s.store.SearchKnowledge(r.Context(), chi.URLParam(r, "key"), q, 20)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if hits == nil {
-		hits = []string{}
-	}
-	writeJSON(w, http.StatusOK, hits)
-}
-
-// --- Observations ---
-
-func (s *Server) handleListObservations(w http.ResponseWriter, r *http.Request) {
-	obs, err := s.store.ListObservations(r.Context(), chi.URLParam(r, "key"), 100)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, obs)
-}
-
-func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.store.AddObservation(r.Context(), chi.URLParam(r, "key"), body.Content); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]string{"status": "recorded"})
-}
-
-// --- Knowledge-base documents ---
-
-func (s *Server) handleListDocs(w http.ResponseWriter, r *http.Request) {
-	docs, err := s.store.ListKnowledgeDocs(r.Context(), chi.URLParam(r, "key"))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, docs)
-}
-
-func (s *Server) handleGetDoc(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid id"))
-		return
-	}
-	doc, err := s.store.GetKnowledgeDoc(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, doc)
-}
-
-func (s *Server) handleDeleteDoc(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid id"))
-		return
-	}
-	if err := s.store.DeleteKnowledgeDoc(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-func (s *Server) handleSearchDocs(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	docs, err := s.store.SearchDocs(r.Context(), chi.URLParam(r, "key"), q, 20)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if docs == nil {
-		docs = []store.KnowledgeDoc{}
-	}
-	writeJSON(w, http.StatusOK, docs)
-}
-
-// handleAddDoc accepts a document either as multipart file upload
-// (field "file") or as JSON { "title": "...", "content": "..." }.
-func (s *Server) handleAddDoc(w http.ResponseWriter, r *http.Request) {
-	agent := chi.URLParam(r, "key")
-	ct := r.Header.Get("Content-Type")
-
-	if strings.HasPrefix(ct, "multipart/form-data") {
-		if err := r.ParseMultipartForm(20 << 20); err != nil { // 20 MB
-			writeError(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
-			return
-		}
-		file, hdr, err := r.FormFile("file")
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("missing file: %w", err))
-			return
-		}
-		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, 20<<20))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("read file: %w", err))
-			return
-		}
-		title := strings.TrimSuffix(hdr.Filename, filepath.Ext(hdr.Filename))
-		id, err := s.store.AddKnowledgeDoc(r.Context(), agent, title, string(data))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"id": id, "title": title})
-		return
-	}
-
-	// JSON body.
-	var body struct {
-		Title   string `json:"title"`
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if strings.TrimSpace(body.Title) == "" || strings.TrimSpace(body.Content) == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("title and content are required"))
-		return
-	}
-	id, err := s.store.AddKnowledgeDoc(r.Context(), agent, body.Title, body.Content)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "title": body.Title})
-}
-
-// --- Sessions ---
-
-func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.store.ListSessions(r.Context(), r.URL.Query().Get("agent"))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, sessions)
-}
-
-// handleDeleteSession removes a whole agent+session conversation.
-func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	agent, session := chi.URLParam(r, "agent"), chi.URLParam(r, "session")
-	if err := s.store.DeleteSession(r.Context(), agent, session); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"deleted": session})
-}
-
-func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
-	msgs, err := s.store.Messages(r.Context(), chi.URLParam(r, "agent"), chi.URLParam(r, "session"), 200)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if msgs == nil {
-		msgs = []store.Message{}
-	}
-	writeJSON(w, http.StatusOK, msgs)
-}
-
-// --- Built-in tools ---
-
-type toolInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
-func (s *Server) handleListTools(w http.ResponseWriter, _ *http.Request) {
-	specs := s.tools.Specs()
-	out := make([]toolInfo, 0, len(specs))
-	for _, sp := range specs {
-		out = append(out, toolInfo{Name: sp.Function.Name, Description: sp.Function.Description})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	writeJSON(w, http.StatusOK, out)
-}
-
-// handleListCoreTools returns the always-on built-in agent tools (memory +
-// knowledge recall/save). These are wired per run for every agent and cannot
-// be enabled, disabled, or removed — listed here read-only for visibility.
-func (s *Server) handleListCoreTools(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, tools.CoreTools())
-}
-
-// --- Providers ---
-
-func (s *Server) handleListProviders(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.providers.List())
-}
-
-func (s *Server) handleGetProvider(w http.ResponseWriter, r *http.Request) {
-	p, err := s.providers.Get(chi.URLParam(r, "name"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, p)
-}
-
-func (s *Server) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
-	var p providers.Provider
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.providers.Upsert(p); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, p)
-}
-
-func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
-	if err := s.providers.Delete(chi.URLParam(r, "name")); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-// handleTestProvider tests a provider connection. On POST /api/providers/test
-// (or with a JSON body on the named route) the posted provider config is
-// tested as-is, so the UI can test the form's current values before saving.
-// With an empty body it falls back to testing the saved provider named in the
-// path.
-func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
-	var adhoc *providers.Provider
-	if r.Body != nil && r.ContentLength != 0 {
-		var p providers.Provider
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("decode provider: %w", err))
-			return
-		}
-		adhoc = &p
-	}
-	models, err := s.providers.TestConnection(r.Context(), chi.URLParam(r, "name"), adhoc)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	if models == nil {
-		models = []string{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "models": models})
-}
-
-// --- MCP servers (real client; tools are enabled per agent) ---
-
-func (s *Server) handleListMCPServers(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.mcp.ListServers())
-}
-
-func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
-	var srv mcp.ServerConfig
-	if err := json.NewDecoder(r.Body).Decode(&srv); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	created, err := s.mcp.Add(srv)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, created)
-}
-
-func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
-	var srv mcp.ServerConfig
-	if err := json.NewDecoder(r.Body).Decode(&srv); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	updated, err := s.mcp.Update(chi.URLParam(r, "id"), srv)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
-}
-
-func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
-	if err := s.mcp.Delete(chi.URLParam(r, "id")); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-// handleConnectMCPServer dials the server and discovers its tools. This is
-// deliberately manual (the Connect button) so heavyweight servers such as
-// kubernetes-mcp-server are only spawned when wanted.
-func (s *Server) handleConnectMCPServer(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-	st, err := s.mcp.Connect(ctx, chi.URLParam(r, "id"))
-	if err != nil {
-		// Still return the status so the UI shows the error next to the server.
-		if st != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "server": st})
-			return
-		}
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, st)
-}
-
-func (s *Server) handleDisconnectMCPServer(w http.ResponseWriter, r *http.Request) {
-	if err := s.mcp.Disconnect(chi.URLParam(r, "id")); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
-}
-
-// handleListMCPTools returns the discovered tool catalog across all connected
-// servers (the "MCP Tools" that agents can enable).
-func (s *Server) handleListMCPTools(w http.ResponseWriter, _ *http.Request) {
-	tools := s.mcp.Tools()
-	if tools == nil {
-		tools = []mcp.ToolInfo{}
-	}
-	writeJSON(w, http.StatusOK, tools)
-}
-
-// --- MCP tools: per-agent enablement of discovered tools (custom-tools API) ---
-
-// customToolWithState is a discovered MCP tool plus whether the agent in
-// context has it enabled.
-type customToolWithState struct {
-	mcp.ToolInfo
-	// Discovered is the namespaced name (mcp_<server>_<tool>) used as the key.
-	Discovered string `json:"discovered"`
-	Enabled    bool   `json:"enabled"`
-}
-
-// handleListCustomTools lists all discovered MCP tools annotated with the
-// agent's enabled state (Agents → MCP Tools tab).
-func (s *Server) handleListCustomTools(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	enabled := map[string]bool{}
-	for _, n := range ag.Config.EnabledTools {
-		enabled[n] = true
-	}
-	all := s.mcp.Tools()
-	out := make([]customToolWithState, 0, len(all))
-	for _, t := range all {
-		dn := t.DiscoveredName()
-		out = append(out, customToolWithState{ToolInfo: t, Discovered: dn, Enabled: enabled[dn]})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (s *Server) handleEnableCustomTool(w http.ResponseWriter, r *http.Request) {
-	s.setCustomToolEnabled(w, r, true)
-}
-
-func (s *Server) handleDisableCustomTool(w http.ResponseWriter, r *http.Request) {
-	s.setCustomToolEnabled(w, r, false)
-}
-
-func (s *Server) setCustomToolEnabled(w http.ResponseWriter, r *http.Request, on bool) {
-	key := chi.URLParam(r, "key")
-	name := chi.URLParam(r, "name")
-
+// setCustomToolEnabled enables or disables a discovered MCP tool for an agent.
+// Errors are huma errors with the right status.
+func (s *Server) setCustomToolEnabled(key, name string, on bool) error {
 	if !mcp.IsMCPToolName(name) {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid MCP tool name %q", name))
-		return
+		return huma.Error400BadRequest(fmt.Sprintf("invalid MCP tool name %q", name))
 	}
 	// Enabling requires the tool to be discovered (currently known from a
 	// connected server); disabling is always allowed.
 	if on {
 		if _, ok := s.mcp.Lookup(name); !ok {
-			writeError(w, http.StatusNotFound, fmt.Errorf("tool %q not discovered — connect its MCP server first", name))
-			return
+			return huma.Error404NotFound(fmt.Sprintf("tool %q not discovered — connect its MCP server first", name))
 		}
 	}
 
 	ag, err := s.agents.Get(key)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
+		return huma.Error404NotFound(err.Error())
 	}
 	set := map[string]bool{}
 	for _, n := range ag.Config.EnabledTools {
@@ -986,73 +194,22 @@ func (s *Server) setCustomToolEnabled(w http.ResponseWriter, r *http.Request, on
 	}
 	sort.Strings(names)
 	if _, err := s.agents.SetEnabledTools(key, names); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return huma.Error500InternalServerError(err.Error())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "tool": name, "enabled": on})
+	return nil
 }
 
-// --- Extra (dangerous) exec commands: env-declared, enabled per agent ---
-
-// extraCommandWithState is one AGENTICGO_EXTRA_EXEC_COMMANDS entry plus
-// whether the agent in context has it enabled.
-type extraCommandWithState struct {
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-}
-
-// handleListExtraCommands lists the env-declared extra commands (read-only,
-// for the sidebar Extra Dangerous Exec Commands page).
-func (s *Server) handleListExtraCommands(w http.ResponseWriter, _ *http.Request) {
-	cmds := s.cfg.ExtraExecCommands
-	if cmds == nil {
-		cmds = []string{}
-	}
-	writeJSON(w, http.StatusOK, cmds)
-}
-
-// handleListAgentExtraCommands lists the env-declared extra commands annotated
-// with the agent's enabled state (Agents → Extra Dangerous Exec Commands tab).
-func (s *Server) handleListAgentExtraCommands(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	enabled := map[string]bool{}
-	for _, c := range ag.Config.EnabledCommands {
-		enabled[c] = true
-	}
-	out := make([]extraCommandWithState, 0, len(s.cfg.ExtraExecCommands))
-	for _, c := range s.cfg.ExtraExecCommands {
-		out = append(out, extraCommandWithState{Name: c, Enabled: enabled[c]})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (s *Server) handleEnableExtraCommand(w http.ResponseWriter, r *http.Request) {
-	s.setExtraCommandEnabled(w, r, true)
-}
-
-func (s *Server) handleDisableExtraCommand(w http.ResponseWriter, r *http.Request) {
-	s.setExtraCommandEnabled(w, r, false)
-}
-
-func (s *Server) setExtraCommandEnabled(w http.ResponseWriter, r *http.Request, on bool) {
-	key := chi.URLParam(r, "key")
-	name := chi.URLParam(r, "name")
-
+// setExtraCommandEnabled enables or disables an env-declared extra (dangerous)
+// exec command for an agent. Errors are huma errors with the right status.
+func (s *Server) setExtraCommandEnabled(key, name string, on bool) error {
 	// The command must be declared via AGENTICGO_EXTRA_EXEC_COMMANDS.
 	if !slices.Contains(s.cfg.ExtraExecCommands, name) {
-		writeError(w, http.StatusNotFound, fmt.Errorf("command %q is not declared in AGENTICGO_EXTRA_EXEC_COMMANDS", name))
-		return
+		return huma.Error404NotFound(fmt.Sprintf("command %q is not declared in AGENTICGO_EXTRA_EXEC_COMMANDS", name))
 	}
 
 	ag, err := s.agents.Get(key)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
+		return huma.Error404NotFound(err.Error())
 	}
 	set := map[string]bool{}
 	for _, c := range ag.Config.EnabledCommands {
@@ -1069,38 +226,17 @@ func (s *Server) setExtraCommandEnabled(w http.ResponseWriter, r *http.Request, 
 	}
 	sort.Strings(cmds)
 	if _, err := s.agents.SetEnabledCommands(key, cmds); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return huma.Error500InternalServerError(err.Error())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "command": name, "enabled": on})
+	return nil
 }
 
-// --- Built-in tools: per-agent narrowing of the global allow-list ---
-
-// builtinTools lists every built-in tool name (the ceiling is the global
-// AGENTICGO_TOOL_ALLOWLIST; this is the full set the UI can render).
-var builtinTools = []string{"exec", "list_files", "read_file", "write_file"}
-
-// builtinToolWithState is one built-in tool plus the agent's state for it.
-type builtinToolWithState struct {
-	Name string `json:"name"`
-	// Allowed reports whether the global AGENTICGO_TOOL_ALLOWLIST ceiling
-	// permits the tool at all. A tool not allowed globally can never be
-	// enabled per agent.
-	Allowed bool `json:"allowed"`
-	// Enabled reports whether the tool is effective for the agent right now
-	// (allowed globally and not narrowed away per agent).
-	Enabled bool `json:"enabled"`
-}
-
-// handleListAgentBuiltinTools lists the built-in tools annotated with the
-// agent's state (Agents → Built-in Tools tab).
-func (s *Server) handleListAgentBuiltinTools(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
+// listAgentBuiltinTools lists the built-in tools annotated with the agent's
+// state (Agents → Built-in Tools tab).
+func (s *Server) listAgentBuiltinTools(key string) ([]builtinToolWithState, error) {
 	ag, err := s.agents.Get(key)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
+		return nil, huma.Error404NotFound(err.Error())
 	}
 	ceiling := map[string]bool{}
 	for _, n := range s.cfg.ToolAllowList {
@@ -1120,36 +256,25 @@ func (s *Server) handleListAgentBuiltinTools(w http.ResponseWriter, r *http.Requ
 		enabled := a && (ag.Config.EnabledBuiltinTools == nil || narrowed[n])
 		out = append(out, builtinToolWithState{Name: n, Allowed: a, Enabled: enabled})
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
-func (s *Server) handleEnableBuiltinTool(w http.ResponseWriter, r *http.Request) {
-	s.setBuiltinToolEnabled(w, r, true)
-}
-
-func (s *Server) handleDisableBuiltinTool(w http.ResponseWriter, r *http.Request) {
-	s.setBuiltinToolEnabled(w, r, false)
-}
-
-func (s *Server) setBuiltinToolEnabled(w http.ResponseWriter, r *http.Request, on bool) {
-	key := chi.URLParam(r, "key")
-	name := chi.URLParam(r, "name")
-
+// setBuiltinToolEnabled narrows the agent's built-in tool set. The global
+// allow-list is the ceiling: a tool not permitted there can never be enabled
+// per agent. Errors are huma errors with the right status.
+func (s *Server) setBuiltinToolEnabled(key, name string, on bool) error {
 	if !slices.Contains(builtinTools, name) {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown built-in tool %q", name))
-		return
+		return huma.Error400BadRequest(fmt.Sprintf("unknown built-in tool %q", name))
 	}
 	// The global allow-list is the ceiling: a tool not permitted there can
 	// never be enabled per agent.
 	if on && len(s.cfg.ToolAllowList) > 0 && !slices.Contains(s.cfg.ToolAllowList, name) {
-		writeError(w, http.StatusConflict, fmt.Errorf("tool %q is not on the global AGENTICGO_TOOL_ALLOWLIST", name))
-		return
+		return huma.Error409Conflict(fmt.Sprintf("tool %q is not on the global AGENTICGO_TOOL_ALLOWLIST", name))
 	}
 
 	ag, err := s.agents.Get(key)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
+		return huma.Error404NotFound(err.Error())
 	}
 
 	// Materialize the current effective set (inherit = the global ceiling,
@@ -1177,49 +302,77 @@ func (s *Server) setBuiltinToolEnabled(w http.ResponseWriter, r *http.Request, o
 	}
 	sort.Strings(names)
 	if _, err := s.agents.SetEnabledBuiltinTools(key, &names); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return huma.Error500InternalServerError(err.Error())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "tool": name, "enabled": on})
+	return nil
 }
 
-// handleResetBuiltinTools clears the per-agent narrowing so the agent
-// inherits the global allow-list again (the default for new agents).
-func (s *Server) handleResetBuiltinTools(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	if _, err := s.agents.SetEnabledBuiltinTools(key, nil); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"agent": key, "builtin_tools": "inherit"})
-}
-
-// --- Cron jobs (scaffolding) ---
-
-func (s *Server) handleListCronJobs(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.scaffold.ListCronJobs())
-}
-
-func (s *Server) handleAddCronJob(w http.ResponseWriter, r *http.Request) {
-	var job scaffold.CronJob
-	if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	created, err := s.scaffold.AddCronJob(job)
+// imageDataURL reads one of the agent's images and returns it as a base64
+// data-URL suitable for an OpenAI image_url content part.
+func (s *Server) imageDataURL(agentKey, name string) (string, error) {
+	data, mimeType, err := s.agents.ReadImage(agentKey, name)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
+		return "", err
 	}
-	writeJSON(w, http.StatusCreated, created)
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 
-func (s *Server) handleDeleteCronJob(w http.ResponseWriter, r *http.Request) {
-	if err := s.scaffold.DeleteCronJob(chi.URLParam(r, "id")); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
+// --- Multipart helpers ---
+
+// firstMultipartFile reads the first file of the named field from a parsed
+// multipart form, capped at max bytes.
+func firstMultipartFile(form *multipart.Form, field string, maxSize int64) ([]byte, error) {
+	data, _, err := firstMultipartFileNamed(form, field, maxSize)
+	return data, err
+}
+
+// firstMultipartFileNamed is firstMultipartFile but also returns the uploaded
+// filename.
+func firstMultipartFileNamed(form *multipart.Form, field string, maxSize int64) ([]byte, string, error) {
+	if form == nil || form.File == nil {
+		return nil, "", fmt.Errorf("missing multipart file field %q", field)
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	headers := form.File[field]
+	if len(headers) == 0 {
+		return nil, "", fmt.Errorf("missing file: multipart field %q is required", field)
+	}
+	f, err := headers[0].Open()
+	if err != nil {
+		return nil, "", fmt.Errorf("open upload: %w", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxSize))
+	if err != nil {
+		return nil, "", fmt.Errorf("read upload: %w", err)
+	}
+	return data, headers[0].Filename, nil
+}
+
+// parseMultipartFileBody re-parses a raw request body as multipart/form-data
+// (used by the add-doc endpoint which accepts both JSON and multipart) and
+// returns the uploaded file's title (filename without extension) and content.
+// contentType is the request's Content-Type header (already parsed by huma
+// into the input struct).
+func parseMultipartFileBody(contentType string, raw []byte, field string, maxSize int64) (string, []byte, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse content type: %w", err)
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return "", nil, fmt.Errorf("missing multipart boundary")
+	}
+	r := multipart.NewReader(bytes.NewReader(raw), boundary)
+	form, err := r.ReadForm(maxSize)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse upload: %w", err)
+	}
+	data, filename, err := firstMultipartFileNamed(form, field, maxSize)
+	if err != nil {
+		return "", nil, err
+	}
+	title := strings.TrimSuffix(filename, filepath.Ext(filename))
+	return title, data, nil
 }
 
 // --- WebSocket chat ---
@@ -1320,8 +473,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
