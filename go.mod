@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/coder/websocket v1.8.15
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/danielgtaylor/huma/v2 v2.34.1
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/openai/openai-go/v3 v3.61.0
 	modernc.org/sqlite v1.58.0

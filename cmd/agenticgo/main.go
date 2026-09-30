@@ -106,6 +106,7 @@ func main() {
 	engine.SetProviderLookup(providerStore)
 	engine.SetMCPManager(mcpMgr)
 	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, scaff, mcpMgr)
+	srv.SetLogger(lg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

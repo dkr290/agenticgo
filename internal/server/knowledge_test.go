@@ -2,16 +2,19 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
 	"testing"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/dkr290/agenticgo/internal/store"
+	"github.com/dkr290/agenticgo/internal/tools"
 )
 
 func openTempStore(t *testing.T) *store.Store {
@@ -27,10 +30,18 @@ func openTempStore(t *testing.T) *store.Store {
 }
 
 func TestHandleListCoreTools(t *testing.T) {
-	s := &Server{}
-	req := httptest.NewRequest(http.MethodGet, "/api/tools/core", nil)
+	r := newTestAPI(t, func(api huma.API) {
+		huma.Register(api, huma.Operation{
+			OperationID: "list-core-tools",
+			Method:      http.MethodGet,
+			Path:        "/api/tools/core",
+		}, func(ctx context.Context, _ *struct{}) (*struct{ Body []tools.CoreTool }, error) {
+			return &struct{ Body []tools.CoreTool }{Body: tools.CoreTools()}, nil
+		})
+	})
+
 	rec := httptest.NewRecorder()
-	s.handleListCoreTools(rec, req)
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tools/core", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -63,13 +74,31 @@ func TestHandleDeleteKnowledge(t *testing.T) {
 	}
 	id := entries[0].ID
 
-	// Route through chi so {key}/{id} URL params are populated.
-	r := chi.NewRouter()
-	r.Delete("/api/agents/{key}/knowledge/{id}", s.handleDeleteKnowledge)
+	// Route through huma so {key}/{id} path params are populated.
+	r := newTestAPI(t, func(api huma.API) {
+		huma.Register(api, huma.Operation{
+			OperationID: "delete-knowledge",
+			Method:      http.MethodDelete,
+			Path:        "/api/agents/{key}/knowledge/{id}",
+		}, func(ctx context.Context, input *struct {
+			Key string `path:"key"`
+			ID  int64  `path:"id"`
+		}) (*statusOutput, error) {
+			if input.ID <= 0 {
+				return nil, huma.Error400BadRequest("invalid knowledge id")
+			}
+			if err := s.store.DeleteKnowledge(ctx, input.ID, input.Key); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, huma.Error404NotFound("knowledge entry not found")
+				}
+				return nil, huma.Error500InternalServerError(err.Error())
+			}
+			return &statusOutput{Body: statusBody{Status: "deleted"}}, nil
+		})
+	})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/agents/demo/knowledge/"+strconv.FormatInt(id, 10), nil)
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/agents/demo/knowledge/"+strconv.FormatInt(id, 10), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete status = %d, body=%s", rec.Code, rec.Body)
 	}
@@ -78,10 +107,9 @@ func TestHandleDeleteKnowledge(t *testing.T) {
 	}
 
 	// Unknown id -> 404.
-	req = httptest.NewRequest(http.MethodDelete, "/api/agents/demo/knowledge/99999", nil)
 	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/agents/demo/knowledge/99999", nil))
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown id status = %d, want 404", rec.Code)
+		t.Fatalf("unknown id status = %d, want 404 (body=%s)", rec.Code, rec.Body)
 	}
 }

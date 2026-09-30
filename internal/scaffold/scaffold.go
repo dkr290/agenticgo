@@ -13,13 +13,13 @@ import (
 
 // CronJob is a scheduled (but not yet executed) agent run.
 type CronJob struct {
-	ID        string    `json:"id"`
+	ID        string    `json:"id,omitempty"`
 	Name      string    `json:"name"`
 	Schedule  string    `json:"schedule"` // cron expression, e.g. "*/5 * * * *"
-	Agent     string    `json:"agent"`
-	Prompt    string    `json:"prompt"`
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
+	Agent     string    `json:"agent,omitempty"`
+	Prompt    string    `json:"prompt,omitempty"`
+	Enabled   bool      `json:"enabled,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 // Store is a thread-safe in-memory store for scaffolding resources.

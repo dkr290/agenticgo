@@ -82,9 +82,14 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - **Logging**: `internal/logger` defines a small `Logger` interface (Info/Error/
   Debug/Warn with slog-style key/value pairs) backed by stdlib `log/slog`
   (human-readable text to stderr). Set `AGENTICGO_DEBUG=true` to enable debug
-  level. Wired into the providers/LLM path for now (`providers.Store.SetLogger`,
-  `llm.OpenAIProvider.SetLogger`); other packages keep `logger.Nop()` until
-  adopted. Secrets are redacted (`****` + last 4) before logging.
+  level. Wired into the providers/LLM path (`providers.Store.SetLogger`,
+  `llm.OpenAIProvider.SetLogger`), MCP (`mcp.Manager.SetLogger`) and the HTTP
+  server (`server.Server.SetLogger`): API handler errors are always logged at
+  error level when they are 5xx (Huma never logs handler errors itself — it
+  only writes them into the response body), 4xx rejections are debug-level, and
+  a per-request access line (method/path/status/duration) is debug-level only.
+  Other packages keep `logger.Nop()` until adopted.
+  Secrets are redacted (`****` + last 4) before logging.
 - **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`. The `exec`
   tool's safe commands come from `AGENTICGO_EXEC_ALLOWLIST`; additional dangerous
   commands (`AGENTICGO_EXTRA_EXEC_COMMANDS`) are enabled per agent. The global
@@ -172,10 +177,19 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   workspace-jailed built-ins narrowed by `enabled_builtin_tools`, exec with
   enabled extra commands, enabled MCP tools) whose `Specs()`/`Call()` serve
   both the LLM request and dispatch.
-- `internal/server` — chi routes for agent CRUD / context files / skills /
-  providers / tools / sessions / MCP / cron / evolve, plus `/ws` streaming chat.
-  The agent key (and optional provider name) flows through WS messages and API
-  paths.
+- `internal/server` — all REST routes are **Huma operations** registered in
+  `routes.go` via `huma.Register` on a stdlib `http.ServeMux` (adapter
+  `github.com/danielgtaylor/huma/v2/adapters/humago`), so `/openapi.json`,
+  `/openapi.yaml` and the docs UI at `/docs` are generated from the actual
+  handlers. Shared request/response types live in `types.go` (with
+  `doc`/`example` tags); handler helpers that need non-trivial logic live as
+  `*Server` methods in `server.go`. Errors are `huma.Error4xx/5xx`; the MCP
+  connect failure keeps the legacy `{"error","server"}` 502 body via the
+  custom `connectError` (`huma.StatusError` + `ContentTypeFilter`). Optional
+  request-body fields carry `omitempty` or Huma 422-rejects requests the UI
+  sends. The `/ws` WebSocket chat and the embedded SPA stay on the plain mux.
+  The agent key (and optional provider name) flows through WS messages and
+  API paths.
 - `internal/store` — SQLite. `messages`, `knowledge`, and `observations` tables all
   have an `agent` column; `knowledge_fts` is an FTS5 virtual table kept in sync by
   triggers; `migrate` is idempotent for older DBs.
@@ -226,11 +240,14 @@ into the tool loop (tools currently use the global `WorkspaceDir`).
 ## Tech choices (keep these)
 
 - **Go 1.26+**. Stdlib-first.
+- API framework: `github.com/danielgtaylor/huma/v2` on the **humago** adapter
+  (stdlib `http.ServeMux`) — OpenAPI 3.1 + docs UI at `/docs` are
+  self-generated. (chi was replaced by Huma; the router is now stdlib.)
 - LLM client: `github.com/openai/openai-go/v3` (official SDK, Chat Completions
   API with base-URL override — works with Ollama / LM Studio / LocalAI / vLLM /
   OpenAI). The old hand-rolled SSE client is kept, bug-fixed, as reference only
   in `internal/llm/openai.go.bak` (not compiled).
-- Router: `github.com/go-chi/chi/v5`.
+- Router: stdlib `http.ServeMux` (via the Huma humago adapter; chi was removed).
 - WebSocket: `github.com/coder/websocket`.
 - SQLite: `modernc.org/sqlite` (no cgo — static binary / k8s friendly).
 - Config: **env vars only** (12-factor). See `internal/config`.
@@ -256,6 +273,9 @@ go build -o agenticgo ./cmd/agenticgo       # binary
 AGENTICGO_ADDR=:18099 ./agenticgo           # run
 curl localhost:18099/healthz                # health
 curl localhost:18099/api/agents             # list agents
+curl -X POST localhost:18099/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"demo","message":"hello"}'   # non-streaming chat (REST)
 ```
 
 ## Key files
@@ -277,5 +297,9 @@ curl localhost:18099/api/agents             # list agents
   `record_observation`, `search_docs`, `read_doc`) + `CoreTools()` metadata
 - `internal/store/store.go` — SQLite schema + queries (per-agent; FTS5 knowledge +
   observations)
-- `internal/server/server.go` — chi routes, `/ws` streaming, embedded SPA
+- `internal/server/server.go` — wiring (humago adapter on stdlib mux), `/ws`
+  streaming chat, embedded SPA, and shared handler helpers
+- `internal/server/routes.go` — every REST endpoint as a `huma.Register` operation
+- `internal/server/types.go` — shared request/response types (`doc`/`example`
+  tags feed the generated OpenAPI spec)
 - `internal/server/web/index.html` — the whole UI (single file, no build step)

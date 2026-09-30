@@ -79,7 +79,7 @@ const configFileName = "config.json"
 type Agent struct {
 	Key         string        `json:"key"`
 	Name        string        `json:"name"`
-	Description string        `json:"description"`
+	Description string        `json:"description,omitempty"`
 	Dir         string        `json:"-"`
 	Files       []ContextFile `json:"files"`  // ordered context files present on disk
 	Config      AgentConfig   `json:"config"` // per-agent LLM settings
