@@ -6,6 +6,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"embed"
@@ -18,6 +19,7 @@ import (
 	"log"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -502,7 +504,10 @@ func (s *Server) logErr(err error) error {
 	return err
 }
 
-// statusRecorder captures the response status code for request logging.
+// statusRecorder captures the response status code for request logging. It
+// must pass through the optional net/http interfaces the underlying writer
+// implements — notably http.Hijacker, or the /ws WebSocket upgrade breaks
+// ("ResponseWriter does not implement http.Hijacker").
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -513,10 +518,35 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Hijack implements http.Hijacker by delegating to the wrapped writer.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("wrapped ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
+}
+
+// Flush implements http.Flusher by delegating to the wrapped writer.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap returns the wrapped ResponseWriter (http.ResponseController support).
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // logRequests logs one line per request at debug level (method, path, status,
-// duration). Silent unless AGENTICGO_DEBUG=true.
+// duration). Silent unless AGENTICGO_DEBUG=true. WebSocket upgrades are passed
+// through unwrapped — a hijacked long-lived connection has no meaningful
+// status/duration to log, and wrapping must not interfere with the upgrade.
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
