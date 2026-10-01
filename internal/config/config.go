@@ -58,6 +58,14 @@ type Config struct {
 	// injected into an agent's system prompt (app-wide; not per-agent).
 	KnowledgeInject int
 
+	// Knowledge retention bounds how much self-educated knowledge an agent can
+	// accumulate (separate from the GUI-uploaded knowledge_docs, which are
+	// never auto-pruned). KnowledgeTTLDays prunes entries older than that many
+	// days; KnowledgeKeepLatest caps how many of the newest entries are kept
+	// per agent. 0 disables each — set both to 0 to keep knowledge forever.
+	KnowledgeTTLDays    int
+	KnowledgeKeepLatest int
+
 	// SecretKey is the base64-encoded 32-byte master key used to encrypt
 	// provider API keys at rest (AGENTICGO_SECRET_KEY). No default on purpose:
 	// when empty, a random key is generated once and persisted to
@@ -99,6 +107,11 @@ func Load() (*Config, error) {
 	cfg.ObservationKeepLatest = getEnvInt("AGENTICGO_OBSERVATION_KEEP", 200)
 	cfg.ObservationInject = getEnvInt("AGENTICGO_OBSERVATION_INJECT", 1)
 	cfg.KnowledgeInject = getEnvInt("AGENTICGO_KNOWLEDGE_INJECT", 25)
+	// Retention defaults for self-educated knowledge: keep entries up to 1 year
+	// old and cap at the newest 1000 per agent. Set either to 0 to disable that
+	// limit (e.g. TTL 0 = never expire by age, KEEP 0 = no count cap).
+	cfg.KnowledgeTTLDays = getEnvInt("AGENTICGO_KNOWLEDGE_TTL_DAYS", 365)
+	cfg.KnowledgeKeepLatest = getEnvInt("AGENTICGO_KNOWLEDGE_KEEP", 1000)
 	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
 
 	// No default: empty means "generate/persist a key under DataDir".

@@ -212,10 +212,19 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	}
 
 	// Retention: prune stale observations so recurring agents don't accumulate
-	// misleading historical state. Best-effort; failures are non-fatal.
+	// misleading historical state, and bound self-educated knowledge so a
+	// long-lived agent can't grow it without limit. Both are best-effort;
+	// failures are non-fatal. Each knob at 0 disables that limit.
 	if e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 {
 		cutoff := time.Now().AddDate(0, 0, -e.cfg.ObservationTTLDays).Unix()
 		_ = e.store.PruneObservations(ctx, agentKey, cutoff, e.cfg.ObservationKeepLatest)
+	}
+	if e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0 {
+		var cutoff int64 // 0 = no age-based prune
+		if e.cfg.KnowledgeTTLDays > 0 {
+			cutoff = time.Now().AddDate(0, 0, -e.cfg.KnowledgeTTLDays).Unix()
+		}
+		_ = e.store.PruneKnowledge(ctx, agentKey, cutoff, e.cfg.KnowledgeKeepLatest)
 	}
 
 	// Persist the user turn.
