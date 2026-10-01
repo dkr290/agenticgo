@@ -47,10 +47,11 @@ single static binary, in Docker, or on Kubernetes.
   - **Curated knowledge** — durable learnings, full-text searchable (SQLite FTS5) via
     the `memory_search` tool; only selectively recalled, not bulk-injected. The agent
     also saves durable facts itself via the `memory_save` tool, and entries can be
-    deleted from the Memory page. Self-educated knowledge is bounded by retention
-    (`AGENTICGO_KNOWLEDGE_TTL_DAYS` / `AGENTICGO_KNOWLEDGE_KEEP`, defaults 1 year /
-    newest 1000; `0` disables each) so a long-lived agent can't grow it without limit.
-    GUI-uploaded knowledge-base documents are a separate store and are never auto-pruned.
+    deleted from the Memory page. Self-educated knowledge can optionally be bounded by
+    retention (`AGENTICGO_KNOWLEDGE_TTL_DAYS` / `AGENTICGO_KNOWLEDGE_KEEP`, both `0` =
+    off by default; e.g. `365` / `1000`) so a long-lived agent can't grow it without
+    limit. GUI-uploaded knowledge-base documents are a separate store and are never
+    auto-pruned.
   - **Observations** — timestamped, time-bound findings (cluster state, etc.). Old ones
     are pruned by retention (`AGENTICGO_OBSERVATION_TTL_DAYS` / `AGENTICGO_OBSERVATION_KEEP`).
     How many recent ones are injected into the prompt each run is configurable — per agent
@@ -150,8 +151,8 @@ Health check: `curl http://localhost:8080/healthz`
 | `AGENTICGO_OBSERVATION_KEEP` | `200` | Max observations kept per agent |
 | `AGENTICGO_OBSERVATION_INJECT` | `1` | Default number of recent observations injected into an agent's prompt (1 = only the latest). Overridable per agent via `config.json` `observation_inject`. |
 | `AGENTICGO_KNOWLEDGE_INJECT` | `25` | How many recent curated-knowledge entries are injected into an agent's prompt (app-wide). |
-| `AGENTICGO_KNOWLEDGE_TTL_DAYS` | `365` | **Age-based retention** for self-educated knowledge: entries older than this many days are deleted on the next run. `0` = never expire by age (use when you don't want time-driven deletion). Affects only the agent's `knowledge` (self-educated learnings) — never the GUI-uploaded knowledge-base documents. |
-| `AGENTICGO_KNOWLEDGE_KEEP` | `1000` | **Count-based retention**: keep only the newest N self-educated knowledge entries per agent (older ones are deleted). `0` = no count cap. Bounds how much a long-lived agent can accumulate — set it and the table can never grow past N entries/agent. Set both this and TTL to `0` to keep everything forever. |
+| `AGENTICGO_KNOWLEDGE_TTL_DAYS` | `0` (off) | **Opt-in age-based retention** for self-educated knowledge. `0` = never expire by age (the default — nothing is deleted). Example: `365` deletes entries older than ~1 year on the next run. Affects only the agent's `knowledge` (self-educated learnings) — never the GUI-uploaded knowledge-base documents. |
+| `AGENTICGO_KNOWLEDGE_KEEP` | `0` (off) | **Opt-in count-based retention.** `0` = no cap (the default). Example: `1000` keeps only the newest 1000 entries per agent, deleting older ones — a hard ceiling so a long-lived agent can't grow the table without bound. Set either or both; both apply age-then-count. Leave both `0` to keep everything forever. |
 | `AGENTICGO_SYSTEM_PROMPT` | built-in | Base system prompt (prepended to every agent) |
 | `AGENTICGO_SECRET_KEY` | *(none)* | Base64-encoded 32-byte master key used to encrypt provider API keys at rest (`enc:v1:` values in `data/providers.json`). When unset, a random key is generated once and stored in `data/secret.key` (0600). Supply it via env (e.g. from a secrets manager) so the key never touches disk. Generate one with `openssl rand -base64 32`. **Warning:** changing (or losing) the key makes previously encrypted API keys undecryptable. |
 

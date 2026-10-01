@@ -125,10 +125,11 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
     background `Evolve` pass); `AddKnowledge` dedupes exact matches per agent and caps
     entries at 500 bytes. Entries carry IDs (`KnowledgeEntry`) and can be deleted from
     the Memory tab (`DELETE /api/agents/{k}/knowledge/{id}` → `store.DeleteKnowledge`).
-    Self-educated knowledge is retention-bounded (`AGENTICGO_KNOWLEDGE_TTL_DAYS` default
-    365 / `AGENTICGO_KNOWLEDGE_KEEP` default 1000; 0 disables each) via
-    `store.PruneKnowledge` on each run, so a long-lived agent can't grow it without
-    limit. This is separate from `knowledge_docs` (GUI-uploaded), which is never auto-pruned.
+    Self-educated knowledge can optionally be retention-bounded
+    (`AGENTICGO_KNOWLEDGE_TTL_DAYS` / `AGENTICGO_KNOWLEDGE_KEEP`, both default 0 = off;
+    e.g. 365 / 1000) via `store.PruneKnowledge` on each run, so a long-lived agent
+    can't grow it without limit when enabled. This is separate from `knowledge_docs`
+    (GUI-uploaded), which is never auto-pruned.
   - `observations` — high-churn, timestamped findings from recurring agents (e.g. a
     k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`).
     Recorded via the `record_observation` tool. How many recent observations are
