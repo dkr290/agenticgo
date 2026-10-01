@@ -70,6 +70,11 @@ type AgentConfig struct {
 	// built-in tools at all (the agent still gets the always-on core
 	// memory/docs tools and any enabled MCP tools).
 	EnabledBuiltinTools *[]string `json:"enabled_builtin_tools,omitempty"`
+	// ObservationInject overrides how many recent observations are injected
+	// into this agent's system prompt each run (e.g. a recurring monitor that
+	// should see the last few snapshots to diff against). nil = inherit the
+	// global AGENTICGO_OBSERVATION_INJECT default.
+	ObservationInject *int `json:"observation_inject,omitempty"`
 }
 
 // configFileName is where a per-agent LLM config is stored on disk.

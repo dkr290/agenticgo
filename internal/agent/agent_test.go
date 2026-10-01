@@ -324,6 +324,44 @@ func TestRunRegistryExecExtraCommands(t *testing.T) {
 	}
 }
 
+// TestObservationInjectResolution verifies the precedence: the agent's own
+// observation_inject override wins over the global env default; nil inherits.
+func TestObservationInjectResolution(t *testing.T) {
+	e, ar := newTestEngine(t)
+	e.cfg.ObservationInject = 3 // global default (AGENTICGO_OBSERVATION_INJECT)
+
+	ag, err := ar.Get("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.observationInject(ag); got != 3 {
+		t.Fatalf("nil override must inherit the global default, got %d", got)
+	}
+
+	// Per-agent override wins.
+	seven := 7
+	if _, err := ar.UpdateConfig("demo", agents.AgentConfig{ObservationInject: &seven}); err != nil {
+		t.Fatal(err)
+	}
+	ag, err = ar.Get("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.observationInject(ag); got != 7 {
+		t.Fatalf("agent override must win, got %d", got)
+	}
+
+	// 0 disables injection for that agent.
+	zero := 0
+	if _, err := ar.UpdateConfig("demo", agents.AgentConfig{ObservationInject: &zero}); err != nil {
+		t.Fatal(err)
+	}
+	ag, _ = ar.Get("demo")
+	if got := e.observationInject(ag); got != 0 {
+		t.Fatalf("0 must disable injection, got %d", got)
+	}
+}
+
 // newTestMCPManager returns an MCP manager with no servers (discovery catalog
 // empty); used to verify per-agent gating without a real MCP server.
 func newTestMCPManager(t *testing.T) *mcp.Manager {

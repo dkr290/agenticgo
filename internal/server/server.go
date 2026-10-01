@@ -34,10 +34,10 @@ import (
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
+	"github.com/dkr290/agenticgo/internal/cron"
 	"github.com/dkr290/agenticgo/internal/logger"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
-	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/skills"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
@@ -54,15 +54,15 @@ type Server struct {
 	tools     *tools.Registry
 	store     *store.Store
 	providers *providers.Store
-	scaffold  *scaffold.Store
+	cron      *cron.Scheduler
 	mcp       *mcp.Manager
 	http      *http.Server
 	log       logger.Logger
 }
 
 // New builds the server.
-func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.Registry, st *store.Store, ps *providers.Store, sc *scaffold.Store, mm *mcp.Manager) *Server {
-	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, scaffold: sc, mcp: mm, log: logger.Nop()}
+func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.Registry, st *store.Store, ps *providers.Store, cs *cron.Scheduler, mm *mcp.Manager) *Server {
+	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, cron: cs, mcp: mm, log: logger.Nop()}
 
 	mux := http.NewServeMux()
 

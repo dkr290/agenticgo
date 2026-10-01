@@ -322,6 +322,30 @@ func (s *Store) SearchKnowledge(ctx context.Context, agent, query string, limit 
 	return out, rows.Err()
 }
 
+// PruneKnowledge deletes knowledge entries older than olderThan (unix seconds)
+// and caps the total kept per agent at keepLatest, mirroring PruneObservations.
+// This is the retention control that stops a long-lived self-educating agent's
+// knowledge from growing without bound. A zero/negative olderThan skips the
+// age-based prune; a keepLatest <= 0 skips the count cap. The knowledge_ad
+// AFTER DELETE trigger keeps the FTS index in sync for every removed row.
+func (s *Store) PruneKnowledge(ctx context.Context, agent string, olderThan int64, keepLatest int) error {
+	if olderThan > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM knowledge WHERE agent = ? AND created_at < ?`, agent, olderThan); err != nil {
+			return fmt.Errorf("prune old knowledge: %w", err)
+		}
+	}
+	if keepLatest > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM knowledge WHERE agent = ? AND id NOT IN
+			 (SELECT id FROM knowledge WHERE agent = ? ORDER BY id DESC LIMIT ?)`,
+			agent, agent, keepLatest); err != nil {
+			return fmt.Errorf("cap knowledge: %w", err)
+		}
+	}
+	return nil
+}
+
 // --- Observations (high-churn, time-bound agent findings) ---
 
 // Observation is a single timestamped finding (e.g. a k8s cluster snapshot).

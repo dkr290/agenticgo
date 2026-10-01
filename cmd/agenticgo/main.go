@@ -15,11 +15,11 @@ import (
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
+	"github.com/dkr290/agenticgo/internal/cron"
 	"github.com/dkr290/agenticgo/internal/crypto"
 	"github.com/dkr290/agenticgo/internal/logger"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
-	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/server"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
@@ -82,9 +82,6 @@ func main() {
 	}
 	providerStore.SetLogger(lg)
 
-	// Scaffolding for not-yet-implemented features (cron).
-	scaff := scaffold.New()
-
 	// MCP server manager (data/mcp_servers.json). Connections are manual:
 	// use the Connect button on the MCP Servers page to spawn/dial a server
 	// and discover its tools, then enable them per agent (MCP Tools tab).
@@ -105,11 +102,26 @@ func main() {
 	engine := agent.New(cfg, reg, st, agentReg)
 	engine.SetProviderLookup(providerStore)
 	engine.SetMCPManager(mcpMgr)
-	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, scaff, mcpMgr)
+
+	// Cron scheduler (data/cron.json). Jobs run an agent on a schedule; each
+	// enabled job executes Engine.Run on its own cron-<id> session.
+	cronSched, err := cron.Open(filepath.Join(cfg.DataDir, "cron.json"), func(ctx context.Context, agentKey, session, message string) error {
+		_, err := engine.Run(ctx, agentKey, session, message, "", nil, nil)
+		return err
+	})
+	if err != nil {
+		log.Fatalf("cron: %v", err)
+	}
+	cronSched.SetLogger(lg)
+
+	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, cronSched, mcpMgr)
 	srv.SetLogger(lg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	cronSched.Start()
+	defer cronSched.Stop()
 
 	log.Printf("agenticgo starting")
 	if d := providerStore.Default(); d != nil {

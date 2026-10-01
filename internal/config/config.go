@@ -48,6 +48,25 @@ type Config struct {
 	ObservationTTLDays    int
 	ObservationKeepLatest int
 
+	// ObservationInject is the app-wide default for how many recent
+	// observations are injected into an agent's system prompt (1 = only the
+	// latest, the historical behavior). An agent may override it via
+	// config.json observation_inject (nil = inherit this default).
+	ObservationInject int
+
+	// KnowledgeInject is how many recent curated-knowledge entries are
+	// injected into an agent's system prompt (app-wide; not per-agent).
+	KnowledgeInject int
+
+	// Knowledge retention optionally bounds how much self-educated knowledge an
+	// agent accumulates (separate from the GUI-uploaded knowledge_docs, which
+	// are never auto-pruned). KnowledgeTTLDays prunes entries older than that
+	// many days; KnowledgeKeepLatest caps how many of the newest entries are
+	// kept per agent. Both default to 0 = disabled (keep forever); see Load for
+	// examples. This is opt-in retention for long-lived self-educating agents.
+	KnowledgeTTLDays    int
+	KnowledgeKeepLatest int
+
 	// SecretKey is the base64-encoded 32-byte master key used to encrypt
 	// provider API keys at rest (AGENTICGO_SECRET_KEY). No default on purpose:
 	// when empty, a random key is generated once and persisted to
@@ -87,6 +106,21 @@ func Load() (*Config, error) {
 	cfg.MaxAgentIterations = getEnvInt("AGENTICGO_MAX_ITERATIONS", 12)
 	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
 	cfg.ObservationKeepLatest = getEnvInt("AGENTICGO_OBSERVATION_KEEP", 200)
+	cfg.ObservationInject = getEnvInt("AGENTICGO_OBSERVATION_INJECT", 1)
+	cfg.KnowledgeInject = getEnvInt("AGENTICGO_KNOWLEDGE_INJECT", 25)
+	// Retention for self-educated knowledge — OPT-IN (both default 0 = disabled,
+	// i.e. keep everything forever, the historical behavior). Set them to bound
+	// how much a long-lived agent can accumulate. Examples:
+	//   AGENTICGO_KNOWLEDGE_TTL_DAYS=365  -> delete entries older than ~1 year
+	//                                        (time-driven expiry; use 0 if you
+	//                                        don't want time-based deletion)
+	//   AGENTICGO_KNOWLEDGE_KEEP=1000     -> keep only the newest 1000 entries
+	//                                        per agent (size cap)
+	// Either can be set alone; both together apply age-then-count. Never touches
+	// the GUI-uploaded knowledge-base documents (knowledge_docs), only the
+	// agent's self-educated knowledge.
+	cfg.KnowledgeTTLDays = getEnvInt("AGENTICGO_KNOWLEDGE_TTL_DAYS", 0)
+	cfg.KnowledgeKeepLatest = getEnvInt("AGENTICGO_KNOWLEDGE_KEEP", 0)
 	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
 
 	// No default: empty means "generate/persist a key under DataDir".

@@ -19,9 +19,9 @@ import (
 
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
+	"github.com/dkr290/agenticgo/internal/cron"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
-	"github.com/dkr290/agenticgo/internal/scaffold"
 	"github.com/dkr290/agenticgo/internal/skills"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
@@ -1294,7 +1294,7 @@ func (s *Server) registerMCPRoutes(api huma.API) {
 	}, false)
 }
 
-// --- Cron jobs (scaffolding) ---
+// --- Cron jobs ---
 
 func (s *Server) registerCronRoutes(api huma.API) {
 	tag := []string{"Cron"}
@@ -1304,10 +1304,10 @@ func (s *Server) registerCronRoutes(api huma.API) {
 		Method:      http.MethodGet,
 		Path:        "/api/cron",
 		Summary:     "List cron jobs",
-		Description: "Lists the scaffolding cron jobs (API/UI shape only; nothing executes yet).",
+		Description: "Lists the registered cron jobs with their live schedule state (whether armed and when they fire next).",
 		Tags:        tag,
-	}, func(ctx context.Context, _ *struct{}) (*struct{ Body []scaffold.CronJob }, error) {
-		return &struct{ Body []scaffold.CronJob }{Body: s.scaffold.ListCronJobs()}, nil
+	}, func(ctx context.Context, _ *struct{}) (*struct{ Body []cron.JobWithStatus }, error) {
+		return &struct{ Body []cron.JobWithStatus }{Body: s.cron.List()}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -1315,17 +1315,17 @@ func (s *Server) registerCronRoutes(api huma.API) {
 		Method:        http.MethodPost,
 		Path:          "/api/cron",
 		Summary:       "Add a cron job",
-		Description:   "Registers a cron job definition (scaffolding; not persisted or executed yet).",
+		Description:   "Registers a cron job (persisted to data/cron.json) and arms it in the scheduler. On each tick the agent runs the prompt on its own cron session.",
 		Tags:          tag,
 		DefaultStatus: http.StatusCreated,
 	}, func(ctx context.Context, input *struct {
-		Body scaffold.CronJob
-	}) (*struct{ Body *scaffold.CronJob }, error) {
-		created, err := s.scaffold.AddCronJob(input.Body)
+		Body cron.Job
+	}) (*struct{ Body *cron.Job }, error) {
+		created, err := s.cron.Add(input.Body)
 		if err != nil {
 			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
 		}
-		return &struct{ Body *scaffold.CronJob }{Body: created}, nil
+		return &struct{ Body *cron.Job }{Body: created}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -1333,12 +1333,12 @@ func (s *Server) registerCronRoutes(api huma.API) {
 		Method:      http.MethodDelete,
 		Path:        "/api/cron/{id}",
 		Summary:     "Delete a cron job",
-		Description: "Removes a scaffolding cron job.",
+		Description: "Removes a cron job (disarming it first).",
 		Tags:        tag,
 	}, func(ctx context.Context, input *struct {
 		ID string `path:"id" doc:"Cron job ID"`
 	}) (*statusOutput, error) {
-		if err := s.scaffold.DeleteCronJob(input.ID); err != nil {
+		if err := s.cron.Delete(input.ID); err != nil {
 			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil

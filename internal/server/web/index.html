@@ -293,6 +293,9 @@
           <div><label>Temperature (0.0–2.0)</label><input id="cf-temp" type="number" step="0.1" min="0" max="2" placeholder="provider default"></div>
           <div><label>Max Tokens</label><input id="cf-maxtok" type="number" step="1" min="1" placeholder="provider default"></div>
         </div>
+        <label>Observations injected</label>
+        <input id="cf-obsinject" type="number" step="1" min="0" placeholder="global default (AGENTICGO_OBSERVATION_INJECT)">
+        <div style="color:var(--muted); font-size:11.5px; margin-top:4px">How many recent observations (recorded via record_observation) are injected into this agent's prompt each run. Empty = global default. A recurring monitor that diffs run-over-run typically wants the last few, e.g. 5. 0 = none.</div>
         <label>Vision (images)</label>
         <select id="cf-vision">
           <option value="">Inherit from provider</option>
@@ -371,12 +374,12 @@
     </div>
   </div>
 
-  <!-- Cron (scaffolding) -->
+  <!-- Cron -->
   <div class="page" id="page-cron">
-    <div class="page-head"><h1>Cron</h1><div class="sub">Schedule agents to run on a timer. <span class="pill accent">Scaffolding — jobs are stored but not executed yet</span></div></div>
+    <div class="page-head"><h1>Cron</h1><div class="sub">Schedule agents to run on a timer. Enabled jobs run the agent on its own cron session and are persisted across restarts.</div></div>
     <div class="page-body">
       <div class="toolbar"><button id="cron-new">+ New Cron Job</button></div>
-      <table class="list"><thead><tr><th>Name</th><th>Schedule</th><th>Agent</th><th>Prompt</th><th></th></tr></thead>
+      <table class="list"><thead><tr><th>Name</th><th>Schedule</th><th>Agent</th><th>Prompt</th><th>Status</th><th></th></tr></thead>
       <tbody id="cron-tbody"></tbody></table>
       <div class="empty" id="cron-empty" style="display:none">No cron jobs yet.</div>
     </div>
@@ -395,7 +398,8 @@
       <div id="mem-results"></div>
       <h3 style="margin:20px 0 8px; font-size:14px">Curated knowledge</h3>
       <div id="mem-knowledge"></div>
-      <h3 style="margin:20px 0 8px; font-size:14px">Recent observations <span class="pill" title="Pruned by retention; only the latest is injected into prompts">time-bound</span></h3>
+      <h3 style="margin:20px 0 8px; font-size:14px">Recent observations <span class="pill" title="Pruned by retention; how many are injected into the prompt is configurable per agent (Config → Observations injected)">time-bound</span></h3>
+      <div id="mem-obs-note" style="color:var(--muted); font-size:11.5px; margin:0 0 6px"></div>
       <div id="mem-observations"></div>
     </div>
   </div>
@@ -1089,6 +1093,7 @@
     $('cf-model').value = c.model || '';
     $('cf-temp').value = c.temperature != null ? c.temperature : '';
     $('cf-maxtok').value = c.max_tokens != null ? c.max_tokens : '';
+    $('cf-obsinject').value = c.observation_inject != null ? c.observation_inject : '';
     $('cf-vision').value = c.vision == null ? '' : (c.vision ? 'true' : 'false');
     $('cf-saved').textContent = '';
   }
@@ -1099,11 +1104,13 @@
     const model = $('cf-model').value.trim();
     const temp = $('cf-temp').value;
     const maxtok = $('cf-maxtok').value;
+    const obsinject = $('cf-obsinject').value;
     const vision = $('cf-vision').value;
     if (prov) body.provider = prov;
     if (model) body.model = model;
     if (temp !== '') body.temperature = parseFloat(temp);
     if (maxtok !== '') body.max_tokens = parseInt(maxtok, 10);
+    if (obsinject !== '') body.observation_inject = parseInt(obsinject, 10);
     if (vision !== '') body.vision = (vision === 'true');
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/config', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -1275,8 +1282,12 @@
       $('cron-empty').style.display = (list && list.length) ? 'none' : '';
       (list||[]).forEach(j => {
         const tr = document.createElement('tr');
+        const status = !j.enabled ? '<span class="pill">disabled</span>'
+          : (j.scheduled ? '<span class="pill accent">armed' + (j.next_run ? ' · next ' + new Date(j.next_run).toLocaleString() : '') + '</span>'
+          : '<span class="pill">enabled</span>');
         tr.innerHTML = '<td class="namecell">' + esc(j.name) + '</td><td><code>' + esc(j.schedule) + '</code></td>' +
           '<td>' + esc(j.agent) + '</td><td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">' + esc(j.prompt) + '</td>' +
+          '<td style="font-size:12px; color:var(--muted)">' + status + '</td>' +
           '<td><button class="danger">Delete</button></td>';
         tr.querySelector('button').addEventListener('click', () =>
           api('/api/cron/' + j.id, { method:'DELETE' }).then(loadCron).catch(e => toast(e.message)));
@@ -1354,6 +1365,15 @@
       });
       card.appendChild(ul); box.appendChild(card);
     }).catch(()=>{});
+    // Show how many of these the agent actually sees in its prompt (Config →
+    // Observations injected; empty = the global AGENTICGO_OBSERVATION_INJECT
+    // default). The tab always lists the latest 100 stored.
+    api('/api/agents/' + encodeURIComponent(agent)).then(a => {
+      const oi = a && a.config && a.config.observation_inject;
+      $('mem-obs-note').textContent = oi != null
+        ? 'This agent sees the last ' + oi + ' in its prompt (per-agent override); showing latest 100 stored.'
+        : 'This agent sees the global default number in its prompt (set per-agent under Config → Observations injected); showing latest 100 stored.';
+    }).catch(() => { $('mem-obs-note').textContent = ''; });
     api('/api/agents/' + encodeURIComponent(agent) + '/observations').then(list => {
       $('mem-observations').innerHTML = (list && list.length)
         ? '<table class="list"><thead><tr><th style="width:150px">When</th><th>Observation</th></tr></thead><tbody>' +
