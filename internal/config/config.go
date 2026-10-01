@@ -48,6 +48,16 @@ type Config struct {
 	ObservationTTLDays    int
 	ObservationKeepLatest int
 
+	// ObservationInject is the app-wide default for how many recent
+	// observations are injected into an agent's system prompt (1 = only the
+	// latest, the historical behavior). An agent may override it via
+	// config.json observation_inject (nil = inherit this default).
+	ObservationInject int
+
+	// KnowledgeInject is how many recent curated-knowledge entries are
+	// injected into an agent's system prompt (app-wide; not per-agent).
+	KnowledgeInject int
+
 	// SecretKey is the base64-encoded 32-byte master key used to encrypt
 	// provider API keys at rest (AGENTICGO_SECRET_KEY). No default on purpose:
 	// when empty, a random key is generated once and persisted to
@@ -87,6 +97,8 @@ func Load() (*Config, error) {
 	cfg.MaxAgentIterations = getEnvInt("AGENTICGO_MAX_ITERATIONS", 12)
 	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
 	cfg.ObservationKeepLatest = getEnvInt("AGENTICGO_OBSERVATION_KEEP", 200)
+	cfg.ObservationInject = getEnvInt("AGENTICGO_OBSERVATION_INJECT", 1)
+	cfg.KnowledgeInject = getEnvInt("AGENTICGO_KNOWLEDGE_INJECT", 25)
 	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
 
 	// No default: empty means "generate/persist a key under DataDir".

@@ -48,13 +48,16 @@ single static binary, in Docker, or on Kubernetes.
     the `memory_search` tool; only selectively recalled, not bulk-injected. The agent
     also saves durable facts itself via the `memory_save` tool, and entries can be
     deleted from the Memory page.
-  - **Observations** — timestamped, time-bound findings (cluster state, etc.). Only the
-    *latest* is injected into prompts; old ones are pruned by retention
-    (`AGENTICGO_OBSERVATION_TTL_DAYS` / `AGENTICGO_OBSERVATION_KEEP`).
+  - **Observations** — timestamped, time-bound findings (cluster state, etc.). Old ones
+    are pruned by retention (`AGENTICGO_OBSERVATION_TTL_DAYS` / `AGENTICGO_OBSERVATION_KEEP`).
+    How many recent ones are injected into the prompt each run is configurable — per agent
+    (`config.json` `observation_inject`, Agents → Config) over the global
+    `AGENTICGO_OBSERVATION_INJECT` default — so a monitor can diff the last few snapshots.
 - **Self-evolution (simplified)** — an "Evolve" pass extracts durable learnings from a
   session into the agent's knowledge store, re-injected into its system prompt later.
-- **Scaffolding** — MCP Servers and Cron pages/endpoints store configuration but do not
-  connect/execute yet (Phase 3).
+- **Cron** — jobs are persisted to `data/cron.json` and executed by a real scheduler
+  (`robfig/cron`): each enabled job runs its agent on its own cron session. The Cron page
+  shows live status (armed / next run).
 
 ## Agent layout on disk
 
@@ -100,8 +103,9 @@ description: Search and synthesize web sources
 - [x] Phase 2d — **Huma API** (`danielgtaylor/huma/v2`): every REST route is a typed
       Huma operation, so the OpenAPI 3.1 spec (`/openapi.json`, `/openapi.yaml`) and
       the generated docs UI (`/docs`) are always in sync with the served API
-- [ ] Phase 3 — **MCP client** (`modelcontextprotocol/go-sdk`) to attach external tools
-      at runtime, gated by the same allow-list; cron scheduler executing stored jobs
+- [x] Phase 3 — **MCP client** (`modelcontextprotocol/go-sdk`) to attach external tools
+      at runtime, gated by the same allow-list; **cron scheduler** executing stored
+      jobs (`internal/cron`, persisted to `data/cron.json`)
 - [x] Phase 4 — SQLite memory + simplified self-evolution
 - [ ] Phase 5 — Dockerfile + Kubernetes manifests (Deployment + PVC + Service)
 
@@ -141,6 +145,8 @@ Health check: `curl http://localhost:8080/healthz`
 | `AGENTICGO_MAX_ITERATIONS` | `12` | Max agent loop iterations |
 | `AGENTICGO_OBSERVATION_TTL_DAYS` | `14` | Prune observations older than this |
 | `AGENTICGO_OBSERVATION_KEEP` | `200` | Max observations kept per agent |
+| `AGENTICGO_OBSERVATION_INJECT` | `1` | Default number of recent observations injected into an agent's prompt (1 = only the latest). Overridable per agent via `config.json` `observation_inject`. |
+| `AGENTICGO_KNOWLEDGE_INJECT` | `25` | How many recent curated-knowledge entries are injected into an agent's prompt (app-wide). |
 | `AGENTICGO_SYSTEM_PROMPT` | built-in | Base system prompt (prepended to every agent) |
 | `AGENTICGO_SECRET_KEY` | *(none)* | Base64-encoded 32-byte master key used to encrypt provider API keys at rest (`enc:v1:` values in `data/providers.json`). When unset, a random key is generated once and stored in `data/secret.key` (0600). Supply it via env (e.g. from a secrets manager) so the key never touches disk. Generate one with `openssl rand -base64 32`. **Warning:** changing (or losing) the key makes previously encrypted API keys undecryptable. |
 
@@ -214,9 +220,14 @@ Health check: `curl http://localhost:8080/healthz`
 - `DELETE /api/providers/{name}` — delete.
 - `POST /api/providers/{name}/test` — test the connection (lists models).
 
-### Scaffolding (stored, not yet functional)
+### MCP servers
 - `GET|POST /api/mcp-servers`, `DELETE /api/mcp-servers/{id}` — MCP server configs.
-- `GET|POST /api/cron`, `DELETE /api/cron/{id}` — cron job configs.
+- `POST /api/mcp-servers/{id}/connect|disconnect` — connect/discover tools, or disconnect.
+
+### Cron
+- `GET /api/cron` — list jobs (with live `scheduled`/`next_run` status).
+- `POST /api/cron` — add a job. Body: `{ "name": "...", "schedule": "*/5 * * * *", "agent": "k8s", "prompt": "...", "enabled": true }`.
+- `DELETE /api/cron/{id}` — delete a job.
 
 ### Self-evolution
 - `POST /api/evolve` — body `{ "agent": "researcher", "session": "default" }`, runs a
@@ -236,7 +247,8 @@ agenticgo/
 │   ├── tools/            # tool registry + filesystem + exec tools
 │   ├── agent/            # per-agent tool-use loop + self-evolution
 │   ├── store/            # SQLite (conversations + knowledge, per-agent)
-│   ├── scaffold/         # in-memory MCP-server + cron-job scaffolding
+│   ├── mcp/              # MCP client: server registry, discovery, CallTool
+│   ├── cron/             # cron scheduler: JSON-persisted jobs + robfig/cron runner
 │   └── server/           # HTTP + WebSocket + embedded SPA
 │       └── web/          # sidebar SPA (embedded via go:embed)
 ├── go.mod                # module github.com/dkr290/agenticgo

@@ -121,14 +121,32 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 		b.WriteString("\n")
 	}
 
-	// Latest observation (e.g. from a recurring monitor). Only the most recent
-	// snapshot is injected — stale observations are pruned and searchable, never
+	// Recent observations (e.g. from a recurring monitor). How many are
+	// injected is configurable per agent (observation_inject) over the global
+	// default — a monitor that diffs run-over-run wants the last few snapshots,
+	// not just the latest. Stale observations are pruned by retention and never
 	// bulk-loaded, so outdated state does not mislead the model.
-	if obs, err := e.store.LatestObservation(ctx, ag.Key); err == nil && obs != nil {
-		b.WriteString("## Latest Observation\n")
-		b.WriteString("Most recent recorded state (may be outdated — re-check before acting on it):\n")
-		b.WriteString(strings.TrimSpace(obs.Content))
-		b.WriteString("\n\n")
+	switch n := e.observationInject(ag); {
+	case n <= 0:
+		// Observations disabled for this agent.
+	case n == 1:
+		if obs, err := e.store.LatestObservation(ctx, ag.Key); err == nil && obs != nil {
+			b.WriteString("## Latest Observation\n")
+			b.WriteString("Most recent recorded state (may be outdated — re-check before acting on it):\n")
+			b.WriteString(strings.TrimSpace(obs.Content))
+			b.WriteString("\n\n")
+		}
+	default:
+		if obs, err := e.store.ListObservations(ctx, ag.Key, n); err == nil && len(obs) > 0 {
+			b.WriteString("## Recent Observations\n")
+			b.WriteString("Most recent recorded states, newest first (may be outdated — re-check before acting on them):\n")
+			for _, o := range obs {
+				b.WriteString("- ")
+				b.WriteString(strings.TrimSpace(o.Content))
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	// Extra (dangerous) exec commands this agent has enabled, beyond the safe
@@ -146,10 +164,11 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 		b.WriteString("\n")
 	}
 
-	// Curated knowledge (self-evolution memory), per agent. Capped and labelled
-	// as historical; the agent should use memory_search to find relevant facts
-	// rather than treating everything here as current.
-	if knowledge, err := e.store.Knowledge(ctx, ag.Key, 25); err == nil && len(knowledge) > 0 {
+	// Curated knowledge (self-evolution memory), per agent. Capped (env
+	// AGENTICGO_KNOWLEDGE_INJECT) and labelled as historical; the agent should
+	// use memory_search to find relevant facts rather than treating everything
+	// here as current.
+	if knowledge, err := e.store.Knowledge(ctx, ag.Key, e.cfg.KnowledgeInject); err == nil && len(knowledge) > 0 {
 		b.WriteString("## Accumulated Knowledge\n")
 		b.WriteString("Learnings captured from prior sessions. These are historical and may be " +
 			"outdated — use the memory_search tool to look up specifics, and verify " +
@@ -421,6 +440,16 @@ func (e *Engine) workspaceFor(agentKey string) string {
 		return e.cfg.WorkspaceDir
 	}
 	return workspace
+}
+
+// observationInject resolves how many recent observations to inject into the
+// agent's system prompt: the agent's own override wins, else the global
+// AGENTICGO_OBSERVATION_INJECT default. 0 disables injection.
+func (e *Engine) observationInject(ag *agents.Agent) int {
+	if ag.Config.ObservationInject != nil {
+		return *ag.Config.ObservationInject
+	}
+	return e.cfg.ObservationInject
 }
 
 // builtinAllowed resolves which built-in tools the agent may use: the global

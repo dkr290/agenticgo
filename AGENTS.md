@@ -16,8 +16,8 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
   a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens/vision,
-  nil = inherit, plus `enabled_skills`, `enabled_tools`, `enabled_commands` and
-  `enabled_builtin_tools`), a per-agent `images/`
+  nil = inherit, plus `enabled_skills`, `enabled_tools`, `enabled_commands`,
+  `enabled_builtin_tools` and `observation_inject`), a per-agent `images/`
   dir (reference pictures/screenshots for vision models), and a per-agent
   `workspace/` (tool jail).
   Files that don't exist yet are still listed (empty) in the UI so they can be created.
@@ -42,7 +42,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
   Pages: Overview, Chat, Chat History, Agents (per-agent Files/Skills/MCP Tools/
   Knowledge/Images/Config tabs), Skills, Built-in Tools, MCP Servers,
-  Cron (scaffold), Providers. Past conversations live on the dedicated
+  Cron, Providers. Past conversations live on the dedicated
   **Chat History** page (not the sidebar, so long histories don't bloat the
   nav): a table of all sessions (`GET /api/sessions`) with an agent dropdown
   and a name filter, click a row to reopen it in Chat with history loaded,
@@ -126,9 +126,12 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
     entries at 500 bytes. Entries carry IDs (`KnowledgeEntry`) and can be deleted from
     the Memory tab (`DELETE /api/agents/{k}/knowledge/{id}` → `store.DeleteKnowledge`).
   - `observations` — high-churn, timestamped findings from recurring agents (e.g. a
-    k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`)
-    and only the *latest* is injected into prompts, so stale state doesn't mislead the
-    model. Recorded via the `record_observation` tool.
+    k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`).
+    Recorded via the `record_observation` tool. How many recent observations are
+    injected into the prompt each run is configurable: per agent via `config.json`
+    `observation_inject` (nil = inherit), else the global `AGENTICGO_OBSERVATION_INJECT`
+    (default 1 = only the latest; 0 = none; N>1 renders a `## Recent Observations`
+    block, newest first) — a monitor that diffs run-over-run uses the last few.
   These **core agent tools** (`memory_search`, `memory_save`, `record_observation`,
   `search_docs`, `read_doc`) are built per-run in `Engine.runRegistry` (scoped to the
   agent) and registered unconditionally — they are not gated by
@@ -143,16 +146,19 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   from the registry is invisible to the model and rejected at dispatch.
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
-- **Scaffolding**: `internal/scaffold` holds the in-memory cron-job registry backing
-  the UI/API shape only — nothing executes yet. (MCP servers graduated from
-  scaffolding to a real client in `internal/mcp`.)
+- **Cron**: `internal/cron` is a real scheduler — jobs are persisted to
+  `data/cron.json`, armed via `robfig/cron`, and each enabled job runs
+  `Engine.Run` with the job's prompt on its own `cron-<id>` session. The Cron
+  page shows live status (armed/next run). (Cron graduated from the old
+  in-memory `internal/scaffold` to a real executor, like MCP did before it.)
 
 ## Architecture map (how it fits together)
 
 - `cmd/agenticgo/main.go` — wiring: config → agents.Registry (no agent is
   seeded; agents are created from the UI once a provider is configured) →
   store → llm.Provider → providers.Store (not seeded; created from the UI) →
-  mcp.Manager + scaffold.Store → tools.Registry → agent.Engine → server.
+  mcp.Manager + cron.Scheduler → tools.Registry → agent.Engine → server.
+  The cron scheduler is started after the engine exists and stopped on shutdown.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
   `AgentsDir`. `Agent.SystemPrompt()` composes context files. `Registry.Create`
   seeds the initial context files from `internal/agenttemplates`.
@@ -167,8 +173,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   go-sdk/mcp`, stdio `CommandTransport` + HTTP `StreamableClientTransport`).
 - `internal/providers` — named OpenAI-compatible provider configs in
   `data/providers.json`; `GetLLM(name)` resolves names (empty = default).
-- `internal/scaffold` — in-memory cron-job registry (not persisted, not
-  executed — API/UI shape only).
+- `internal/cron` — cron scheduler: JSON-persisted job registry
+  (`data/cron.json`), `robfig/cron` for scheduling, each enabled job runs
+  `Engine.Run` on its own `cron-<id>` session.
 - `internal/agent` — `Engine` resolves an agent, builds the system prompt
   (base + context files + skills + per-agent knowledge) and runs the tool loop,
   persisting turns under `(agent, session)`. `SetProviderLookup` enables
@@ -198,9 +205,10 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 
 ```
 data/
-  agenticgo.db                 # SQLite (messages + knowledge, per-agent)
+  agenticgo.db                 # SQLite (messages + knowledge + observations, per-agent)
   providers.json               # named OpenAI-compatible provider configs
   mcp_servers.json             # MCP server definitions (MCP tools)
+  cron.json                    # cron job definitions (persisted, executed by internal/cron)
   workspace/                   # fallback tool jail
   skills/                      # GLOBAL skills library (upload once; enabled per agent)
     <skill>/SKILL.md
@@ -211,6 +219,7 @@ data/
       config.json                 # per-agent LLM settings + enabled_skills
                                   #   + enabled_tools (MCP tools)
                                   #   + enabled_commands (extra dangerous exec cmds)
+                                  #   + observation_inject (recent-observation count)
       images/                  # reference images for vision models (Images tab)
       workspace/               # per-agent tool jail
 ```
@@ -288,7 +297,7 @@ curl -X POST localhost:18099/api/chat \
 - `internal/providers/providers.go` — named provider configs (JSON store)
 - `internal/crypto/crypto.go` — AES-256-GCM encryption of secrets at rest (`AGENTICGO_SECRET_KEY` or `data/secret.key`)
 - `internal/logger/logger.go` — minimal `Logger` interface + slog backend (debug via `AGENTICGO_DEBUG`)
-- `internal/scaffold/scaffold.go` — in-memory cron-job scaffolding
+- `internal/cron/cron.go` — cron scheduler: JSON-persisted jobs + `robfig/cron` runner
 - `internal/mcp/mcp.go` — MCP client manager (server registry, discovery, `CallTool`)
 - `internal/llm/openai.go` — OpenAI-compatible provider on the official SDK
   (streaming + tool calls); `openai.go.bak` = pre-SDK reference copy (not compiled)
