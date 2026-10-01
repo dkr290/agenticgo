@@ -227,6 +227,116 @@ func (t *searchDocsTool) Call(ctx context.Context, args json.RawMessage) (string
 	return strings.TrimSpace(b.String()), nil
 }
 
+// ImageLister lists the images available for an agent.
+type ImageLister func(ctx context.Context) ([]string, error)
+
+// ImageFetcher reads one agent image and returns its base64 data-URL.
+// The engine uses this to inject the image into the LLM turn.
+type ImageFetcher func(ctx context.Context, name string) (dataURL string, err error)
+
+// ImageSink collects image data-URLs for injection into the next LLM turn.
+type ImageSink interface {
+	// AddImage records an image data-URL to be injected before the next LLM call.
+	AddImage(dataURL string)
+	// DrainImages returns all collected image data-URLs and clears the buffer.
+	DrainImages() []string
+}
+
+// listAgentImagesTool lists the images available in the agent's images directory.
+// It lets the agent discover what reference images exist so it can fetch one
+// with fetch_agent_image when it needs visual context.
+type listAgentImagesTool struct {
+	list ImageLister
+}
+
+// NewListAgentImages creates the list_agent_images tool from a lister function.
+func NewListAgentImages(list ImageLister) Tool {
+	return &listAgentImagesTool{list: list}
+}
+
+func (t *listAgentImagesTool) Name() string { return "list_agent_images" }
+func (t *listAgentImagesTool) Description() string {
+	return "List the reference images available for this agent. " +
+		"Use fetch_agent_image with the image name to retrieve an image."
+}
+func (t *listAgentImagesTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+		"required":   []string{},
+	}
+}
+
+func (t *listAgentImagesTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	names, err := t.list(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(names) == 0 {
+		return "No reference images available.", nil
+	}
+	var b strings.Builder
+	b.WriteString("Available reference images (use fetch_agent_image to retrieve one):\n")
+	for _, n := range names {
+		b.WriteString("- ")
+		b.WriteString(n)
+		b.WriteString("\n")
+	}
+	return strings.TrimSpace(b.String()), nil
+}
+
+// fetchAgentImageTool retrieves one agent image by name and injects it into
+// the next LLM turn via the ImageSink. The model can actually see the image
+// (not just the data-URL string) because the engine attaches it as an
+// image_url content part. Returns a confirmation string.
+type fetchAgentImageTool struct {
+	fetch ImageFetcher
+	sink  ImageSink
+}
+
+// NewFetchAgentImage creates the fetch_agent_image tool from a fetcher and
+// an ImageSink. The sink collects images for injection into the next turn.
+func NewFetchAgentImage(fetch ImageFetcher, sink ImageSink) Tool {
+	return &fetchAgentImageTool{fetch: fetch, sink: sink}
+}
+
+func (t *fetchAgentImageTool) Name() string { return "fetch_agent_image" }
+func (t *fetchAgentImageTool) Description() string {
+	return "Fetch a reference image by its name (from list_agent_images results) " +
+		"and make it available to you in the next turn. Use this when you need " +
+		"visual context from a previously stored image."
+}
+func (t *fetchAgentImageTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{
+				"type":        "string",
+				"description": "The image filename from list_agent_images.",
+			},
+		},
+		"required": []string{"name"},
+	}
+}
+
+func (t *fetchAgentImageTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return "", fmt.Errorf("name must not be empty")
+	}
+	dataURL, err := t.fetch(ctx, in.Name)
+	if err != nil {
+		return "", err
+	}
+	t.sink.AddImage(dataURL)
+	return fmt.Sprintf("Image %q fetched and will be available in the next turn.", in.Name), nil
+}
+
 // CoreTool is the metadata (name + description) of an always-on built-in
 // agent capability. These are the per-run memory/knowledge tools the engine
 // wires for every agent — not the allow-listed filesystem/exec tools in the
@@ -248,6 +358,8 @@ func CoreTools() []CoreTool {
 		NewRecordObservation(nil, ""),
 		NewSearchDocs(nil),
 		NewReadDoc(nil),
+		NewListAgentImages(nil),
+		NewFetchAgentImage(nil, nil),
 	}
 	out := make([]CoreTool, 0, len(probes))
 	for _, t := range probes {

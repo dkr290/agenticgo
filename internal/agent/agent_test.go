@@ -65,7 +65,7 @@ func registryFor(t *testing.T, e *Engine, ar *agents.Registry, agentKey string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, err := e.runRegistry(ag)
+	reg, _, err := e.runRegistry(ag)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,8 @@ func TestRunRegistryBuiltinToolsInherit(t *testing.T) {
 	reg := registryFor(t, e, ar, "demo")
 	names := specNames(reg)
 	for _, want := range []string{"read_file", "write_file", "list_files", "exec",
-		"memory_search", "memory_save", "record_observation", "search_docs", "read_doc"} {
+		"memory_search", "memory_save", "record_observation", "search_docs", "read_doc",
+		"list_agent_images", "fetch_agent_image"} {
 		if !names[want] {
 			t.Errorf("inherited registry missing %q (got %v)", want, names)
 		}

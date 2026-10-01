@@ -8,10 +8,12 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dkr290/agenticgo/internal/agents"
@@ -116,6 +118,21 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 		for _, d := range docs {
 			b.WriteString("- ")
 			b.WriteString(strings.TrimSpace(d.Title))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Reference images stored for this agent. List names so the agent knows
+	// what images exist; content is fetched via list_agent_images + fetch_agent_image.
+	if images, err := e.agents.ListImages(ag.Key); err == nil && len(images) > 0 {
+		b.WriteString("## Reference Images\n")
+		b.WriteString("Reference images are available. Use the list_agent_images tool to " +
+			"see what images exist, then fetch_agent_image with the image name to " +
+			"retrieve one before answering on these topics:\n")
+		for _, im := range images {
+			b.WriteString("- ")
+			b.WriteString(strings.TrimSpace(im.Name))
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
@@ -260,7 +277,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	// It composes the always-on core memory/docs tools (scoped to this agent),
 	// the built-in fs/exec tools (jailed to the agent's own workspace), and the
 	// MCP tools this agent has enabled.
-	reg, err := e.runRegistry(ag)
+	reg, sink, err := e.runRegistry(ag)
 	if err != nil {
 		return "", fmt.Errorf("build tool registry: %w", err)
 	}
@@ -344,6 +361,17 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 				Name:       tc.Name,
 			})
 		}
+
+		// Drain any images fetched by fetch_agent_image and inject them as a
+		// user message so the model can actually see them in the next LLM turn.
+		if imgs := sink.DrainImages(); len(imgs) > 0 {
+			messages = append(messages, llm.Message{
+				Role:    llm.RoleUser,
+				Content: "",
+				Images:  imgs,
+			})
+		}
+
 		// Loop: let the model observe tool results and continue.
 	}
 
@@ -366,7 +394,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 // and specs can never drift from dispatch, which the old callTool switch
 // allowed. Tools absent from the registry are invisible to the model and
 // rejected by Registry.Call, so per-agent gating is enforced by construction.
-func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
+func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, error) {
 	// The registry itself allows everything registered into it; gating happens
 	// when composing it (below). This keeps the always-on core tools and the
 	// per-agent MCP tools out of the global AGENTICGO_TOOL_ALLOWLIST, which
@@ -379,6 +407,13 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 	registry.Register(tools.NewRecordObservation(e.store, ag.Key))
 	registry.Register(tools.NewSearchDocs(e.docSearcher(ag.Key)))
 	registry.Register(tools.NewReadDoc(e.docReader(ag.Key)))
+	registry.Register(tools.NewListAgentImages(e.imageLister(ag.Key)))
+
+	// Image sink: collects images fetched by fetch_agent_image so the engine
+	// can inject them into the next LLM turn (the model can actually see them,
+	// not just the data-URL string).
+	sink := newImageSink()
+	registry.Register(tools.NewFetchAgentImage(e.imageFetcher(ag.Key), sink))
 
 	// Built-in filesystem tools, jailed to the agent's workspace. The global
 	// AGENTICGO_TOOL_ALLOWLIST is the ceiling; the agent may narrow it further
@@ -389,21 +424,21 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 	if builtin["read_file"] {
 		t, err := tools.NewReadFile(workspace)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		registry.Register(t)
 	}
 	if builtin["write_file"] {
 		t, err := tools.NewWriteFile(workspace)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		registry.Register(t)
 	}
 	if builtin["list_files"] {
 		t, err := tools.NewListFiles(workspace)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		registry.Register(t)
 	}
@@ -438,7 +473,7 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 		}
 	}
 
-	return registry, nil
+	return registry, nil, nil
 }
 
 // workspaceFor resolves the agent's workspace jail, falling back to the
@@ -580,6 +615,61 @@ func (e *Engine) docReader(agentKey string) tools.DocReader {
 	}
 }
 
+// imageLister adapts agents.ListImages into a tools.ImageLister for an agent.
+// Returns just the filenames so the agent can follow up with fetch_agent_image.
+func (e *Engine) imageLister(agentKey string) tools.ImageLister {
+	return func(ctx context.Context) ([]string, error) {
+		images, err := e.agents.ListImages(agentKey)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(images))
+		for _, im := range images {
+			names = append(names, im.Name)
+		}
+		return names, nil
+	}
+}
+
+// imageFetcher adapts agents.ReadImage into a tools.ImageFetcher for an agent.
+// It reads the raw bytes, converts them to a base64 data-URL, and returns it.
+func (e *Engine) imageFetcher(agentKey string) tools.ImageFetcher {
+	return func(ctx context.Context, name string) (string, error) {
+		data, mime, err := e.agents.ReadImage(agentKey, name)
+		if err != nil {
+			return "", err
+		}
+		return encodeDataURL(mime, data), nil
+	}
+}
+
+// imageSink is a thread-safe buffer that collects image data-URLs fetched by
+// the fetch_agent_image tool during an iteration. After all tool calls complete,
+// the engine drains the buffer and injects the images into the next LLM turn
+// so the model can actually see them (not just the data-URL string).
+type imageSink struct {
+	mu    sync.Mutex
+	imgs  []string
+}
+
+func newImageSink() *imageSink {
+	return &imageSink{}
+}
+
+func (s *imageSink) AddImage(dataURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.imgs = append(s.imgs, dataURL)
+}
+
+func (s *imageSink) DrainImages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	imgs := s.imgs
+	s.imgs = nil
+	return imgs
+}
+
 // Evolve summarizes the session and appends learnings to the agent's knowledge
 // store. This is the simplified self-evolution: a background pass extracts
 // durable facts/preferences from the transcript for future prompts. It uses the
@@ -648,4 +738,10 @@ func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
 		}
 	}
 	return nil
+}
+
+// encodeDataURL converts raw image bytes into a base64 data-URL with the
+// given MIME type, matching the format the LLM provider expects.
+func encodeDataURL(mime string, data []byte) string {
+	return fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(data))
 }
