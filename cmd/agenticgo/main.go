@@ -123,6 +123,12 @@ func main() {
 	cronSched.Start()
 	defer cronSched.Stop()
 
+	// Background retention sweep: periodically expire stale knowledge and
+	// observations for ALL agents, including idle ones (the per-Run prune is
+	// lazy and only fires when an agent runs). Starts only when retention is
+	// configured (some TTL/Keep knob non-zero); stops with the shared ctx.
+	engine.StartRetentionSweeper(ctx)
+
 	log.Printf("agenticgo starting")
 	if d := providerStore.Default(); d != nil {
 		log.Printf("  llm:       %s @ %s (model %s)", d.Name, d.BaseURL, d.Model)

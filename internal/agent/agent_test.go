@@ -254,6 +254,49 @@ func TestRunRegistryBuiltinToolsInherit(t *testing.T) {
 	}
 }
 
+// Regression test: runRegistry must return the live imageSink so Run can drain
+// images fetched by fetch_agent_image and inject them into the next LLM turn.
+// Previously it returned a nil sink, so a fetched image never reached the model
+// in a fresh conversation (only directly-attached images did) and the model
+// hallucinated the content. Here we verify an image fetched via the tool lands
+// in the returned sink.
+func TestRunRegistryFetchAgentImageReachesSink(t *testing.T) {
+	e, ar := newTestEngine(t)
+
+	// Store a reference image for the agent (minimal PNG bytes; content is
+	// irrelevant, only that it is a valid, readable image file).
+	if _, err := ar.SaveImage("demo", "pic.png", []byte("\x89PNG\r\n\x1a\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	ag, err := ar.Get("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, sink, err := e.runRegistry(ag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sink == nil {
+		t.Fatal("runRegistry must return the live image sink, not nil")
+	}
+
+	// The agent sees the image name and fetches it by name.
+	if _, err := reg.Call(context.Background(), "fetch_agent_image", json.RawMessage(`{"name":"pic.png"}`)); err != nil {
+		t.Fatalf("fetch_agent_image: %v", err)
+	}
+
+	// The engine must be able to drain the fetched image for injection into the
+	// next LLM turn.
+	imgs := sink.DrainImages()
+	if len(imgs) != 1 {
+		t.Fatalf("expected 1 fetched image in sink, got %d", len(imgs))
+	}
+	if !strings.HasPrefix(imgs[0], "data:image/png;base64,") {
+		t.Fatalf("expected a png data-URL, got %q", imgs[0])
+	}
+}
+
 func TestRunRegistryBuiltinToolsNarrowed(t *testing.T) {
 	e, ar := newTestEngine(t)
 
@@ -360,6 +403,137 @@ func TestObservationInjectResolution(t *testing.T) {
 	ag, _ = ar.Get("demo")
 	if got := e.observationInject(ag); got != 0 {
 		t.Fatalf("0 must disable injection, got %d", got)
+	}
+}
+
+// fixedProvider returns a canned assistant reply, used to drive Evolve without
+// a network call.
+type fixedProvider struct{ reply string }
+
+func (p fixedProvider) ChatCompletion(context.Context, llm.ChatRequest, llm.StreamFunc) (llm.Message, error) {
+	return llm.Message{Role: llm.RoleAssistant, Content: p.reply}, nil
+}
+func (p fixedProvider) Name() string  { return "fixed" }
+func (p fixedProvider) Model() string { return "fixed" }
+
+type fixedLookup struct{ p llm.Provider }
+
+func (l fixedLookup) GetLLM(string) (llm.Provider, error) { return l.p, nil }
+
+// Regression test: Evolve must skip duplicate learnings and keep saving the
+// rest. Previously it returned ErrKnowledgeDuplicate on the first repeat and
+// aborted the whole pass, silently dropping any new facts listed after it.
+func TestEvolveSkipsDuplicatesAndKeepsRest(t *testing.T) {
+	e, _ := newTestEngine(t)
+	ctx := context.Background()
+
+	// Pre-seed one fact so Evolve's extraction hits a duplicate mid-list.
+	if err := e.store.AddKnowledge(ctx, "demo", "user prefers concise answers"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The model re-extracts the known fact plus a brand-new one after it.
+	e.SetProviderLookup(fixedLookup{p: fixedProvider{reply: "- user prefers concise answers\n- deploys happen on Fridays\n"}})
+
+	// Enough history for Evolve to consider the session worth learning from.
+	for i := 0; i < 4; i++ {
+		if err := e.store.AppendMessage(ctx, "demo", "s1", "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := e.Evolve(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Evolve must not fail on a duplicate extraction: %v", err)
+	}
+
+	entries, err := e.store.Knowledge(ctx, "demo", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, en := range entries {
+		got[en.Content] = true
+	}
+	if !got["user prefers concise answers"] {
+		t.Errorf("pre-seeded fact missing, got %v", got)
+	}
+	if !got["deploys happen on Fridays"] {
+		t.Errorf("new fact after the duplicate must still be saved, got %v", got)
+	}
+	if len(entries) != 2 {
+		t.Errorf("duplicate must not be re-inserted, got %d entries: %v", len(entries), got)
+	}
+}
+
+// TestRetentionEnabledGating verifies the sweeper only makes sense (and only
+// starts) when at least one retention knob is non-zero. With all of them at 0
+// there is nothing to expire, so retention is disabled entirely.
+func TestRetentionEnabledGating(t *testing.T) {
+	e, _ := newTestEngine(t)
+
+	// All knobs zero => nothing to expire.
+	e.cfg.ObservationTTLDays, e.cfg.ObservationKeepLatest = 0, 0
+	e.cfg.KnowledgeTTLDays, e.cfg.KnowledgeKeepLatest = 0, 0
+	if e.retentionEnabled() {
+		t.Fatal("all knobs at 0 must disable retention")
+	}
+
+	// Any single knob non-zero => retention is on.
+	for _, set := range []func(){
+		func() { e.cfg.KnowledgeTTLDays = 365 },
+		func() { e.cfg.KnowledgeKeepLatest = 1000 },
+		func() { e.cfg.ObservationTTLDays = 14 },
+		func() { e.cfg.ObservationKeepLatest = 200 },
+	} {
+		e.cfg.ObservationTTLDays, e.cfg.ObservationKeepLatest = 0, 0
+		e.cfg.KnowledgeTTLDays, e.cfg.KnowledgeKeepLatest = 0, 0
+		set()
+		if !e.retentionEnabled() {
+			t.Fatal("a single non-zero knob must enable retention")
+		}
+	}
+}
+
+// TestRetentionSweeperSweepsAllAgents verifies the background sweeper applies
+// the retention limits to every agent — including an idle one that never runs
+// (whose rows the lazy per-Run prune would otherwise never touch).
+func TestRetentionSweeperSweepsAllAgents(t *testing.T) {
+	e, ar := newTestEngine(t)
+	ctx := context.Background()
+
+	// A second agent that never runs.
+	if _, err := ar.Create("idle", "Idle", "never runs", "", agents.AgentConfig{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Knowledge count cap: keep newest 2. Seed 3 facts for each agent.
+	e.cfg.KnowledgeKeepLatest = 2
+	for _, key := range []string{"demo", "idle"} {
+		for i := 1; i <= 3; i++ {
+			if err := e.store.AddKnowledge(ctx, key, key+" fact "+string(rune('0'+i))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Run the sweep synchronously (one pass), as the goroutine would on tick.
+	agents, err := ar.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ag := range agents {
+		e.pruneRetention(ctx, ag.Key)
+	}
+
+	// Both agents — including the idle one — are capped to the newest 2.
+	for _, key := range []string{"demo", "idle"} {
+		got, err := e.store.Knowledge(ctx, key, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("agent %q must be capped to 2 entries, got %d (%v)", key, len(got), got)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -200,6 +201,65 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 	return strings.TrimSpace(b.String())
 }
 
+// pruneRetention applies the configured retention limits for one agent:
+// age-based expiry (TTL) and/or a count cap on the newest entries, for both
+// observations and self-educated knowledge. Best-effort — failures are
+// non-fatal. Each knob at 0 disables that limit. Shared by Run (lazy, per
+// running agent) and StartRetentionSweeper (background, all agents).
+func (e *Engine) pruneRetention(ctx context.Context, agentKey string) {
+	if e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 {
+		cutoff := time.Now().AddDate(0, 0, -e.cfg.ObservationTTLDays).Unix()
+		_ = e.store.PruneObservations(ctx, agentKey, cutoff, e.cfg.ObservationKeepLatest)
+	}
+	if e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0 {
+		var cutoff int64 // 0 = no age-based prune
+		if e.cfg.KnowledgeTTLDays > 0 {
+			cutoff = time.Now().AddDate(0, 0, -e.cfg.KnowledgeTTLDays).Unix()
+		}
+		_ = e.store.PruneKnowledge(ctx, agentKey, cutoff, e.cfg.KnowledgeKeepLatest)
+	}
+}
+
+// retentionEnabled reports whether any retention knob is non-zero. When all
+// are 0 there is nothing to expire, so neither Run nor the sweeper prunes.
+func (e *Engine) retentionEnabled() bool {
+	return e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 ||
+		e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0
+}
+
+// StartRetentionSweeper launches a background goroutine that periodically
+// applies the retention limits to EVERY agent, so expired knowledge and
+// observations are deleted on a schedule even for agents that are idle (the
+// lazy per-Run prune only fires when an agent actually runs). It returns
+// immediately without starting anything when disabled — either
+// RetentionSweepMinutes <= 0, or every retention knob is 0 (in which case
+// there is nothing to expire and a sweeper makes no sense). The goroutine
+// stops when ctx is cancelled.
+func (e *Engine) StartRetentionSweeper(ctx context.Context) {
+	if e.cfg.RetentionSweepMinutes <= 0 || !e.retentionEnabled() {
+		return
+	}
+	interval := time.Duration(e.cfg.RetentionSweepMinutes) * time.Minute
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				agents, err := e.agents.List()
+				if err != nil {
+					continue
+				}
+				for _, ag := range agents {
+					e.pruneRetention(ctx, ag.Key)
+				}
+			}
+		}
+	}()
+}
+
 // Run processes one user message for a given agent+session, streaming events
 // to emit. If providerName is non-empty and a provider lookup is configured,
 // that provider is used instead of the default. images are base64 data-URLs
@@ -230,19 +290,9 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 
 	// Retention: prune stale observations so recurring agents don't accumulate
 	// misleading historical state, and bound self-educated knowledge so a
-	// long-lived agent can't grow it without limit. Both are best-effort;
-	// failures are non-fatal. Each knob at 0 disables that limit.
-	if e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 {
-		cutoff := time.Now().AddDate(0, 0, -e.cfg.ObservationTTLDays).Unix()
-		_ = e.store.PruneObservations(ctx, agentKey, cutoff, e.cfg.ObservationKeepLatest)
-	}
-	if e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0 {
-		var cutoff int64 // 0 = no age-based prune
-		if e.cfg.KnowledgeTTLDays > 0 {
-			cutoff = time.Now().AddDate(0, 0, -e.cfg.KnowledgeTTLDays).Unix()
-		}
-		_ = e.store.PruneKnowledge(ctx, agentKey, cutoff, e.cfg.KnowledgeKeepLatest)
-	}
+	// long-lived agent can't grow it without limit. Best-effort; failures are
+	// non-fatal. Each knob at 0 disables that limit.
+	e.pruneRetention(ctx, agentKey)
 
 	// Persist the user turn.
 	if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleUser), userMessage); err != nil {
@@ -473,7 +523,7 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 		}
 	}
 
-	return registry, nil, nil
+	return registry, sink, nil
 }
 
 // workspaceFor resolves the agent's workspace jail, falling back to the
@@ -648,8 +698,8 @@ func (e *Engine) imageFetcher(agentKey string) tools.ImageFetcher {
 // the engine drains the buffer and injects the images into the next LLM turn
 // so the model can actually see them (not just the data-URL string).
 type imageSink struct {
-	mu    sync.Mutex
-	imgs  []string
+	mu   sync.Mutex
+	imgs []string
 }
 
 func newImageSink() *imageSink {
@@ -731,10 +781,15 @@ func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
 	}
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
-		if line != "" && line != "NONE" {
-			if err := e.store.AddKnowledge(ctx, agentKey, line); err != nil {
-				return err
-			}
+		if line == "" || line == "NONE" {
+			continue
+		}
+		// A repeat extraction of an already-known fact is a no-op, not a
+		// failure: skip it and keep saving the remaining new learnings.
+		// Without this, one duplicate would abort the whole pass and drop
+		// any new facts listed after it.
+		if err := e.store.AddKnowledge(ctx, agentKey, line); err != nil && !errors.Is(err, store.ErrKnowledgeDuplicate) {
+			return err
 		}
 	}
 	return nil
