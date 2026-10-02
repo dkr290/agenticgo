@@ -127,11 +127,16 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
     the Memory tab (`DELETE /api/agents/{k}/knowledge/{id}` → `store.DeleteKnowledge`).
     Self-educated knowledge can optionally be retention-bounded
     (`AGENTICGO_KNOWLEDGE_TTL_DAYS` / `AGENTICGO_KNOWLEDGE_KEEP`, both default 0 = off;
-    e.g. 365 / 1000) via `store.PruneKnowledge` on each run, so a long-lived agent
-    can't grow it without limit when enabled. This is separate from `knowledge_docs`
-    (GUI-uploaded), which is never auto-pruned.
+    e.g. 365 / 1000) via `store.PruneKnowledge`. Pruning runs lazily at the start of
+    an agent's own `Run` AND on a background sweeper (`Engine.StartRetentionSweeper`,
+    wired in `main.go`) so expired rows are deleted on a schedule even for idle agents.
+    The sweeper interval is `AGENTICGO_RETENTION_SWEEP_MINUTES` (default 60; 0 = off) and
+    it only ever starts when at least one retention knob is non-zero — with all of them
+    at 0 there is nothing to expire, so no sweeper runs. Retention is separate from
+    `knowledge_docs` (GUI-uploaded), which is never auto-pruned.
   - `observations` — high-churn, timestamped findings from recurring agents (e.g. a
-    k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`).
+    k8s cron watcher). Retention-pruned (`ObservationTTLDays` / `ObservationKeepLatest`),
+    on each run and on the same background sweeper as knowledge.
     Recorded via the `record_observation` tool. How many recent observations are
     injected into the prompt each run is configurable: per agent via `config.json`
     `observation_inject` (nil = inherit), else the global `AGENTICGO_OBSERVATION_INJECT`

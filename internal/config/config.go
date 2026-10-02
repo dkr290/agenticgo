@@ -42,11 +42,20 @@ type Config struct {
 	// MaxAgentIterations bounds the tool-use loop to avoid runaway agents.
 	MaxAgentIterations int
 
-	// Observation retention: observations older than ObservationTTLDays are
-	// pruned, and each agent keeps at most ObservationKeepLatest. This is the
-	// anti-hallucination control for recurring monitoring agents.
-	ObservationTTLDays    int
-	ObservationKeepLatest int
+	// ---- Retention knobs (4) ------------------------------------------------
+	// There are TWO independent, per-agent memory stores, each with TWO limits
+	// (an age TTL and a count cap). A knob at 0 disables that one limit. When
+	// ANY of the four is non-zero, both the lazy per-Run prune and the
+	// background sweeper (StartRetentionSweeper) enforce them. NONE of these
+	// ever touch the GUI-uploaded knowledge-base documents (knowledge_docs).
+	//
+	//   Observations = the `observations` table: high-churn, timestamped state
+	//     snapshots recorded via the record_observation tool (e.g. a k8s cron
+	//     watcher). Disposable — they pile up and go stale fast, so they
+	//     DEFAULT to being pruned (14 days / 200 entries) unless overridden.
+	//     This is the anti-hallucination control for recurring monitors.
+	ObservationTTLDays    int // AGENTICGO_OBSERVATION_TTL_DAYS (default 14; 0 = no age prune)
+	ObservationKeepLatest int // AGENTICGO_OBSERVATION_KEEP      (default 200; 0 = no count cap)
 
 	// ObservationInject is the app-wide default for how many recent
 	// observations are injected into an agent's system prompt (1 = only the
@@ -58,14 +67,23 @@ type Config struct {
 	// injected into an agent's system prompt (app-wide; not per-agent).
 	KnowledgeInject int
 
-	// Knowledge retention optionally bounds how much self-educated knowledge an
-	// agent accumulates (separate from the GUI-uploaded knowledge_docs, which
-	// are never auto-pruned). KnowledgeTTLDays prunes entries older than that
-	// many days; KnowledgeKeepLatest caps how many of the newest entries are
-	// kept per agent. Both default to 0 = disabled (keep forever); see Load for
-	// examples. This is opt-in retention for long-lived self-educating agents.
-	KnowledgeTTLDays    int
-	KnowledgeKeepLatest int
+	//   Knowledge = the `knowledge` table: durable, self-educated long-term
+	//     memory — facts the agent saves itself via memory_save or the Evolve
+	//     pass. Precious, so retention is OPT-IN: both default to 0 = keep
+	//     forever (see Load for examples). Distinct from `knowledge_docs`
+	//     (GUI uploads), which are never auto-pruned.
+	KnowledgeTTLDays    int // AGENTICGO_KNOWLEDGE_TTL_DAYS (default 0 = no age prune)
+	KnowledgeKeepLatest int // AGENTICGO_KNOWLEDGE_KEEP      (default 0 = no count cap)
+
+	// RetentionSweepMinutes is how often a background sweeper prunes stale
+	// knowledge/observations for ALL agents (including idle ones), in minutes.
+	// Without it, retention only runs lazily at the start of an agent's own
+	// Run — so a dormant agent's expired rows linger until it next runs. The
+	// sweeper only ever starts when at least one retention knob
+	// (Observation/Knowledge TTL or Keep) is non-zero; with all of them at 0
+	// there is nothing to expire, so no sweeper runs. 0 disables the sweeper
+	// (keep the lazy on-run behavior only).
+	RetentionSweepMinutes int
 
 	// SecretKey is the base64-encoded 32-byte master key used to encrypt
 	// provider API keys at rest (AGENTICGO_SECRET_KEY). No default on purpose:
@@ -121,6 +139,10 @@ func Load() (*Config, error) {
 	// agent's self-educated knowledge.
 	cfg.KnowledgeTTLDays = getEnvInt("AGENTICGO_KNOWLEDGE_TTL_DAYS", 0)
 	cfg.KnowledgeKeepLatest = getEnvInt("AGENTICGO_KNOWLEDGE_KEEP", 0)
+	// Background retention sweep (all agents, incl. idle). Only ever takes
+	// effect when at least one retention knob above is non-zero; see
+	// Engine.StartRetentionSweeper.
+	cfg.RetentionSweepMinutes = getEnvInt("AGENTICGO_RETENTION_SWEEP_MINUTES", 60)
 	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
 
 	// No default: empty means "generate/persist a key under DataDir".

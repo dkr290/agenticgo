@@ -8,10 +8,13 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dkr290/agenticgo/internal/agents"
@@ -121,6 +124,21 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 		b.WriteString("\n")
 	}
 
+	// Reference images stored for this agent. List names so the agent knows
+	// what images exist; content is fetched via list_agent_images + fetch_agent_image.
+	if images, err := e.agents.ListImages(ag.Key); err == nil && len(images) > 0 {
+		b.WriteString("## Reference Images\n")
+		b.WriteString("Reference images are available. Use the list_agent_images tool to " +
+			"see what images exist, then fetch_agent_image with the image name to " +
+			"retrieve one before answering on these topics:\n")
+		for _, im := range images {
+			b.WriteString("- ")
+			b.WriteString(strings.TrimSpace(im.Name))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
 	// Recent observations (e.g. from a recurring monitor). How many are
 	// injected is configurable per agent (observation_inject) over the global
 	// default — a monitor that diffs run-over-run wants the last few snapshots,
@@ -183,6 +201,65 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 	return strings.TrimSpace(b.String())
 }
 
+// pruneRetention applies the configured retention limits for one agent:
+// age-based expiry (TTL) and/or a count cap on the newest entries, for both
+// observations and self-educated knowledge. Best-effort — failures are
+// non-fatal. Each knob at 0 disables that limit. Shared by Run (lazy, per
+// running agent) and StartRetentionSweeper (background, all agents).
+func (e *Engine) pruneRetention(ctx context.Context, agentKey string) {
+	if e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 {
+		cutoff := time.Now().AddDate(0, 0, -e.cfg.ObservationTTLDays).Unix()
+		_ = e.store.PruneObservations(ctx, agentKey, cutoff, e.cfg.ObservationKeepLatest)
+	}
+	if e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0 {
+		var cutoff int64 // 0 = no age-based prune
+		if e.cfg.KnowledgeTTLDays > 0 {
+			cutoff = time.Now().AddDate(0, 0, -e.cfg.KnowledgeTTLDays).Unix()
+		}
+		_ = e.store.PruneKnowledge(ctx, agentKey, cutoff, e.cfg.KnowledgeKeepLatest)
+	}
+}
+
+// retentionEnabled reports whether any retention knob is non-zero. When all
+// are 0 there is nothing to expire, so neither Run nor the sweeper prunes.
+func (e *Engine) retentionEnabled() bool {
+	return e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 ||
+		e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0
+}
+
+// StartRetentionSweeper launches a background goroutine that periodically
+// applies the retention limits to EVERY agent, so expired knowledge and
+// observations are deleted on a schedule even for agents that are idle (the
+// lazy per-Run prune only fires when an agent actually runs). It returns
+// immediately without starting anything when disabled — either
+// RetentionSweepMinutes <= 0, or every retention knob is 0 (in which case
+// there is nothing to expire and a sweeper makes no sense). The goroutine
+// stops when ctx is cancelled.
+func (e *Engine) StartRetentionSweeper(ctx context.Context) {
+	if e.cfg.RetentionSweepMinutes <= 0 || !e.retentionEnabled() {
+		return
+	}
+	interval := time.Duration(e.cfg.RetentionSweepMinutes) * time.Minute
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				agents, err := e.agents.List()
+				if err != nil {
+					continue
+				}
+				for _, ag := range agents {
+					e.pruneRetention(ctx, ag.Key)
+				}
+			}
+		}
+	}()
+}
+
 // Run processes one user message for a given agent+session, streaming events
 // to emit. If providerName is non-empty and a provider lookup is configured,
 // that provider is used instead of the default. images are base64 data-URLs
@@ -213,19 +290,9 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 
 	// Retention: prune stale observations so recurring agents don't accumulate
 	// misleading historical state, and bound self-educated knowledge so a
-	// long-lived agent can't grow it without limit. Both are best-effort;
-	// failures are non-fatal. Each knob at 0 disables that limit.
-	if e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 {
-		cutoff := time.Now().AddDate(0, 0, -e.cfg.ObservationTTLDays).Unix()
-		_ = e.store.PruneObservations(ctx, agentKey, cutoff, e.cfg.ObservationKeepLatest)
-	}
-	if e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0 {
-		var cutoff int64 // 0 = no age-based prune
-		if e.cfg.KnowledgeTTLDays > 0 {
-			cutoff = time.Now().AddDate(0, 0, -e.cfg.KnowledgeTTLDays).Unix()
-		}
-		_ = e.store.PruneKnowledge(ctx, agentKey, cutoff, e.cfg.KnowledgeKeepLatest)
-	}
+	// long-lived agent can't grow it without limit. Best-effort; failures are
+	// non-fatal. Each knob at 0 disables that limit.
+	e.pruneRetention(ctx, agentKey)
 
 	// Persist the user turn.
 	if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleUser), userMessage); err != nil {
@@ -260,7 +327,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	// It composes the always-on core memory/docs tools (scoped to this agent),
 	// the built-in fs/exec tools (jailed to the agent's own workspace), and the
 	// MCP tools this agent has enabled.
-	reg, err := e.runRegistry(ag)
+	reg, sink, err := e.runRegistry(ag)
 	if err != nil {
 		return "", fmt.Errorf("build tool registry: %w", err)
 	}
@@ -344,6 +411,17 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 				Name:       tc.Name,
 			})
 		}
+
+		// Drain any images fetched by fetch_agent_image and inject them as a
+		// user message so the model can actually see them in the next LLM turn.
+		if imgs := sink.DrainImages(); len(imgs) > 0 {
+			messages = append(messages, llm.Message{
+				Role:    llm.RoleUser,
+				Content: "",
+				Images:  imgs,
+			})
+		}
+
 		// Loop: let the model observe tool results and continue.
 	}
 
@@ -366,7 +444,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 // and specs can never drift from dispatch, which the old callTool switch
 // allowed. Tools absent from the registry are invisible to the model and
 // rejected by Registry.Call, so per-agent gating is enforced by construction.
-func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
+func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, error) {
 	// The registry itself allows everything registered into it; gating happens
 	// when composing it (below). This keeps the always-on core tools and the
 	// per-agent MCP tools out of the global AGENTICGO_TOOL_ALLOWLIST, which
@@ -379,6 +457,13 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 	registry.Register(tools.NewRecordObservation(e.store, ag.Key))
 	registry.Register(tools.NewSearchDocs(e.docSearcher(ag.Key)))
 	registry.Register(tools.NewReadDoc(e.docReader(ag.Key)))
+	registry.Register(tools.NewListAgentImages(e.imageLister(ag.Key)))
+
+	// Image sink: collects images fetched by fetch_agent_image so the engine
+	// can inject them into the next LLM turn (the model can actually see them,
+	// not just the data-URL string).
+	sink := newImageSink()
+	registry.Register(tools.NewFetchAgentImage(e.imageFetcher(ag.Key), sink))
 
 	// Built-in filesystem tools, jailed to the agent's workspace. The global
 	// AGENTICGO_TOOL_ALLOWLIST is the ceiling; the agent may narrow it further
@@ -389,21 +474,21 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 	if builtin["read_file"] {
 		t, err := tools.NewReadFile(workspace)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		registry.Register(t)
 	}
 	if builtin["write_file"] {
 		t, err := tools.NewWriteFile(workspace)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		registry.Register(t)
 	}
 	if builtin["list_files"] {
 		t, err := tools.NewListFiles(workspace)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		registry.Register(t)
 	}
@@ -438,7 +523,7 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, error) {
 		}
 	}
 
-	return registry, nil
+	return registry, sink, nil
 }
 
 // workspaceFor resolves the agent's workspace jail, falling back to the
@@ -580,6 +665,61 @@ func (e *Engine) docReader(agentKey string) tools.DocReader {
 	}
 }
 
+// imageLister adapts agents.ListImages into a tools.ImageLister for an agent.
+// Returns just the filenames so the agent can follow up with fetch_agent_image.
+func (e *Engine) imageLister(agentKey string) tools.ImageLister {
+	return func(ctx context.Context) ([]string, error) {
+		images, err := e.agents.ListImages(agentKey)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(images))
+		for _, im := range images {
+			names = append(names, im.Name)
+		}
+		return names, nil
+	}
+}
+
+// imageFetcher adapts agents.ReadImage into a tools.ImageFetcher for an agent.
+// It reads the raw bytes, converts them to a base64 data-URL, and returns it.
+func (e *Engine) imageFetcher(agentKey string) tools.ImageFetcher {
+	return func(ctx context.Context, name string) (string, error) {
+		data, mime, err := e.agents.ReadImage(agentKey, name)
+		if err != nil {
+			return "", err
+		}
+		return encodeDataURL(mime, data), nil
+	}
+}
+
+// imageSink is a thread-safe buffer that collects image data-URLs fetched by
+// the fetch_agent_image tool during an iteration. After all tool calls complete,
+// the engine drains the buffer and injects the images into the next LLM turn
+// so the model can actually see them (not just the data-URL string).
+type imageSink struct {
+	mu   sync.Mutex
+	imgs []string
+}
+
+func newImageSink() *imageSink {
+	return &imageSink{}
+}
+
+func (s *imageSink) AddImage(dataURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.imgs = append(s.imgs, dataURL)
+}
+
+func (s *imageSink) DrainImages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	imgs := s.imgs
+	s.imgs = nil
+	return imgs
+}
+
 // Evolve summarizes the session and appends learnings to the agent's knowledge
 // store. This is the simplified self-evolution: a background pass extracts
 // durable facts/preferences from the transcript for future prompts. It uses the
@@ -641,11 +781,22 @@ func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
 	}
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
-		if line != "" && line != "NONE" {
-			if err := e.store.AddKnowledge(ctx, agentKey, line); err != nil {
-				return err
-			}
+		if line == "" || line == "NONE" {
+			continue
+		}
+		// A repeat extraction of an already-known fact is a no-op, not a
+		// failure: skip it and keep saving the remaining new learnings.
+		// Without this, one duplicate would abort the whole pass and drop
+		// any new facts listed after it.
+		if err := e.store.AddKnowledge(ctx, agentKey, line); err != nil && !errors.Is(err, store.ErrKnowledgeDuplicate) {
+			return err
 		}
 	}
 	return nil
+}
+
+// encodeDataURL converts raw image bytes into a base64 data-URL with the
+// given MIME type, matching the format the LLM provider expects.
+func encodeDataURL(mime string, data []byte) string {
+	return fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(data))
 }
