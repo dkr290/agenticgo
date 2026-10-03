@@ -417,7 +417,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		if imgs := sink.DrainImages(); len(imgs) > 0 {
 			messages = append(messages, llm.Message{
 				Role:    llm.RoleUser,
-				Content: "",
+				Content: "Describe what you see in the following image(s).",
 				Images:  imgs,
 			})
 		}
