@@ -56,7 +56,7 @@ func NewReadFile(root string) (Tool, error) {
 }
 
 func (t *readFileTool) Name() string        { return "read_file" }
-func (t *readFileTool) Description() string { return "Read the contents of a file in the workspace." }
+func (t *readFileTool) Description() string { return "Read the contents of a text file in the workspace. Do not use for images — use fetch_agent_image instead." }
 func (t *readFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
