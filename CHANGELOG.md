@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/dkr290/agenticgo/compare/v0.1.1...v0.1.2) (2026-10-05)
+
+
+### Miscellaneous
+
+* **ci:** drop free-disk-space step from docker build ([#41](https://github.com/dkr290/agenticgo/issues/41)) ([bb8b837](https://github.com/dkr290/agenticgo/commit/bb8b8375ab981ffc0057491d5e651f6d67a97f55))
+
 ## [0.1.1](https://github.com/dkr290/agenticgo/compare/v0.1.0...v0.1.1) (2026-10-05)
 
 
