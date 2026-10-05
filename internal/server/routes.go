@@ -65,6 +65,26 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 	tag := []string{"Agents"}
 
 	huma.Register(api, huma.Operation{
+		OperationID: "update-agent-llm-config", Method: http.MethodPut,
+		Path: "/api/agents/{key}/llm-config", Summary: "Replace agent LLM settings",
+		Description: "Updates LLM settings and observation injection while preserving enabled tools, commands, and skills.", Tags: tag,
+	}, func(ctx context.Context, input *struct {
+		Key  string `path:"key"`
+		Body agentLLMConfig
+	}) (*struct{ Body *agents.Agent }, error) {
+		ag, err := s.agents.MutateConfig(input.Key, func(cfg *agents.AgentConfig) error {
+			cfg.Provider, cfg.Model = input.Body.Provider, input.Body.Model
+			cfg.Temperature, cfg.MaxTokens = input.Body.Temperature, input.Body.MaxTokens
+			cfg.Vision, cfg.ObservationInject = input.Body.Vision, input.Body.ObservationInject
+			return nil
+		})
+		if err != nil {
+			return nil, s.logErr(huma.Error400BadRequest(err.Error()))
+		}
+		return &struct{ Body *agents.Agent }{Body: ag}, nil
+	})
+
+	huma.Register(api, huma.Operation{
 		OperationID: "list-agents",
 		Method:      http.MethodGet,
 		Path:        "/api/agents",
@@ -668,7 +688,7 @@ func (s *Server) registerDocRoutes(api huma.API) {
 		Key string `path:"key" doc:"Agent key"`
 		ID  int64  `path:"id" doc:"Document ID"`
 	}) (*struct{ Body *store.KnowledgeDoc }, error) {
-		doc, err := s.store.GetKnowledgeDoc(ctx, input.ID)
+		doc, err := s.store.GetKnowledgeDocForAgent(ctx, input.ID, input.Key)
 		if err != nil {
 			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
@@ -686,7 +706,7 @@ func (s *Server) registerDocRoutes(api huma.API) {
 		Key string `path:"key" doc:"Agent key"`
 		ID  int64  `path:"id" doc:"Document ID"`
 	}) (*statusOutput, error) {
-		if err := s.store.DeleteKnowledgeDoc(ctx, input.ID); err != nil {
+		if err := s.store.DeleteKnowledgeDocForAgent(ctx, input.ID, input.Key); err != nil {
 			return nil, s.logErr(huma.Error404NotFound(err.Error()))
 		}
 		return &statusOutput{Body: statusBody{Status: "deleted"}}, nil

@@ -1,25 +1,26 @@
-# Heartbeat
+# HEARTBEAT.md - Recurring Checks
 
-Guidance for recurring runs (cron / monitoring). This file is injected into
-your system prompt each run, so keep it short and actionable.
+This file is included in every run's system prompt. Apply this checklist when
+the current task asks for a recurring check or monitoring; ordinary conversation
+uses the general memory guidance in AGENTS.md. The cron job supplies the task and
+schedule — this file does not start runs by itself.
 
-## Each run
+## Monitoring checklist
 
-1. Do the task you were invoked for (inspect state, run checks, gather facts).
-2. **Record what you found** with the `record_observation` tool — one concise,
-   consolidated snapshot of current state (e.g. "pods: a,b,c up; connections:
-   a→b:5432, c→d:80"). Observations are timestamped and auto-pruned.
-3. **Promote durable patterns** with `memory_save` — stable facts worth keeping
-   long-term (e.g. "frontend always talks to payments-api:8080"). Don't save
-   transient state as knowledge; that's what observations are for.
-
-## Compare before alerting
-
-- Your prompt includes your **Recent Observations** (the snapshots from prior
-  runs). Diff the *current* state you just gathered against them.
-- Report or alert **only when something changed** — a new pod, a dropped or new
-  connection, a new error. If nothing changed, stay brief; don't re-report the
-  baseline.
-- Observations may be outdated between runs — always re-check live state before
-  acting on them, and treat recorded state as the baseline to diff against, not
-  as ground truth.
+1. **Inspect live state** using the enabled tools for the requested scope. Record
+   what was checked and any failed or unavailable checks; an unsuccessful check
+   does not establish that the system is healthy.
+2. **Compare with available observations** for the same scope. The prompt may
+   include the latest observation or several recent ones, depending on settings.
+   If none are available, establish a baseline without inventing prior state.
+3. **Save one consolidated snapshot** with `record_observation` after the check.
+   Include the scope, important findings, changes, and unresolved issues. The
+   store timestamps the entry and applies the configured retention policy.
+4. **Save useful lessons selectively** with `memory_save` when current evidence
+   establishes a new, reusable fact or lesson. Search existing knowledge first.
+   Temporary status, restart counts, and a single observed connection belong in
+   the snapshot; a verified ownership or deployment convention can be knowledge.
+   A run with no new durable lesson needs no new knowledge entry.
+5. **Report the result** briefly, emphasizing changes, ongoing actionable issues,
+   and failed checks. If nothing changed and no issue needs attention, say so
+   concisely. Confirm memory was saved only after its tool call succeeds.

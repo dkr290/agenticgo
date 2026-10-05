@@ -22,8 +22,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dkr290/agenticgo/internal/agenttemplates"
+	"github.com/dkr290/agenticgo/internal/atomicfile"
 )
 
 // ContextFile is a single markdown file that shapes an agent.
@@ -114,6 +116,7 @@ func ValidKey(key string) bool {
 // Registry loads and saves agents under a root directory.
 type Registry struct {
 	root string
+	mu   sync.Mutex // serializes config read-modify-write and agent creation/deletion
 }
 
 // NewRegistry creates a registry rooted at dir, ensuring it exists.
@@ -177,55 +180,19 @@ func (r *Registry) ImagesDir(key string) (string, error) {
 // SetEnabledSkills replaces the agent's enabled-skills list in its
 // config.json and returns the refreshed agent.
 func (r *Registry) SetEnabledSkills(key string, skillKeys []string) (*Agent, error) {
-	dir, err := r.dirFor(key)
-	if err != nil {
-		return nil, err
-	}
-	if !r.Exists(key) {
-		return nil, fmt.Errorf("agent %q not found", key)
-	}
-	cfg := r.loadConfig(dir)
-	cfg.EnabledSkills = skillKeys
-	if err := r.saveConfig(dir, cfg); err != nil {
-		return nil, err
-	}
-	return r.Get(key)
+	return r.MutateConfig(key, func(cfg *AgentConfig) error { cfg.EnabledSkills = skillKeys; return nil })
 }
 
 // SetEnabledTools replaces the agent's enabled MCP-tools list in its
 // config.json and returns the refreshed agent.
 func (r *Registry) SetEnabledTools(key string, toolNames []string) (*Agent, error) {
-	dir, err := r.dirFor(key)
-	if err != nil {
-		return nil, err
-	}
-	if !r.Exists(key) {
-		return nil, fmt.Errorf("agent %q not found", key)
-	}
-	cfg := r.loadConfig(dir)
-	cfg.EnabledTools = toolNames
-	if err := r.saveConfig(dir, cfg); err != nil {
-		return nil, err
-	}
-	return r.Get(key)
+	return r.MutateConfig(key, func(cfg *AgentConfig) error { cfg.EnabledTools = toolNames; return nil })
 }
 
 // SetEnabledCommands replaces the agent's enabled extra-exec-commands list in
 // its config.json and returns the refreshed agent.
 func (r *Registry) SetEnabledCommands(key string, cmds []string) (*Agent, error) {
-	dir, err := r.dirFor(key)
-	if err != nil {
-		return nil, err
-	}
-	if !r.Exists(key) {
-		return nil, fmt.Errorf("agent %q not found", key)
-	}
-	cfg := r.loadConfig(dir)
-	cfg.EnabledCommands = cmds
-	if err := r.saveConfig(dir, cfg); err != nil {
-		return nil, err
-	}
-	return r.Get(key)
+	return r.MutateConfig(key, func(cfg *AgentConfig) error { cfg.EnabledCommands = cmds; return nil })
 }
 
 // SetEnabledBuiltinTools replaces the agent's enabled built-in-tools
@@ -233,19 +200,7 @@ func (r *Registry) SetEnabledCommands(key string, cmds []string) (*Agent, error)
 // clears the override so the agent inherits the global allow-list again;
 // passing a pointer to an empty list disables all built-in tools for it.
 func (r *Registry) SetEnabledBuiltinTools(key string, names *[]string) (*Agent, error) {
-	dir, err := r.dirFor(key)
-	if err != nil {
-		return nil, err
-	}
-	if !r.Exists(key) {
-		return nil, fmt.Errorf("agent %q not found", key)
-	}
-	cfg := r.loadConfig(dir)
-	cfg.EnabledBuiltinTools = names
-	if err := r.saveConfig(dir, cfg); err != nil {
-		return nil, err
-	}
-	return r.Get(key)
+	return r.MutateConfig(key, func(cfg *AgentConfig) error { cfg.EnabledBuiltinTools = names; return nil })
 }
 
 // --- Agent images (reference pictures/screenshots for vision models) ---
@@ -414,7 +369,10 @@ func (r *Registry) Get(key string) (*Agent, error) {
 	}
 
 	ag := &Agent{Key: key, Name: key, Dir: dir}
-	ag.Config = r.loadConfig(dir)
+	ag.Config, err = r.loadConfig(dir)
+	if err != nil {
+		return nil, err
+	}
 	for _, name := range contextFileNames {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -434,6 +392,8 @@ func (r *Registry) Get(key string) (*Agent, error) {
 // Create scaffolds a new agent with template context files and an initial
 // LLM config.
 func (r *Registry) Create(key, name, description, soul string, cfg AgentConfig) (*Agent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	dir, err := r.dirFor(key)
 	if err != nil {
 		return nil, err
@@ -481,6 +441,8 @@ func (r *Registry) Create(key, name, description, soul string, cfg AgentConfig) 
 
 // Delete removes an agent directory entirely.
 func (r *Registry) Delete(key string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	dir, err := r.dirFor(key)
 	if err != nil {
 		return err
@@ -541,18 +503,23 @@ func validContextFile(name string) bool {
 	return false
 }
 
-// loadConfig reads the agent's config.json (if present). A missing or corrupt
-// file yields the zero-value config, meaning "inherit all defaults".
-func (r *Registry) loadConfig(dir string) AgentConfig {
+// loadConfig allows a missing config, but never resets permissions on read errors.
+func (r *Registry) loadConfig(dir string) (AgentConfig, error) {
 	data, err := os.ReadFile(filepath.Join(dir, configFileName))
 	if err != nil {
-		return AgentConfig{}
+		if os.IsNotExist(err) {
+			return AgentConfig{}, nil
+		}
+		return AgentConfig{}, fmt.Errorf("read agent config: %w", err)
 	}
 	var cfg AgentConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return AgentConfig{}
+	if strings.TrimSpace(string(data)) == "null" {
+		return cfg, fmt.Errorf("agent config must be a JSON object")
 	}
-	return cfg
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return AgentConfig{}, fmt.Errorf("parse agent config: %w", err)
+	}
+	return cfg, nil
 }
 
 // saveConfig writes the agent's config.json into its directory.
@@ -561,7 +528,7 @@ func (r *Registry) saveConfig(dir string, cfg AgentConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, configFileName), data, 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(dir, configFileName), data, 0o644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
@@ -569,12 +536,27 @@ func (r *Registry) saveConfig(dir string, cfg AgentConfig) error {
 
 // UpdateConfig replaces an agent's LLM config and returns the refreshed agent.
 func (r *Registry) UpdateConfig(key string, cfg AgentConfig) (*Agent, error) {
+	return r.MutateConfig(key, func(current *AgentConfig) error { *current = cfg; return nil })
+}
+
+// MutateConfig serializes the complete read-modify-write, preserving concurrent
+// toggles and unrelated configuration fields. The callback must not call Registry methods.
+func (r *Registry) MutateConfig(key string, update func(*AgentConfig) error) (*Agent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	dir, err := r.dirFor(key)
 	if err != nil {
 		return nil, err
 	}
 	if !r.Exists(key) {
 		return nil, fmt.Errorf("agent %q not found", key)
+	}
+	cfg, err := r.loadConfig(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := update(&cfg); err != nil {
+		return nil, err
 	}
 	if err := r.saveConfig(dir, cfg); err != nil {
 		return nil, err

@@ -203,6 +203,7 @@
       <input type="file" id="attach-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
       <textarea id="input" rows="1" placeholder="Message the agent… (Enter to send)"></textarea>
       <button id="send">Send</button>
+      <button class="danger" id="chat-cancel" style="display:none">Stop</button>
     </div>
     <div id="attach-bar" style="display:none; padding:6px 28px; background:var(--bg); border-top:1px solid var(--border); font-size:12px"></div>
   </div>
@@ -464,14 +465,20 @@
 (function() {
   // ---------- helpers ----------
   const $ = id => document.getElementById(id);
-  function esc(s){ const d=document.createElement('div'); d.textContent=s==null?'':s; return d.innerHTML; }
+  function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c])); }
   function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block';
     clearTimeout(t._tm); t._tm=setTimeout(()=>t.style.display='none', 2600); }
   async function api(path, opts) {
     const r = await fetch(path, opts);
-    if (!r.ok) { let msg = r.statusText; try { msg = (await r.json()).error || msg; } catch(e){}
-      throw new Error(msg); }
+    if (!r.ok) throw new Error(await responseError(r));
     return r.json();
+  }
+  async function responseError(r) {
+    try {
+      const body = await r.json();
+      const details = (body.errors || []).map(e => [e.location, e.message].filter(Boolean).join(': ')).join('; ');
+      return [body.error || body.detail || body.title, details].filter(Boolean).join(': ') || r.statusText || 'Request failed';
+    } catch { return r.statusText || 'Request failed'; }
   }
   function estTokens(s){ return Math.max(1, Math.round((s||'').length / 4)); }
 
@@ -497,36 +504,48 @@
     if (page === 'memory') loadMemoryPage();
     if (page === 'kb') loadKBPage();
     if (page === 'providers') loadProviders();
-    if (page === 'chat') { fillChatAgents().then(() => updateChatProvider()); }
+    if (page === 'chat') return fillChatAgents().then(() => { updateChatProvider(); refreshAttach(); });
+    return Promise.resolve();
   }
+  window.showPage = show;
   document.querySelectorAll('.nav .item').forEach(i =>
     i.addEventListener('click', () => show(i.dataset.page)));
 
   // ---------- websocket chat ----------
-  let ws = null, currentAssistant = null, busy = false;
+  let ws = null, currentAssistant = null, busy = false, activeTurn = null, turnSequence = 0, retryDelay = 1000;
   function setStatus(on, text){ $('dot').className = 'dot ' + (on?'on':'off'); $('statustext').textContent = text; }
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(proto + '://' + location.host + '/ws');
-    ws.onopen = () => setStatus(true, 'connected');
-    ws.onclose = () => { setStatus(false, 'disconnected — retrying…'); setTimeout(connect, 1500); };
+    const socket = new WebSocket(proto + '://' + location.host + '/ws');
+    ws = socket;
+    ws.onopen = () => { retryDelay = 1000; setStatus(true, 'connected'); setBusy(false); };
+    ws.onclose = () => {
+      if (ws !== socket) return;
+      if (busy) addMsg('system', 'Connection lost; the running reply was interrupted. Reopen this conversation to reload saved messages.');
+      activeTurn = null; currentAssistant = null; setBusy(false);
+      setStatus(false, 'disconnected — retrying…');
+      setTimeout(connect, retryDelay); retryDelay = Math.min(30000, retryDelay * 2);
+    };
     ws.onerror = () => setStatus(false, 'error');
     ws.onmessage = e => {
       let ev; try { ev = JSON.parse(e.data); } catch { return; }
+      if (ev.id && ev.id !== activeTurn) return;
       if (ev.kind === 'text') {
         if (!currentAssistant) currentAssistant = addMsg('assistant', '');
         currentAssistant.textContent += ev.text;
         $('chat').scrollTop = $('chat').scrollHeight;
       } else if (ev.kind === 'tool_call') {
+        currentAssistant = null;
         addMsg('tool', '⚙ ' + ev.tool_name + '(' + (ev.tool_args || '') + ')');
       } else if (ev.kind === 'tool_result') {
         addMsg('tool', '→ ' + (ev.tool_result || '').slice(0, 800));
-      } else if (ev.kind === 'done') {
-        currentAssistant = null; setBusy(false);
+      } else if (ev.kind === 'done' || ev.kind === 'cancelled') {
+        if (ev.kind === 'cancelled') addMsg('system', 'Reply stopped.');
+        activeTurn = null; currentAssistant = null; setBusy(false);
         if ($('page-history').classList.contains('active')) loadHistory();
       } else if (ev.kind === 'error') {
         addMsg('system', '⚠ ' + (ev.error || 'unknown error'));
-        currentAssistant = null; setBusy(false);
+        activeTurn = null; currentAssistant = null; setBusy(false);
       }
     };
   }
@@ -534,20 +553,32 @@
     const el = document.createElement('div'); el.className = 'msg ' + cls; el.textContent = text;
     $('chat').appendChild(el); $('chat').scrollTop = $('chat').scrollHeight; return el;
   }
-  function setBusy(b){ busy=b; $('send').disabled=b; $('input').disabled=b; if(!b) $('input').focus(); }
+  function setBusy(b){
+    busy=b;
+    ['send','input','chat-agent','chat-session','chat-clear','chat-evolve'].forEach(id => $(id).disabled=b);
+    $('chat-cancel').style.display=b?'':'none'; $('chat-cancel').disabled=false;
+    if(b) $('attach').disabled=true;
+    else { refreshAttach(); $('input').focus(); }
+  }
   function send(){
     const text = $('input').value.trim();
     const agent = $('chat-agent').value;
     if ((!text && !pendingImages.length) || !agent || !ws || ws.readyState !== WebSocket.OPEN || busy) return;
     addMsg('user', text + (pendingImages.length ? '  📷[' + pendingImages.join(', ') + ']' : ''));
     $('input').value=''; setBusy(true); currentAssistant = null;
-    ws.send(JSON.stringify({ agent, session: $('chat-session').value || 'default',
+    activeTurn = String(++turnSequence);
+    ws.send(JSON.stringify({ id: activeTurn, agent, session: $('chat-session').value || 'default',
       message: text, images: pendingImages.slice() }));
     pendingImages = []; renderAttachBar();
   }
   $('send').addEventListener('click', send);
   $('input').addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
-  $('chat-agent').addEventListener('change', () => { updateChatProvider(); refreshAttach(); });
+  $('chat-agent').addEventListener('change', () => { pendingImages=[]; renderAttachBar(); updateChatProvider(); refreshAttach(); });
+  $('chat-cancel').addEventListener('click', () => {
+    if (busy && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({kind:'cancel', id:activeTurn})); $('chat-cancel').disabled=true;
+    }
+  });
   $('chat-clear').addEventListener('click', () => { $('chat').innerHTML=''; currentAssistant=null; });
   $('chat-evolve').addEventListener('click', () => {
     const agent = $('chat-agent').value; if (!agent) return;
@@ -588,7 +619,7 @@
         const o = document.createElement('option'); o.value = a.key; o.textContent = a.name + ' (' + a.key + ')';
         sel.appendChild(o);
       });
-      if (prev) sel.value = prev;
+      if (prev && (list||[]).some(a => a.key === prev)) sel.value = prev;
     }).catch(()=>{});
   }
   function updateChatProvider(){
@@ -649,12 +680,13 @@
   $('hist-search').addEventListener('input', renderHistory);
   $('hist-refresh').addEventListener('click', loadHistory);
   function openConversation(agent, session){
-    show('chat');
-    $('chat-agent').value = agent;
-    $('chat-session').value = session;
-    updateChatProvider();
-    refreshAttach();
-    loadConversationMessages(agent, session);
+    if (busy) { toast('Stop the running reply before opening another conversation.'); return; }
+    show('chat').then(() => {
+      $('chat-agent').value = agent;
+      $('chat-session').value = session;
+      pendingImages=[]; renderAttachBar();
+      updateChatProvider(); refreshAttach(); loadConversationMessages(agent, session);
+    });
   }
   function deleteConversation(agent, session){
     if (!confirm('Delete conversation "' + session + '" (' + agent + ')? This cannot be undone.')) return;
@@ -680,8 +712,9 @@
     if (!agent) { btn.disabled = true; btn.title = 'Pick an agent first'; return; }
     api('/api/agents/' + encodeURIComponent(agent) + '/vision')
       .then(v => {
+        if ($('chat-agent').value !== agent) return;
         const vision = !!(v && v.vision);
-        btn.disabled = !vision;
+        btn.disabled = busy || !vision;
         btn.title = vision ? 'Attach an image' : 'This provider/model has no vision — enable "Vision" on the provider or agent config';
         if (!vision && pendingImages.length) { pendingImages = []; renderAttachBar(); }
       }).catch(() => { btn.disabled = true; });
@@ -702,8 +735,8 @@
     const fd = new FormData(); fd.append('file', f);
     toast('Uploading ' + f.name + '…');
     fetch('/api/agents/' + encodeURIComponent(agent) + '/images', { method:'POST', body: fd })
-      .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
-      .then(im => { pendingImages.push(im.name); renderAttachBar(); $('attach-file').value=''; })
+      .then(async r => { if (!r.ok) throw new Error(await responseError(r)); return r.json(); })
+      .then(im => { if ($('chat-agent').value === agent) { pendingImages.push(im.name); renderAttachBar(); } $('attach-file').value=''; })
       .catch(e => toast('Attach failed: ' + e.message));
   });
 
@@ -847,7 +880,7 @@
     const fd = new FormData(); fd.append('file', f);
     toast('Uploading ' + f.name + '…');
     fetch('/api/agents/' + encodeURIComponent(detailAgent) + '/images', { method:'POST', body: fd })
-      .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+      .then(async r => { if (!r.ok) throw new Error(await responseError(r)); return r.json(); })
       .then(() => { toast('✓ Uploaded ' + f.name); $('img-file').value=''; loadAgentImages(); })
       .catch(e => toast('Upload failed: ' + e.message));
   });
@@ -1112,7 +1145,7 @@
     if (maxtok !== '') body.max_tokens = parseInt(maxtok, 10);
     if (obsinject !== '') body.observation_inject = parseInt(obsinject, 10);
     if (vision !== '') body.vision = (vision === 'true');
-    api('/api/agents/' + encodeURIComponent(detailAgent) + '/config', {
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/llm-config', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     }).then(a => {
       agentDetail = a; $('cf-saved').textContent = 'Saved ✓'; setTimeout(() => $('cf-saved').textContent = '', 2000);
@@ -1174,7 +1207,7 @@
       const fd = new FormData(); fd.append('file', picked);
       toast('Uploading…');
       fetch('/api/skills/upload', { method:'POST', body: fd })
-        .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+        .then(async r => { if (!r.ok) throw new Error(await responseError(r)); return r.json(); })
         .then(sk => { closeModal(); toast('✓ Installed skill "' + (sk.name||sk.key) + '" — enable it per agent on the Agents → Skills tab'); loadSkills(); })
         .catch(e => toast('Upload failed: ' + e.message));
     });
@@ -1454,7 +1487,7 @@
       const fd = new FormData(); fd.append('file', f);
       toast('Uploading…');
       fetch('/api/agents/' + encodeURIComponent(agent) + '/docs', { method:'POST', body: fd })
-        .then(async r => { if (!r.ok) throw new Error((await r.json()).error || 'failed'); return r.json(); })
+        .then(async r => { if (!r.ok) throw new Error(await responseError(r)); return r.json(); })
         .then(() => { closeModal(); toast('✓ Document added'); loadKB(); })
         .catch(e => toast('Upload failed: ' + e.message));
     }
@@ -1531,7 +1564,7 @@
       model: $('pf-model').value.trim(), default: $('pf-default').checked, vision: $('pf-vision').checked };
     if (!body.name || !body.base_url || !body.model) { toast('Name, base URL and model are required'); return; }
     api('/api/providers', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
-      .then(() => { $('provider-form').style.display = 'none'; loadProviders(); fillChatProviders(); toast('Provider saved'); })
+      .then(() => { $('provider-form').style.display = 'none'; loadProviders(); updateChatProvider(); refreshAttach(); toast('Provider saved'); })
       .catch(e => toast('Save failed: ' + e.message));
   });
   // Mask/unmask the API key field (default masked, click the eye to peek).

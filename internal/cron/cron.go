@@ -53,9 +53,10 @@ type JobWithStatus struct {
 
 // Scheduler is a JSON-persisted cron-job registry plus a live runner.
 type Scheduler struct {
-	path   string
-	run    Runner
-	parser cron.Parser
+	lifecycleMu sync.Mutex // prevents Start from racing a Stop that is waiting for jobs
+	path        string
+	run         Runner
+	parser      cron.Parser
 
 	mu      sync.Mutex
 	jobs    map[string]*Job
@@ -63,6 +64,10 @@ type Scheduler struct {
 	cron    *cron.Cron
 	log     logger.Logger
 	running bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	active  map[string]bool
+	wg      sync.WaitGroup
 }
 
 var idRE = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
@@ -113,12 +118,17 @@ func (s *Scheduler) SetLogger(l logger.Logger) {
 // Start arms the live scheduler: every enabled job with a valid schedule is
 // registered. Called once the engine and store are wired (main).
 func (s *Scheduler) Start() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running {
 		return
 	}
 	s.cron = cron.New()
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.active = make(map[string]bool)
+	s.entries = make(map[string]cron.EntryID)
 	s.running = true
 	// Snapshot the jobs first: scheduleLocked mutates s.entries (a map), and
 	// ranging over s.jobs while mutating another map is fine, but arming before
@@ -133,13 +143,19 @@ func (s *Scheduler) Start() {
 // Stop halts the live scheduler. It does not persist (jobs are already saved
 // on every mutation).
 func (s *Scheduler) Stop() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.running {
+		s.mu.Unlock()
 		return
 	}
-	s.cron.Stop()
+	stopped := s.cron.Stop()
 	s.running = false
+	s.cancel()
+	s.mu.Unlock()
+	<-stopped.Done()
+	s.wg.Wait()
 }
 
 // List returns all jobs, annotated with live schedule state, sorted by name.
@@ -254,7 +270,21 @@ func (s *Scheduler) unscheduleLocked(j *Job) {
 // fire executes one scheduled run. The agent gets its own session per job so
 // runs accumulate as a resumable conversation.
 func (s *Scheduler) fire(jobID, agentKey, prompt string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	s.mu.Lock()
+	if !s.running || s.active[jobID] {
+		s.mu.Unlock()
+		return
+	}
+	s.active[jobID] = true
+	s.wg.Add(1)
+	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Minute)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.active, jobID)
+		s.mu.Unlock()
+		s.wg.Done()
+	}()
 	defer cancel()
 	s.log.Info("cron run start", "job", jobID, "agent", agentKey)
 	if err := s.run(ctx, agentKey, "cron-"+jobID, prompt); err != nil {
@@ -296,5 +326,5 @@ func newID(name string) string {
 	if len(base) > 40 {
 		base = base[:40]
 	}
-	return fmt.Sprintf("%s-%d", base, time.Now().UnixNano()/1e6)
+	return fmt.Sprintf("%s-%d", base, time.Now().UnixNano())
 }

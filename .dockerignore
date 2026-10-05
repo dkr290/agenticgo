@@ -1,0 +1,13 @@
+# Send only build inputs. Runtime data, .git, and local credentials stay out.
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+**/*_test.go
+**/*_test.cjs
+**/*.bak

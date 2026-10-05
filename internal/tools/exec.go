@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
 
-// execTool runs allow-listed commands jailed to the workspace directory.
+// execTool sandboxes standard commands; explicitly enabled dangerous extras
+// run with the agenticgo process's container/host privileges.
 type execTool struct {
 	workspace string
 	allow     map[string]bool
@@ -41,10 +46,10 @@ func NewExecWithExtra(workspace string, allowList, extra []string) Tool {
 
 func (t *execTool) Name() string { return "exec" }
 func (t *execTool) Description() string {
-	d := "Run an allow-listed shell command inside the workspace."
+	d := "Run an allow-listed command (arguments are whitespace-separated). Standard commands run in an isolated workspace sandbox."
 	if len(t.extra) > 0 {
 		d += " In addition to the standard safe commands, you may run these " +
-			"extra commands (use with care — they can modify or delete real state): " +
+			"extra commands with full process/container privileges: " +
 			strings.Join(t.extra, ", ") + "."
 	}
 	return d
@@ -88,13 +93,20 @@ func (t *execTool) Call(ctx context.Context, args json.RawMessage) (string, erro
 	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, cmdName)
-	if len(fields) > 1 {
-		cmd.Args = append([]string{cmdName}, fields[1:]...)
+	var cmd *exec.Cmd
+	if slices.Contains(t.extra, cmdName) {
+		cmd = exec.CommandContext(ctx, cmdName, fields[1:]...)
+		cmd.Dir = t.workspace
+	} else {
+		var err error
+		cmd, err = sandboxCommand(ctx, t.workspace, fields)
+		if err != nil {
+			return "", err
+		}
 	}
-	cmd.Dir = t.workspace
+	cmd.WaitDelay = time.Second
 
-	var stdout, stderr bytes.Buffer
+	stdout, stderr := cappedOutput{limit: 16 * 1024}, cappedOutput{limit: 16 * 1024}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -103,12 +115,74 @@ func (t *execTool) Call(ctx context.Context, args json.RawMessage) (string, erro
 	}
 
 	out := stdout.String()
-	const max = 16 * 1024
-	if len(out) > max {
-		out = out[:max] + "\n... [truncated]"
+	if stdout.truncated {
+		out += "\n... [truncated]"
 	}
 	if out == "" {
 		out = "(no output)"
 	}
 	return out, nil
+}
+
+// sandboxCommand exposes only read-only system executables/libraries and the
+// agent workspace. No application data, credentials, host network, or inherited
+// environment is available. Failure to establish the sandbox is an error.
+func sandboxCommand(ctx context.Context, workspace string, fields []string) (*exec.Cmd, error) {
+	if runtime.GOOS != "linux" {
+		return nil, fmt.Errorf("standard exec sandbox requires Linux and bubblewrap")
+	}
+	if fields[0] == "find" {
+		for _, arg := range fields[1:] {
+			if slices.Contains([]string{"-exec", "-execdir", "-ok", "-okdir"}, arg) {
+				return nil, fmt.Errorf("find subprocess actions are not allowed")
+			}
+		}
+	}
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		return nil, fmt.Errorf("standard exec requires bubblewrap (bwrap): %w", err)
+	}
+	program, err := exec.LookPath(fields[0])
+	if err != nil {
+		return nil, fmt.Errorf("find command: %w", err)
+	}
+	program, err = filepath.EvalSymlinks(program)
+	if err != nil {
+		return nil, fmt.Errorf("resolve command: %w", err)
+	}
+	if !strings.HasPrefix(program, "/usr/") && !strings.HasPrefix(program, "/bin/") {
+		return nil, fmt.Errorf("standard command must be installed under /usr or /bin: %s", program)
+	}
+	root, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	args := []string{"--die-with-parent", "--new-session", "--unshare-all", "--cap-drop", "ALL", "--clearenv"}
+	for _, dir := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if _, err := os.Stat(dir); err == nil {
+			args = append(args, "--ro-bind", dir, dir)
+		}
+	}
+	args = append(args, "--tmpfs", "/tmp", "--dev", "/dev", "--bind", root, "/workspace", "--chdir", "/workspace",
+		"--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/workspace", "--setenv", "LANG", "C.UTF-8", "--", program)
+	args = append(args, fields[1:]...)
+	return exec.CommandContext(ctx, bwrap, args...), nil
+}
+
+type cappedOutput struct {
+	buffer    bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *cappedOutput) String() string { return b.buffer.String() }
+
+func (b *cappedOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	keep := min(n, b.limit-b.buffer.Len())
+	_, _ = b.buffer.Write(p[:keep])
+	if keep < n {
+		b.truncated = true
+	}
+	return n, nil
 }

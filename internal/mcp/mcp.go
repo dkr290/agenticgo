@@ -204,9 +204,8 @@ func (m *Manager) Add(srv ServerConfig) (*ServerConfig, error) {
 	return &out, nil
 }
 
-// Update replaces an existing server definition. If the server is connected
-// and its name changed, the connection is dropped (its tools were namespaced
-// under the old name); new settings apply on the next connect.
+// Update replaces an existing server definition and drops its old connection
+// and discovery cache. New settings apply on the next connect.
 func (m *Manager) Update(id string, srv ServerConfig) (*ServerConfig, error) {
 	if err := validateServer(&srv); err != nil {
 		return nil, err
@@ -222,16 +221,18 @@ func (m *Manager) Update(id string, srv ServerConfig) (*ServerConfig, error) {
 			return nil, fmt.Errorf("server %q already exists", srv.Name)
 		}
 	}
-	conn, connected := m.conns[id]
-	if connected && srv.Name != cur.Name {
-		_ = conn.session.Close()
-		delete(m.conns, id)
-	}
 	srv.ID = id
 	srv.CreatedAt = cur.CreatedAt
 	m.servers[id] = &srv
 	if err := m.saveLocked(); err != nil {
+		m.servers[id] = cur
 		return nil, err
+	}
+	if conn, ok := m.conns[id]; ok {
+		if conn.session != nil {
+			_ = conn.session.Close()
+		}
+		delete(m.conns, id)
 	}
 	out := srv
 	return &out, nil
@@ -241,16 +242,23 @@ func (m *Manager) Update(id string, srv ServerConfig) (*ServerConfig, error) {
 func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.servers[id]; !ok {
+	srv, ok := m.servers[id]
+	if !ok {
 		return fmt.Errorf("mcp server %q not found", id)
+	}
+	delete(m.servers, id)
+	if err := m.saveLocked(); err != nil {
+		m.servers[id] = srv
+		return err
 	}
 	conn, connected := m.conns[id]
 	if connected {
-		_ = conn.session.Close()
+		if conn.session != nil {
+			_ = conn.session.Close()
+		}
 		delete(m.conns, id)
 	}
-	delete(m.servers, id)
-	return m.saveLocked()
+	return nil
 }
 
 // ListServers returns every configured server with its runtime status.
@@ -300,7 +308,9 @@ func (m *Manager) connectLocked(ctx context.Context, id string) (*connection, er
 	} else {
 		switch srv.Transport {
 		case "stdio":
-			transport = &sdk.CommandTransport{Command: exec.CommandContext(ctx, srv.Command, srv.Args...)}
+			// The SDK session owns and closes this process. The request context
+			// bounds the handshake, not the lifetime of a connected server.
+			transport = &sdk.CommandTransport{Command: exec.Command(srv.Command, srv.Args...)}
 		default: // http
 			transport = &sdk.StreamableClientTransport{Endpoint: srv.URL, MaxRetries: 0}
 		}
@@ -312,14 +322,13 @@ func (m *Manager) connectLocked(ctx context.Context, id string) (*connection, er
 		return nil, fmt.Errorf("connect %q: %w", srv.Name, err)
 	}
 
-	res, err := session.ListTools(ctx, nil)
-	if err != nil {
-		_ = session.Close()
-		m.conns[id] = &connection{err: err.Error()}
-		return nil, fmt.Errorf("list tools on %q: %w", srv.Name, err)
-	}
-	tools := make([]ToolInfo, 0, len(res.Tools))
-	for _, t := range res.Tools {
+	var tools []ToolInfo
+	for t, err := range session.Tools(ctx, nil) {
+		if err != nil {
+			_ = session.Close()
+			m.conns[id] = &connection{err: err.Error()}
+			return nil, fmt.Errorf("list tools on %q: %w", srv.Name, err)
+		}
 		schema, _ := t.InputSchema.(map[string]any)
 		if schema == nil {
 			schema = map[string]any{"type": "object"}
@@ -339,6 +348,9 @@ func (m *Manager) connectLocked(ctx context.Context, id string) (*connection, er
 func (m *Manager) Connect(ctx context.Context, id string) (*ServerStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, ok := m.servers[id]; !ok {
+		return nil, fmt.Errorf("mcp server %q not found", id)
+	}
 	if _, err := m.connectLocked(ctx, id); err != nil {
 		st := m.statusLocked(id)
 		return &st, err
