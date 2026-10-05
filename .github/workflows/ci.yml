@@ -39,7 +39,8 @@ jobs:
     name: Go unit tests
     runs-on: ubuntu-latest
     env:
-      CGO_ENABLED: "0"
+      # CGO stays enabled: the race detector needs it. The static
+      # CGO_ENABLED=0 build happens inside Docker, not here.
       GOCACHE: ${{ github.workspace }}/.gocache
     steps:
       - uses: actions/checkout@v4
