@@ -1,0 +1,212 @@
+name: CI/CD - agenticgo
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - README.md
+      - CHANGELOG.md
+  push:
+    branches: [main]
+    paths-ignore:
+      - README.md
+      - CHANGELOG.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  lint-pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  unit-tests:
+    name: Go unit tests
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      GOCACHE: ${{ github.workspace }}/.gocache
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run unit tests
+        run: go test -v -race ./... -cover
+
+  ui-tests:
+    name: SPA event-flow tests (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run SPA tests
+        run: node --test internal/server/web_test.cjs
+
+  docker-smoke-test:
+    name: Docker build smoke test
+    runs-on: ubuntu-latest
+    needs: [unit-tests, ui-tests]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: agenticgo:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test container health
+        run: |
+          set -euo pipefail
+          docker run -d --name agenticgo-smoke -p 18099:8080 agenticgo:smoke
+          trap 'docker rm -f agenticgo-smoke >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18099/healthz >/dev/null; then
+              echo "✓ /healthz OK"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "✗ container did not become healthy"
+          docker logs agenticgo-smoke || true
+          exit 1
+
+  release-please:
+    needs: [unit-tests, ui-tests, docker-smoke-test]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-and-push:
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    name: build-and-push ${{ needs.release-please.outputs.version }}
+    env:
+      VERSION: ${{ needs.release-please.outputs.version }}
+      DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if tag exists in GHCR
+        id: check-tag
+        run: |
+          IMAGE="${{ env.DOCKER_IMAGE_NAME }}:${{ env.VERSION }}"
+
+          echo "Checking: $IMAGE"
+
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "✓ Tag exists, skipping build"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "✗ Tag not found, will build"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip build - tag already exists
+        if: steps.check-tag.outputs.exists == 'true'
+        run: echo "✓ Docker image tag ${{ env.VERSION }} already exists in GHCR. Skipping build."
+
+      - name: Free Disk Space (Ubuntu)
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # This might remove tools that we won't need anyway
+          tool-cache: true
+          android: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Check available disk space
+        if: steps.check-tag.outputs.exists == 'false'
+        run: |
+          echo "Available disk space:"
+          df -h
+          echo "Docker disk usage:"
+          docker system df
+
+      - name: Set up Docker Buildx
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Log in to GitHub Container Registry
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ env.VERSION }}
+            ${{ env.DOCKER_IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
