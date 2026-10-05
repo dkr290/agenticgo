@@ -30,7 +30,7 @@ LABEL org.opencontainers.image.title="agenticgo" \
 # Add any dangerous extra commands in a derived image (see README).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       bubblewrap ca-certificates coreutils curl findutils grep tini tzdata \
+       bubblewrap ca-certificates coreutils curl findutils grep tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 agenticgo \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin agenticgo \
@@ -52,5 +52,5 @@ STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:${AGENTICGO_ADDR##*:}/healthz" || exit 1
 
-# Forward shutdown signals and reap orphaned subprocesses from exec/MCP tools.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/agenticgo"]
+# The Go process receives container signals directly and handles graceful shutdown.
+ENTRYPOINT ["/usr/local/bin/agenticgo"]

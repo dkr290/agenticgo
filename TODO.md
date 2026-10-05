@@ -48,9 +48,9 @@ recall and durable memory tools; configurable retention and background sweeping;
 MCP discovery and per-agent tool gates; persistent executable cron jobs; encrypted
 provider keys; per-agent LLM/vision settings; conversation history with tool traces;
 Huma-generated REST/OpenAPI docs and synchronous `/api/chat`.
-The multi-stage Dockerfile builds a static binary and runs it as UID/GID 10001
-with tini, health checks, bubblewrap, and persistent `/data`; README covers image
-extensions for dangerous commands and runtime namespace requirements.
+The multi-stage Dockerfile builds a static binary and runs it directly as PID 1,
+as UID/GID 10001, with health checks, bubblewrap, and persistent `/data`; README
+covers image extensions for dangerous commands and runtime namespace requirements.
 
 ## Retention defaults
 

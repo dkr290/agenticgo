@@ -172,10 +172,13 @@ host-bound service reachable if that service listens on a reachable interface.
 
 The Dockerfile compiles a static binary (`CGO_ENABLED=0`) in a Go build stage.
 The Debian runtime includes bubblewrap, standard command-line utilities, CA
-certificates, timezone data, curl for the Docker health check, and tini for
-signal forwarding/subprocess reaping. It runs as **UID/GID 10001**, listens on
-8080, and stores all application data under `/data`. The default timezone is UTC;
-set `TZ` to change the default cron timezone.
+certificates, timezone data, and curl for the Docker health check. The Go binary
+runs directly as PID 1 and handles `SIGTERM` for graceful shutdown. It runs as
+**UID/GID 10001**, listens on 8080, and stores all application data under `/data`.
+The default timezone is UTC; set `TZ` to change the default cron timezone.
+
+If you want Docker to reap orphaned descendants of exec/MCP commands, add
+`--init` to `docker run`; the image itself starts the Go binary directly.
 
 Use a named volume as above, or make a bind-mounted data directory writable by
 UID/GID 10001. Persist the **whole data directory**, including `secret.key`, so

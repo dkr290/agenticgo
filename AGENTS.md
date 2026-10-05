@@ -279,8 +279,9 @@ data/
    separate from the built-in `AGENTICGO_TOOL_ALLOWLIST`, which still gates the
    system tools.
 2. **Phase 5a — Docker (done)**: multi-stage `Dockerfile` builds a static binary;
-   the Debian runtime runs as UID/GID 10001 with bubblewrap, tini, health checks,
-   and persistent `/data`. `.dockerignore` excludes runtime data and local Git files.
+   the Debian runtime runs the Go binary directly as PID 1, as UID/GID 10001,
+   with bubblewrap, health checks, and persistent `/data`. `.dockerignore` excludes
+   runtime data and local Git files.
    Standard exec additionally needs namespace support from the container runtime;
    enabled dangerous extras use the container's PATH/network/mounted credentials.
 3. **Phase 5b — k8s**: manifests for Deployment + PVC (for the data dir) + Service
