@@ -162,26 +162,6 @@ jobs:
         if: steps.check-tag.outputs.exists == 'true'
         run: echo "✓ Docker image tag ${{ env.VERSION }} already exists in GHCR. Skipping build."
 
-      - name: Free Disk Space (Ubuntu)
-        if: steps.check-tag.outputs.exists == 'false'
-        uses: jlumbroso/free-disk-space@main
-        with:
-          # This might remove tools that we won't need anyway
-          tool-cache: true
-          android: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: Check available disk space
-        if: steps.check-tag.outputs.exists == 'false'
-        run: |
-          echo "Available disk space:"
-          df -h
-          echo "Docker disk usage:"
-          docker system df
-
       - name: Set up Docker Buildx
         if: steps.check-tag.outputs.exists == 'false'
         uses: docker/setup-buildx-action@v3
