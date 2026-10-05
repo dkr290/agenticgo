@@ -1,0 +1,16 @@
+{
+  "release-type": "go",
+  "include-v-in-tag": true,
+  "packages": {
+    ".": {}
+  },
+  "changelog-sections": [
+    { "type": "feat",     "section": "Features" },
+    { "type": "fix",      "section": "Bug Fixes" },
+    { "type": "chore",    "section": "Miscellaneous" },
+    { "type": "docs",     "section": "Documentation" },
+    { "type": "refactor", "section": "Refactoring" },
+    { "type": "test",     "section": "Tests" },
+    { "type": "perf",     "section": "Performance" }
+  ]
+}
