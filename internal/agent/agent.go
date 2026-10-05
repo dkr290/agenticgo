@@ -63,6 +63,44 @@ type Engine struct {
 	providers  ProviderLookup // required for chat: resolves the default and named providers
 	mcp        *mcp.Manager   // optional: custom (MCP) tools, enabled per agent
 	basePrompt string
+	runMu      sync.Mutex
+	runs       map[conversation]*runGate
+}
+
+type conversation struct{ agent, session string }
+type runGate struct {
+	token chan struct{}
+	refs  int
+}
+
+// lockConversation keeps complete turns together across REST, WS, and cron.
+func (e *Engine) lockConversation(ctx context.Context, key conversation) (func(), error) {
+	e.runMu.Lock()
+	if e.runs == nil {
+		e.runs = make(map[conversation]*runGate)
+	}
+	g := e.runs[key]
+	if g == nil {
+		g = &runGate{token: make(chan struct{}, 1)}
+		e.runs[key] = g
+	}
+	g.refs++
+	e.runMu.Unlock()
+	drop := func() {
+		e.runMu.Lock()
+		defer e.runMu.Unlock()
+		g.refs--
+		if g.refs == 0 {
+			delete(e.runs, key)
+		}
+	}
+	select {
+	case g.token <- struct{}{}:
+		return func() { <-g.token; drop() }, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
 }
 
 // New creates an Engine.
@@ -186,15 +224,17 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 	// AGENTICGO_KNOWLEDGE_INJECT) and labelled as historical; the agent should
 	// use memory_search to find relevant facts rather than treating everything
 	// here as current.
-	if knowledge, err := e.store.Knowledge(ctx, ag.Key, e.cfg.KnowledgeInject); err == nil && len(knowledge) > 0 {
-		b.WriteString("## Accumulated Knowledge\n")
-		b.WriteString("Learnings captured from prior sessions. These are historical and may be " +
-			"outdated — use the memory_search tool to look up specifics, and verify " +
-			"before relying on them:\n")
-		for _, k := range knowledge {
-			b.WriteString("- ")
-			b.WriteString(strings.TrimSpace(k.Content))
-			b.WriteString("\n")
+	if e.cfg.KnowledgeInject > 0 {
+		if knowledge, err := e.store.Knowledge(ctx, ag.Key, e.cfg.KnowledgeInject); err == nil && len(knowledge) > 0 {
+			b.WriteString("## Accumulated Knowledge\n")
+			b.WriteString("Learnings captured from prior sessions. These are historical and may be " +
+				"outdated — use the memory_search tool to look up specifics, and verify " +
+				"before relying on them:\n")
+			for _, k := range knowledge {
+				b.WriteString("- ")
+				b.WriteString(strings.TrimSpace(k.Content))
+				b.WriteString("\n")
+			}
 		}
 	}
 
@@ -208,7 +248,10 @@ func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 // running agent) and StartRetentionSweeper (background, all agents).
 func (e *Engine) pruneRetention(ctx context.Context, agentKey string) {
 	if e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 {
-		cutoff := time.Now().AddDate(0, 0, -e.cfg.ObservationTTLDays).Unix()
+		var cutoff int64
+		if e.cfg.ObservationTTLDays > 0 {
+			cutoff = time.Now().AddDate(0, 0, -e.cfg.ObservationTTLDays).Unix()
+		}
 		_ = e.store.PruneObservations(ctx, agentKey, cutoff, e.cfg.ObservationKeepLatest)
 	}
 	if e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0 {
@@ -267,6 +310,11 @@ func (e *Engine) StartRetentionSweeper(ctx context.Context) {
 // vision-capable (otherwise they are dropped, so a non-vision model never
 // errors). It returns the final assistant reply. emit may be nil.
 func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, providerName string, images []string, emit func(Event)) (string, error) {
+	unlock, err := e.lockConversation(ctx, conversation{agentKey, session})
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	if emit == nil {
 		emit = func(Event) {}
 	}
@@ -284,7 +332,8 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	}
 
 	// Only forward images when the effective model can actually see them.
-	if !e.EffectiveVision(ag, providerName) {
+	vision := e.EffectiveVision(ag, providerName)
+	if !vision {
 		images = nil
 	}
 
@@ -296,7 +345,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 
 	// Persist the user turn.
 	if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleUser), userMessage); err != nil {
-		emit(Event{Kind: "error", Err: err})
+		return "", fmt.Errorf("save user message: %w", err)
 	}
 
 	// Load recent history for this agent+session.
@@ -310,17 +359,14 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		Role:    llm.RoleSystem,
 		Content: e.buildSystemPrompt(ctx, ag),
 	})
-	for i, m := range history {
-		msg := llm.Message{
-			Role:    llm.Role(m.Role),
-			Content: m.Content,
-		}
-		// Attach images to the current user turn (the last message) only.
-		if i == len(history)-1 && len(images) > 0 && m.Role == string(llm.RoleUser) {
-			msg.Images = images
-		}
-		messages = append(messages, msg)
+	replayed, err := replayHistory(history)
+	if err != nil {
+		return "", err
 	}
+	if len(replayed) > 0 && replayed[len(replayed)-1].Role == llm.RoleUser {
+		replayed[len(replayed)-1].Images = images
+	}
+	messages = append(messages, replayed...)
 
 	// Build the per-run tool registry: the single source of truth for both the
 	// tool specs offered to the model and the dispatch of its tool calls.
@@ -334,6 +380,9 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	specs := reg.Specs()
 
 	for iter := 0; iter < e.cfg.MaxAgentIterations; iter++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		req := llm.ChatRequest{
 			Model:       provider.Model(),
 			Messages:    messages,
@@ -366,7 +415,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 				finalText = turnText.String()
 			}
 			if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleAssistant), finalText); err != nil {
-				emit(Event{Kind: "error", Err: err})
+				return "", fmt.Errorf("save assistant reply: %w", err)
 			}
 			emit(Event{Kind: "done"})
 			return finalText, nil
@@ -382,7 +431,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 		// Persist the assistant turn that requested tools (with tool_calls metadata).
 		if err := e.store.AppendMessageWithToolCalls(ctx, agentKey, session,
 			string(llm.RoleAssistant), assistantMsg.Content, string(toolCallsJSON), "", ""); err != nil {
-			emit(Event{Kind: "error", Err: err})
+			return "", fmt.Errorf("save assistant tool calls: %w", err)
 		}
 
 		// Record the assistant turn that requested tools.
@@ -390,9 +439,18 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 
 		// Execute each requested tool and append results.
 		for _, tc := range assistantMsg.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			emit(Event{Kind: "tool_call", ToolName: tc.Name, ToolArgs: tc.Arguments})
 
-			result, callErr := reg.Call(ctx, tc.Name, json.RawMessage(tc.Arguments))
+			var result string
+			var callErr error
+			if tc.Name == "fetch_agent_image" && !vision {
+				callErr = fmt.Errorf("the effective model does not support images")
+			} else {
+				result, callErr = reg.Call(ctx, tc.Name, json.RawMessage(tc.Arguments))
+			}
 			if callErr != nil {
 				result = "error: " + callErr.Error()
 			}
@@ -401,7 +459,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 			// Persist the tool result as a separate message row.
 			if err := e.store.AppendMessageWithToolCalls(ctx, agentKey, session,
 				string(llm.RoleTool), result, "", tc.ID, tc.Name); err != nil {
-				emit(Event{Kind: "error", Err: err})
+				return "", fmt.Errorf("save tool result: %w", err)
 			}
 
 			messages = append(messages, llm.Message{
@@ -414,7 +472,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 
 		// Drain any images fetched by fetch_agent_image and inject them as a
 		// user message so the model can actually see them in the next LLM turn.
-		if imgs := sink.DrainImages(); len(imgs) > 0 {
+		if imgs := sink.DrainImages(); vision && len(imgs) > 0 {
 			messages = append(messages, llm.Message{
 				Role:    llm.RoleUser,
 				Content: "Describe what you see in the following image(s).",
@@ -426,6 +484,49 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	}
 
 	return "", fmt.Errorf("agent reached max iterations (%d) without a final answer", e.cfg.MaxAgentIterations)
+}
+
+// replayHistory preserves tool metadata and drops incomplete tool exchanges
+// caused by a history-window boundary or an interrupted run.
+func replayHistory(history []store.Message) ([]llm.Message, error) {
+	out := make([]llm.Message, 0, len(history))
+	for i := 0; i < len(history); i++ {
+		m := history[i]
+		if m.Role == string(llm.RoleTool) {
+			continue
+		}
+		msg := llm.Message{Role: llm.Role(m.Role), Content: m.Content, Name: m.Name, ToolCallID: m.ToolCallID}
+		if m.ToolCalls != "" {
+			if err := json.Unmarshal([]byte(m.ToolCalls), &msg.ToolCalls); err != nil {
+				return nil, fmt.Errorf("decode stored tool calls: %w", err)
+			}
+		}
+		if len(msg.ToolCalls) > 0 {
+			pending := make(map[string]bool, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				pending[tc.ID] = true
+			}
+			results := []llm.Message{}
+			valid := len(pending) == len(msg.ToolCalls) && !pending[""]
+			for i+1 < len(history) && history[i+1].Role == string(llm.RoleTool) {
+				i++
+				r := history[i]
+				if !pending[r.ToolCallID] {
+					valid = false
+				}
+				delete(pending, r.ToolCallID)
+				results = append(results, llm.Message{Role: llm.RoleTool, Content: r.Content, ToolCallID: r.ToolCallID, Name: r.Name})
+			}
+			if !valid || len(pending) > 0 {
+				continue
+			}
+			out = append(out, msg)
+			out = append(out, results...)
+		} else {
+			out = append(out, msg)
+		}
+	}
+	return out, nil
 }
 
 // runRegistry builds the per-run tool registry for an agent: the single
@@ -470,7 +571,10 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 	// (config.json enabled_builtin_tools; nil = inherit the global allow-list).
 	// Narrowing can only remove tools, never add ones the ceiling doesn't permit.
 	builtin := e.builtinAllowed(ag)
-	workspace := e.workspaceFor(ag.Key)
+	workspace, err := e.agents.WorkspaceDir(ag.Key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve agent workspace: %w", err)
+	}
 	if builtin["read_file"] {
 		t, err := tools.NewReadFile(workspace)
 		if err != nil {
@@ -524,16 +628,6 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 	}
 
 	return registry, sink, nil
-}
-
-// workspaceFor resolves the agent's workspace jail, falling back to the
-// global workspace when the per-agent one cannot be resolved.
-func (e *Engine) workspaceFor(agentKey string) string {
-	workspace, err := e.agents.WorkspaceDir(agentKey)
-	if err != nil {
-		return e.cfg.WorkspaceDir
-	}
-	return workspace
 }
 
 // observationInject resolves how many recent observations to inject into the
@@ -725,6 +819,11 @@ func (s *imageSink) DrainImages() []string {
 // durable facts/preferences from the transcript for future prompts. It uses the
 // same provider resolution as Run (agent config > provider store default).
 func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
+	unlock, err := e.lockConversation(ctx, conversation{agentKey, session})
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	history, err := e.store.Messages(ctx, agentKey, session, 60)
 	if err != nil || len(history) < 4 {
 		return err // not enough to learn from

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dkr290/agenticgo/internal/atomicfile"
 	"github.com/dkr290/agenticgo/internal/crypto"
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/logger"
@@ -84,6 +85,9 @@ func Open(path string, encKey crypto.Key) (*Store, error) {
 	s.list = stored
 	migrated := false
 	for _, p := range s.list {
+		if p == nil {
+			return nil, fmt.Errorf("providers file contains a null entry")
+		}
 		pt, err := s.encKey.Decrypt(p.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt api key for %q: %w", p.Name, err)
@@ -174,7 +178,9 @@ func (s *Store) GetLLM(name string) (llm.Provider, error) {
 		}
 	}
 	s.log.Debug("providers: resolved LLM", "name", name, "base_url", p.BaseURL, "model", p.Model)
-	return p.LLM(), nil
+	op := llm.NewOpenAI(p.BaseURL, p.APIKey, p.Model)
+	op.SetLogger(s.log)
+	return op, nil
 }
 
 // VisionCapable reports whether the named provider ("" = default) is marked
@@ -196,7 +202,7 @@ func (s *Store) VisionCapable(name string) bool {
 
 // Upsert creates or updates a provider. If p.Default is set, all other
 // providers are un-defaulted.
-func (s *Store) Upsert(p Provider) error {
+func (s *Store) Upsert(p Provider) (err error) {
 	if p.Name == "" {
 		return fmt.Errorf("provider name is required")
 	}
@@ -208,6 +214,12 @@ func (s *Store) Upsert(p Provider) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := s.snapshotLocked()
+	defer func() {
+		if err != nil {
+			s.list = before
+		}
+	}()
 	for i, existing := range s.list {
 		if existing.Name == p.Name {
 			cp := p
@@ -233,9 +245,15 @@ func (s *Store) Upsert(p Provider) error {
 }
 
 // Delete removes a provider by name.
-func (s *Store) Delete(name string) error {
+func (s *Store) Delete(name string) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := s.snapshotLocked()
+	defer func() {
+		if err != nil {
+			s.list = before
+		}
+	}()
 	for i, p := range s.list {
 		if p.Name == name {
 			s.list = append(s.list[:i], s.list[i+1:]...)
@@ -297,6 +315,15 @@ func (s *Store) clearDefaultLocked(except string) {
 	}
 }
 
+func (s *Store) snapshotLocked() []*Provider {
+	out := make([]*Provider, 0, len(s.list))
+	for _, p := range s.list {
+		cp := *p
+		out = append(out, &cp)
+	}
+	return out
+}
+
 // saveLocked persists the store with API keys encrypted at rest. In-memory
 // keys stay plaintext; only the JSON written to disk is encrypted.
 func (s *Store) saveLocked() error {
@@ -314,7 +341,7 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshal providers: %w", err)
 	}
-	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+	if err := atomicfile.Write(s.path, data, 0o600); err != nil {
 		return fmt.Errorf("write providers: %w", err)
 	}
 	return nil

@@ -24,6 +24,10 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   The **initial content** for these context files comes from embedded templates
   (`internal/agenttemplates/templates/`, loaded via `go:embed`) rendered by
   `Registry.Create`; after creation they live on disk and are edited via the GUI.
+  The default `AGENTS.md` includes general recall/save guidance; `HEARTBEAT.md`
+  contains a conditional recurring-check checklist. Both are injected on every
+  normal run. HEARTBEAT does not schedule work; cron prompts identify the task.
+  Template changes apply to newly created agents, not existing on-disk files.
 - **Skills (shared library + per-agent enable)**: a skill is a folder with
   `SKILL.md` (optional YAML-ish front-matter with `name`/`description` + markdown
   instructions). Skills live in **one global library** (`data/skills/`,
@@ -108,19 +112,25 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   data-URLs, and sent as OpenAI `image_url` content parts. Non-vision models have
   attach blocked up front and any images dropped in `Engine.Run`, so they never
   error. Resolution: `Engine.EffectiveVision` (agent override > provider flag).
-- **Security**: filesystem tools jailed to a workspace; `exec` runs only allow-listed
-  commands (`AGENTICGO_EXEC_ALLOWLIST`); tools gated by a global allow-list.
+- **Security**: filesystem tools use `os.Root` to enforce the workspace boundary,
+  including symlinks. Standard `exec` commands run through Linux bubblewrap with
+  only a writable workspace/private tmp, read-only system binaries/libraries,
+  clean environment and isolated network. Bubblewrap/user namespaces are required;
+  sandbox failure never falls back to direct execution. `find` subprocess actions
+  are rejected. Commands remain gated by `AGENTICGO_EXEC_ALLOWLIST` and the tool allow-list.
   Extra, dangerous commands (e.g. `kubectl`, `git`) are declared via
   `AGENTICGO_EXTRA_EXEC_COMMANDS` but are **never** runnable until an agent enables
   them via `config.json` `enabled_commands` (Agents → Extra Dangerous Exec Commands
-  tab); `Engine.runRegistry` re-checks per run and runs them jailed to the agent's own
-  workspace. Context-file names are validated
+  tab); `Engine.runRegistry` re-checks per run. Enabled extras run from the agent's
+  workspace with process/container privileges, PATH, network and mounted credentials,
+  so image-installed kubectl/git remain usable. Context-file names are validated
   against an allow-list (`validContextFile`) to prevent path traversal; agent keys are
   validated (`ValidKey`) since they're used as directory names.
 - **Memory**: SQLite (`modernc.org/sqlite`, no cgo). Two kinds, scoped **per agent**:
   - `knowledge` — curated durable learnings. Full-text searchable via an FTS5
     virtual table (`knowledge_fts`, kept in sync by triggers) and the
-    `memory_search` tool; selectively recalled, not bulk-injected. The agent writes
+    `memory_search` tool. A recent subset is injected via `AGENTICGO_KNOWLEDGE_INJECT`
+    (default 25, 0 disables injection while preserving searchable memory). The agent writes
     durable facts itself via the always-on `memory_save` tool (complementing the
     background `Evolve` pass); `AddKnowledge` dedupes exact matches per agent and caps
     entries at 500 bytes. Entries carry IDs (`KnowledgeEntry`) and can be deleted from
@@ -161,6 +171,24 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   `Engine.Run` with the job's prompt on its own `cron-<id>` session. The Cron
   page shows live status (armed/next run). (Cron graduated from the old
   in-memory `internal/scaffold` to a real executor, like MCP did before it.)
+
+## Reliability invariants
+
+- Agent config mutations use `Registry.MutateConfig` to serialize the complete
+  read-modify-write and `internal/atomicfile` for persistence. Invalid config files
+  must error rather than inherit wider permissions. The Config UI uses
+  `PUT /api/agents/{key}/llm-config` to preserve capability settings; `/config`
+  remains the full-replacement API.
+- Turns are serialized per agent/session. History replay restores tool-call metadata
+  and omits incomplete exchanges at window boundaries or after cancellation.
+- WS reads continue during a run. `kind: cancel` (optional request ID) cancels it;
+  terminal events include `cancelled`. Disconnect/shutdown cancels active runs.
+- MCP subprocess lifetime belongs to the SDK session, not the Connect HTTP context.
+  Failed/missing sessions are valid manager states; never dereference them blindly.
+- Each retention limit is independent: observations default to 14 days / 200 rows,
+  knowledge to 0 / 0. A zero TTL disables age pruning even with a positive count cap.
+- Cron skips overlapping executions of the same job and cancels/waits on shutdown.
+- REST document reads/deletes must include the agent key in the SQL predicate.
 
 ## Architecture map (how it fits together)
 
@@ -250,11 +278,16 @@ data/
    per agent via `config.json` `enabled_tools` (Agents → MCP Tools tab) —
    separate from the built-in `AGENTICGO_TOOL_ALLOWLIST`, which still gates the
    system tools.
-2. **Phase 5 — Docker + k8s**: multi-stage Dockerfile producing a static binary;
-   manifests for Deployment + PVC (for the data dir) + Service (+ optional Ingress).
+2. **Phase 5a — Docker (done)**: multi-stage `Dockerfile` builds a static binary;
+   the Debian runtime runs the Go binary directly as PID 1, as UID/GID 10001,
+   with bubblewrap, health checks, and persistent `/data`. `.dockerignore` excludes
+   runtime data and local Git files.
+   Standard exec additionally needs namespace support from the container runtime;
+   enabled dangerous extras use the container's PATH/network/mounted credentials.
+3. **Phase 5b — k8s**: manifests for Deployment + PVC (for the data dir) + Service
+   (+ optional Ingress) remain on the roadmap. Single instance per data directory.
 
-Possible follow-ons the owner may ask for (not yet built): per-agent workspaces wired
-into the tool loop (tools currently use the global `WorkspaceDir`).
+Per-agent workspaces are wired into the tool loop.
 
 ## Tech choices (keep these)
 
@@ -288,6 +321,8 @@ into the tool loop (tools currently use the global `WorkspaceDir`).
 ```bash
 go build ./...                              # compile
 go vet ./...                                # vet
+go test -race ./...                          # Go regression tests
+node --test internal/server/web_test.cjs     # SPA event-flow regression tests
 go build -o agenticgo ./cmd/agenticgo       # binary
 AGENTICGO_ADDR=:18099 ./agenticgo           # run
 curl localhost:18099/healthz                # health

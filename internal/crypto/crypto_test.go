@@ -126,3 +126,19 @@ func TestLoadKeyGeneratesAndPersists(t *testing.T) {
 		t.Fatalf("key file perms = %o, want 600", perm)
 	}
 }
+
+func TestLoadKeyDoesNotReplaceMalformedFile(t *testing.T) {
+	for _, data := range []string{"", "truncated-key"} {
+		path := filepath.Join(t.TempDir(), "secret.key")
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadKey("", path); err == nil {
+			t.Fatal("malformed key was accepted")
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != data {
+			t.Fatalf("existing key overwritten: %q %v", got, err)
+		}
+	}
+}

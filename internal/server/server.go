@@ -25,6 +25,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -48,16 +49,20 @@ var webFS embed.FS
 
 // Server is the HTTP server for agenticgo.
 type Server struct {
-	cfg       *config.Config
-	engine    *agent.Engine
-	agents    *agents.Registry
-	tools     *tools.Registry
-	store     *store.Store
-	providers *providers.Store
-	cron      *cron.Scheduler
-	mcp       *mcp.Manager
-	http      *http.Server
-	log       logger.Logger
+	cfg        *config.Config
+	engine     *agent.Engine
+	agents     *agents.Registry
+	tools      *tools.Registry
+	store      *store.Store
+	providers  *providers.Store
+	cron       *cron.Scheduler
+	mcp        *mcp.Manager
+	http       *http.Server
+	log        logger.Logger
+	wsMu       sync.Mutex
+	wsActive   map[*websocket.Conn]context.CancelFunc
+	wsStopping bool
+	wsWG       sync.WaitGroup
 }
 
 // New builds the server.
@@ -106,6 +111,7 @@ func (s *Server) SetLogger(l logger.Logger) {
 
 // Start listens and serves until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
+	s.http.BaseContext = func(net.Listener) context.Context { return ctx }
 	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("agenticgo listening on %s (API docs at /docs)", s.cfg.Addr)
@@ -116,9 +122,18 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		s.wsMu.Lock()
+		s.wsStopping = true
+		for conn, cancel := range s.wsActive {
+			cancel()
+			conn.CloseNow()
+		}
+		s.wsMu.Unlock()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return s.http.Shutdown(shutdownCtx)
+		err := s.http.Shutdown(shutdownCtx)
+		s.wsWG.Wait()
+		return err
 	case err := <-errCh:
 		return err
 	}
@@ -154,25 +169,10 @@ func (s *Server) setSkillEnabled(key, skillKey string, on bool) error {
 		return huma.Error404NotFound(fmt.Sprintf("skill %q not found in library", skillKey))
 	}
 
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		return huma.Error404NotFound(err.Error())
-	}
-	set := map[string]bool{}
-	for _, k := range ag.Config.EnabledSkills {
-		set[k] = true
-	}
-	if on {
-		set[skillKey] = true
-	} else {
-		delete(set, skillKey)
-	}
-	keys := make([]string, 0, len(set))
-	for k := range set {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	if _, err := s.agents.SetEnabledSkills(key, keys); err != nil {
+	if _, err := s.agents.MutateConfig(key, func(cfg *agents.AgentConfig) error {
+		cfg.EnabledSkills = toggleName(cfg.EnabledSkills, skillKey, on)
+		return nil
+	}); err != nil {
 		return huma.Error500InternalServerError(err.Error())
 	}
 	return nil
@@ -192,25 +192,10 @@ func (s *Server) setCustomToolEnabled(key, name string, on bool) error {
 		}
 	}
 
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		return huma.Error404NotFound(err.Error())
-	}
-	set := map[string]bool{}
-	for _, n := range ag.Config.EnabledTools {
-		set[n] = true
-	}
-	if on {
-		set[name] = true
-	} else {
-		delete(set, name)
-	}
-	names := make([]string, 0, len(set))
-	for n := range set {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	if _, err := s.agents.SetEnabledTools(key, names); err != nil {
+	if _, err := s.agents.MutateConfig(key, func(cfg *agents.AgentConfig) error {
+		cfg.EnabledTools = toggleName(cfg.EnabledTools, name, on)
+		return nil
+	}); err != nil {
 		return huma.Error500InternalServerError(err.Error())
 	}
 	return nil
@@ -224,25 +209,10 @@ func (s *Server) setExtraCommandEnabled(key, name string, on bool) error {
 		return huma.Error404NotFound(fmt.Sprintf("command %q is not declared in AGENTICGO_EXTRA_EXEC_COMMANDS", name))
 	}
 
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		return huma.Error404NotFound(err.Error())
-	}
-	set := map[string]bool{}
-	for _, c := range ag.Config.EnabledCommands {
-		set[c] = true
-	}
-	if on {
-		set[name] = true
-	} else {
-		delete(set, name)
-	}
-	cmds := make([]string, 0, len(set))
-	for c := range set {
-		cmds = append(cmds, c)
-	}
-	sort.Strings(cmds)
-	if _, err := s.agents.SetEnabledCommands(key, cmds); err != nil {
+	if _, err := s.agents.MutateConfig(key, func(cfg *agents.AgentConfig) error {
+		cfg.EnabledCommands = toggleName(cfg.EnabledCommands, name, on)
+		return nil
+	}); err != nil {
 		return huma.Error500InternalServerError(err.Error())
 	}
 	return nil
@@ -289,39 +259,44 @@ func (s *Server) setBuiltinToolEnabled(key, name string, on bool) error {
 		return huma.Error409Conflict(fmt.Sprintf("tool %q is not on the global AGENTICGO_TOOL_ALLOWLIST", name))
 	}
 
-	ag, err := s.agents.Get(key)
-	if err != nil {
-		return huma.Error404NotFound(err.Error())
-	}
-
 	// Materialize the current effective set (inherit = the global ceiling,
 	// or all built-ins when no ceiling is configured), then apply the change.
-	effective := map[string]bool{}
-	if ag.Config.EnabledBuiltinTools != nil {
-		for _, n := range *ag.Config.EnabledBuiltinTools {
-			effective[n] = true
-		}
-	} else {
-		for _, n := range builtinTools {
-			if len(s.cfg.ToolAllowList) == 0 || slices.Contains(s.cfg.ToolAllowList, n) {
-				effective[n] = true
+	if _, err := s.agents.MutateConfig(key, func(cfg *agents.AgentConfig) error {
+		var names []string
+		if cfg.EnabledBuiltinTools != nil {
+			names = *cfg.EnabledBuiltinTools
+		} else {
+			for _, n := range builtinTools {
+				if len(s.cfg.ToolAllowList) == 0 || slices.Contains(s.cfg.ToolAllowList, n) {
+					names = append(names, n)
+				}
 			}
 		}
-	}
-	if on {
-		effective[name] = true
-	} else {
-		delete(effective, name)
-	}
-	names := make([]string, 0, len(effective))
-	for n := range effective {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	if _, err := s.agents.SetEnabledBuiltinTools(key, &names); err != nil {
-		return huma.Error500InternalServerError(err.Error())
+		names = toggleName(names, name, on)
+		cfg.EnabledBuiltinTools = &names
+		return nil
+	}); err != nil {
+		return huma.Error404NotFound(err.Error())
 	}
 	return nil
+}
+
+func toggleName(names []string, name string, on bool) []string {
+	set := map[string]bool{}
+	for _, n := range names {
+		set[n] = true
+	}
+	if on {
+		set[name] = true
+	} else {
+		delete(set, name)
+	}
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // imageDataURL reads one of the agent's images and returns it as a base64
@@ -384,6 +359,7 @@ func parseMultipartFileBody(contentType string, raw []byte, field string, maxSiz
 	if err != nil {
 		return "", nil, fmt.Errorf("parse upload: %w", err)
 	}
+	defer form.RemoveAll()
 	data, filename, err := firstMultipartFileNamed(form, field, maxSize)
 	if err != nil {
 		return "", nil, err
@@ -395,6 +371,8 @@ func parseMultipartFileBody(contentType string, raw []byte, field string, maxSiz
 // --- WebSocket chat ---
 
 type wsMessage struct {
+	Kind     string `json:"kind,omitempty"` // "cancel" stops the active turn
+	ID       string `json:"id,omitempty"`
 	Agent    string `json:"agent"`
 	Session  string `json:"session"`
 	Message  string `json:"message"`
@@ -405,7 +383,8 @@ type wsMessage struct {
 }
 
 type wsEvent struct {
-	Kind       string `json:"kind"` // text | tool_call | tool_result | done | error
+	ID         string `json:"id,omitempty"`
+	Kind       string `json:"kind"` // text | tool_call | tool_result | done | cancelled | error
 	Text       string `json:"text,omitempty"`
 	ToolName   string `json:"tool_name,omitempty"`
 	ToolArgs   string `json:"tool_args,omitempty"`
@@ -420,18 +399,59 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close(websocket.StatusInternalError, "closing")
+	socketCtx, closeSocket := context.WithCancel(r.Context())
+	s.wsMu.Lock()
+	if s.wsStopping {
+		s.wsMu.Unlock()
+		closeSocket()
+		return
+	}
+	if s.wsActive == nil {
+		s.wsActive = make(map[*websocket.Conn]context.CancelFunc)
+	}
+	s.wsActive[conn] = closeSocket
+	s.wsWG.Add(1)
+	s.wsMu.Unlock()
+	defer func() {
+		s.wsMu.Lock()
+		delete(s.wsActive, conn)
+		s.wsMu.Unlock()
+		s.wsWG.Done()
+	}()
+	var runMu sync.Mutex
+	var runCancel context.CancelFunc
+	var runID string
+	var runs sync.WaitGroup
+	defer func() { closeSocket(); runs.Wait() }()
 
 	conn.SetReadLimit(1 << 20) // 1 MiB
 
 	for {
-		_, data, err := conn.Read(r.Context())
+		_, data, err := conn.Read(socketCtx)
 		if err != nil {
 			return // client disconnected or read error
 		}
 
 		var msg wsMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
-			s.sendEvent(r.Context(), conn, wsEvent{Kind: "error", Error: "invalid message: " + err.Error()})
+			if err := s.sendEvent(socketCtx, conn, wsEvent{Kind: "error", Error: "invalid message: " + err.Error()}); err != nil {
+				return
+			}
+			continue
+		}
+		runMu.Lock()
+		if msg.Kind == "cancel" {
+			if runCancel != nil && (msg.ID == "" || msg.ID == runID) {
+				runCancel()
+			}
+			runMu.Unlock()
+			continue
+		}
+		if runCancel != nil {
+			runMu.Unlock()
+			if err := s.sendEvent(socketCtx, conn, wsEvent{ID: msg.ID, Kind: "error", Error: "a chat turn is already running"}); err != nil {
+				return
+			}
 			continue
 		}
 		if msg.Agent == "" {
@@ -441,37 +461,62 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			msg.Session = "default"
 		}
 
-		ctx, cancel := context.WithCancel(r.Context())
-		emit := func(ev agent.Event) {
-			out := wsEvent{
-				Kind:       ev.Kind,
-				Text:       ev.Text,
-				ToolName:   ev.ToolName,
-				ToolArgs:   ev.ToolArgs,
-				ToolResult: ev.ToolResult,
+		ctx, cancel := context.WithCancel(socketCtx)
+		runCancel, runID = cancel, msg.ID
+		runMu.Unlock()
+		runs.Add(1)
+		go func(msg wsMessage) {
+			defer runs.Done()
+			defer cancel()
+			emit := func(ev agent.Event) {
+				// Send a single terminal event after releasing the active run.
+				if ev.Kind == "done" || ev.Kind == "error" {
+					return
+				}
+				out := wsEvent{
+					ID:         msg.ID,
+					Kind:       ev.Kind,
+					Text:       ev.Text,
+					ToolName:   ev.ToolName,
+					ToolArgs:   ev.ToolArgs,
+					ToolResult: ev.ToolResult,
+				}
+				if ev.Err != nil {
+					out.Error = ev.Err.Error()
+				}
+				if err := s.sendEvent(ctx, conn, out); err != nil {
+					if ctx.Err() == nil {
+						closeSocket()
+					}
+					cancel()
+				}
 			}
-			if ev.Err != nil {
-				out.Error = ev.Err.Error()
-			}
-			_ = s.sendEvent(ctx, conn, out)
-		}
 
-		// Resolve any referenced agent images into base64 data-URLs. Unknown or
-		// unreadable images are skipped (the engine drops them entirely if the
-		// model isn't vision-capable).
-		var images []string
-		for _, name := range msg.Images {
-			if dataURL, err := s.imageDataURL(msg.Agent, name); err == nil {
-				images = append(images, dataURL)
+			// Resolve any referenced agent images into base64 data-URLs. Unknown or
+			// unreadable images are skipped (the engine drops them entirely if the
+			// model isn't vision-capable).
+			var images []string
+			for _, name := range msg.Images {
+				if dataURL, err := s.imageDataURL(msg.Agent, name); err == nil {
+					images = append(images, dataURL)
+				}
 			}
-		}
 
-		_, runErr := s.engine.Run(ctx, msg.Agent, msg.Session, msg.Message, msg.Provider, images, emit)
-		cancel()
-		if runErr != nil {
-			s.log.Error("ws chat run failed", "agent", msg.Agent, "session", msg.Session, "error", runErr)
-			s.sendEvent(r.Context(), conn, wsEvent{Kind: "error", Error: runErr.Error()})
-		}
+			_, runErr := s.engine.Run(ctx, msg.Agent, msg.Session, msg.Message, msg.Provider, images, emit)
+			terminal := wsEvent{ID: msg.ID, Kind: "done"}
+			if errors.Is(runErr, context.Canceled) {
+				terminal.Kind = "cancelled"
+			} else if runErr != nil {
+				s.log.Error("ws chat run failed", "agent", msg.Agent, "session", msg.Session, "error", runErr)
+				terminal.Kind, terminal.Error = "error", runErr.Error()
+			}
+			runMu.Lock()
+			runCancel, runID = nil, ""
+			if err := s.sendEvent(socketCtx, conn, terminal); err != nil {
+				closeSocket()
+			}
+			runMu.Unlock()
+		}(msg)
 	}
 }
 

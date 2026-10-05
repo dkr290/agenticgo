@@ -49,9 +49,16 @@ func LoadKey(secretB64, keyFile string) (Key, error) {
 		return k, fmt.Errorf("secret key must decode to 32 bytes, got %d", len(b))
 	}
 	// Fall back to (or create) the persisted key file.
-	if b, err := os.ReadFile(keyFile); err == nil && len(b) == 32 {
+	b, err := os.ReadFile(keyFile)
+	if err == nil {
+		if len(b) != len(k) {
+			return k, fmt.Errorf("key file must contain 32 bytes, got %d", len(b))
+		}
 		copy(k[:], b)
 		return k, nil
+	}
+	if !os.IsNotExist(err) {
+		return k, fmt.Errorf("read key file: %w", err)
 	}
 	if _, err := cryptorand.Read(k[:]); err != nil {
 		return k, fmt.Errorf("generate key: %w", err)
@@ -59,8 +66,20 @@ func LoadKey(secretB64, keyFile string) (Key, error) {
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o755); err != nil {
 		return k, fmt.Errorf("create key dir: %w", err)
 	}
-	if err := os.WriteFile(keyFile, k[:], 0o600); err != nil {
+	f, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return k, fmt.Errorf("create key file: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(k[:]); err != nil {
+		os.Remove(keyFile)
 		return k, fmt.Errorf("write key file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return k, fmt.Errorf("sync key file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return k, fmt.Errorf("close key file: %w", err)
 	}
 	return k, nil
 }

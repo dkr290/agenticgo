@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,21 +26,16 @@ func newWorkspace(root string) (*workspace, error) {
 	return &workspace{root: abs}, nil
 }
 
-// resolve maps a model-supplied path into the jail, rejecting escapes.
+// resolve validates a relative path; os.Root enforces containment at use time,
+// including symlinks and concurrent path changes.
 func (w *workspace) resolve(p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("path must not be empty")
 	}
-	// Clean and join inside the root.
-	clean := filepath.Clean("/" + p) // force relative interpretation
-	full := filepath.Join(w.root, clean)
-
-	// Ensure the result stays inside root.
-	rootWithSep := w.root + string(os.PathSeparator)
-	if full != w.root && !strings.HasPrefix(full, rootWithSep) {
+	if !filepath.IsLocal(p) {
 		return "", fmt.Errorf("path escapes workspace: %q", p)
 	}
-	return full, nil
+	return filepath.Clean(p), nil
 }
 
 // --- read_file ---
@@ -55,8 +51,10 @@ func NewReadFile(root string) (Tool, error) {
 	return &readFileTool{ws: ws}, nil
 }
 
-func (t *readFileTool) Name() string        { return "read_file" }
-func (t *readFileTool) Description() string { return "Read the contents of a text file in the workspace. Do not use for images — use fetch_agent_image instead." }
+func (t *readFileTool) Name() string { return "read_file" }
+func (t *readFileTool) Description() string {
+	return "Read the contents of a text file in the workspace. Do not use for images — use fetch_agent_image instead."
+}
 func (t *readFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -78,11 +76,21 @@ func (t *readFileTool) Call(_ context.Context, args json.RawMessage) (string, er
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(full)
+	root, err := os.OpenRoot(t.ws.root)
+	if err != nil {
+		return "", fmt.Errorf("open workspace: %w", err)
+	}
+	defer root.Close()
+	f, err := root.Open(full)
+	if err != nil {
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer f.Close()
+	const max = 32 * 1024
+	data, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
-	const max = 32 * 1024
 	if len(data) > max {
 		return string(data[:max]) + "\n... [truncated]", nil
 	}
@@ -129,10 +137,15 @@ func (t *writeFileTool) Call(_ context.Context, args json.RawMessage) (string, e
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+	root, err := os.OpenRoot(t.ws.root)
+	if err != nil {
+		return "", fmt.Errorf("open workspace: %w", err)
+	}
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return "", fmt.Errorf("create dir: %w", err)
 	}
-	if err := os.WriteFile(full, []byte(in.Content), 0o644); err != nil {
+	if err := root.WriteFile(full, []byte(in.Content), 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
@@ -168,13 +181,28 @@ func (t *listFilesTool) Call(_ context.Context, args json.RawMessage) (string, e
 	var in struct {
 		Path string `json:"path"`
 	}
-	_ = json.Unmarshal(args, &in) // path optional
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	if in.Path == "" {
+		in.Path = "."
+	}
 
 	full, err := t.ws.resolve(in.Path)
 	if err != nil {
 		return "", err
 	}
-	entries, err := os.ReadDir(full)
+	root, err := os.OpenRoot(t.ws.root)
+	if err != nil {
+		return "", fmt.Errorf("open workspace: %w", err)
+	}
+	defer root.Close()
+	f, err := root.Open(full)
+	if err != nil {
+		return "", fmt.Errorf("open directory: %w", err)
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
 	if err != nil {
 		return "", fmt.Errorf("list dir: %w", err)
 	}

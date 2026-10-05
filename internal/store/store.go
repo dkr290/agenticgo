@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS messages (
     content    TEXT    NOT NULL,
     created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(agent, session, id);
 
 CREATE TABLE IF NOT EXISTS knowledge (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +66,6 @@ CREATE TABLE IF NOT EXISTS knowledge (
     content    TEXT    NOT NULL,
     created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_knowledge_agent ON knowledge(agent, id);
 
 -- Observations are high-churn, timestamped facts captured by recurring agents
 -- (e.g. a cron job watching a k8s cluster). Unlike curated knowledge, they are
@@ -116,12 +114,22 @@ END;
 		return fmt.Errorf("migrate: %w", err)
 	}
 	// Idempotent column additions for DBs created before per-agent scoping.
-	s.addColumnIfMissing("messages", "agent", `ALTER TABLE messages ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`)
-	s.addColumnIfMissing("knowledge", "agent", `ALTER TABLE knowledge ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`)
-	// Idempotent column additions for tool-call trace in conversation history.
-	s.addColumnIfMissing("messages", "tool_calls", `ALTER TABLE messages ADD COLUMN tool_calls TEXT`)
-	s.addColumnIfMissing("messages", "tool_call_id", `ALTER TABLE messages ADD COLUMN tool_call_id TEXT`)
-	s.addColumnIfMissing("messages", "name", `ALTER TABLE messages ADD COLUMN name TEXT`)
+	for _, c := range []struct{ table, column, alter string }{
+		{"messages", "agent", `ALTER TABLE messages ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`},
+		{"knowledge", "agent", `ALTER TABLE knowledge ADD COLUMN agent TEXT NOT NULL DEFAULT 'default'`},
+		{"messages", "tool_calls", `ALTER TABLE messages ADD COLUMN tool_calls TEXT`},
+		{"messages", "tool_call_id", `ALTER TABLE messages ADD COLUMN tool_call_id TEXT`},
+		{"messages", "name", `ALTER TABLE messages ADD COLUMN name TEXT`},
+	} {
+		if err := s.addColumnIfMissing(c.table, c.column, c.alter); err != nil {
+			return err
+		}
+	}
+	// These indexes must follow column migration for pre-agent databases.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(agent, session, id);
+		CREATE INDEX IF NOT EXISTS idx_knowledge_agent ON knowledge(agent, id);`); err != nil {
+		return fmt.Errorf("create agent indexes: %w", err)
+	}
 	// Replace the broken FTS5 "special delete" triggers (from older DBs) with
 	// rowid deletes. CREATE TRIGGER IF NOT EXISTS won't overwrite them, so drop
 	// then recreate. Idempotent.
@@ -143,16 +151,27 @@ END;`); err != nil {
 		WHERE NOT EXISTS (SELECT 1 FROM knowledge_fts f WHERE f.rowid = k.id)`); err != nil {
 		return fmt.Errorf("backfill knowledge fts: %w", err)
 	}
+	if _, err := s.db.Exec(`INSERT INTO knowledge_docs_fts(rowid, title, content, agent)
+		SELECT d.id, d.title, d.content, d.agent FROM knowledge_docs d
+		WHERE NOT EXISTS (SELECT 1 FROM knowledge_docs_fts f WHERE f.rowid = d.id)`); err != nil {
+		return fmt.Errorf("backfill document fts: %w", err)
+	}
 	return nil
 }
 
-func (s *Store) addColumnIfMissing(table, column, alter string) {
+func (s *Store) addColumnIfMissing(table, column, alter string) error {
 	var n int
 	err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&n)
-	if err == nil && n == 0 {
-		_, _ = s.db.Exec(alter)
+	if err != nil {
+		return fmt.Errorf("inspect %s.%s: %w", table, column, err)
 	}
+	if n == 0 {
+		if _, err := s.db.Exec(alter); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, column, err)
+		}
+	}
+	return nil
 }
 
 // AppendMessageWithToolCalls stores a message for an agent in a session,
@@ -410,9 +429,11 @@ func (s *Store) ListObservations(ctx context.Context, agent string, limit int) (
 // and caps the total kept per agent at keepLatest. This is the retention
 // control that prevents unbounded accumulation of stale state.
 func (s *Store) PruneObservations(ctx context.Context, agent string, olderThan int64, keepLatest int) error {
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM observations WHERE agent = ? AND created_at < ?`, agent, olderThan); err != nil {
-		return fmt.Errorf("prune old observations: %w", err)
+	if olderThan > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM observations WHERE agent = ? AND created_at < ?`, agent, olderThan); err != nil {
+			return fmt.Errorf("prune old observations: %w", err)
+		}
 	}
 	if keepLatest > 0 {
 		if _, err := s.db.ExecContext(ctx,
@@ -508,6 +529,22 @@ func (s *Store) DeleteKnowledgeDoc(ctx context.Context, id int64) error {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("document %d not found", id)
+	}
+	return nil
+}
+
+// DeleteKnowledgeDocForAgent removes only a document owned by the given agent.
+func (s *Store) DeleteKnowledgeDocForAgent(ctx context.Context, id int64, agent string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM knowledge_docs WHERE id = ? AND agent = ?`, id, agent)
+	if err != nil {
+		return fmt.Errorf("delete agent document: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count deleted documents: %w", err)
+	}
+	if n == 0 {
+		return sql.ErrNoRows
 	}
 	return nil
 }

@@ -65,6 +65,15 @@ type healthOutput struct {
 
 // --- Agents ---
 
+type agentLLMConfig struct {
+	Provider          *string  `json:"provider,omitempty"`
+	Model             *string  `json:"model,omitempty"`
+	Temperature       *float64 `json:"temperature,omitempty" minimum:"0" maximum:"2"`
+	MaxTokens         *int     `json:"max_tokens,omitempty" minimum:"1"`
+	Vision            *bool    `json:"vision,omitempty"`
+	ObservationInject *int     `json:"observation_inject,omitempty" minimum:"0"`
+}
+
 type createAgentInput struct {
 	Body struct {
 		Key         string              `json:"key" example:"demo" doc:"Agent key (a-z, 0-9, -, _); becomes the directory name"`
