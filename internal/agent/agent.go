@@ -20,6 +20,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
 	"github.com/dkr290/agenticgo/internal/llm"
+	"github.com/dkr290/agenticgo/internal/maf"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/skills"
 	"github.com/dkr290/agenticgo/internal/store"
@@ -623,7 +624,7 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 			if !ok {
 				continue // not discovered (server offline or tool removed)
 			}
-			registry.Register(newMCPTool(name, t, e.mcp))
+			registry.Register(tools.AdaptFuncTool(maf.NewMCPTool(name, t, e.mcp)))
 		}
 	}
 
@@ -666,34 +667,6 @@ func (e *Engine) builtinAllowed(ag *agents.Agent) map[string]bool {
 		}
 	}
 	return out
-}
-
-// mcpTool adapts one discovered MCP tool to the tools.Tool interface so it
-// can live in the per-run registry alongside the built-in and core tools.
-type mcpTool struct {
-	name   string // namespaced: mcp_<server>_<tool>
-	desc   string
-	schema map[string]any
-	mgr    *mcp.Manager
-}
-
-func newMCPTool(name string, info mcp.ToolInfo, mgr *mcp.Manager) tools.Tool {
-	desc := info.Description
-	if desc == "" {
-		desc = "Tool from MCP server " + info.Server
-	}
-	return &mcpTool{name: name, desc: desc, schema: info.Schema, mgr: mgr}
-}
-
-func (t *mcpTool) Name() string               { return t.name }
-func (t *mcpTool) Description() string        { return t.desc }
-func (t *mcpTool) Parameters() map[string]any { return t.schema }
-
-// Call forwards to the MCP manager, which lazily reconnects a configured but
-// disconnected server. Errors are returned for the engine loop to wrap into
-// tool-result strings, so a dead server never breaks the chat.
-func (t *mcpTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	return t.mgr.CallTool(ctx, t.name, args)
 }
 
 // resolveProvider picks the provider for a run: a per-request override wins,

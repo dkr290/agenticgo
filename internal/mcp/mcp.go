@@ -129,6 +129,14 @@ func (m *Manager) SetLogger(l logger.Logger) {
 	m.log = l
 }
 
+// SetDial overrides transport construction (tests only): nil restores the
+// real stdio/HTTP transports.
+func (m *Manager) SetDial(dial func(ctx context.Context, srv *ServerConfig) (sdk.Transport, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dial = dial
+}
+
 func (m *Manager) saveLocked() error {
 	list := make([]*ServerConfig, 0, len(m.servers))
 	for _, s := range m.servers {
