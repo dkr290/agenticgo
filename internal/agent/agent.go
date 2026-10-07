@@ -553,18 +553,18 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 	registry := tools.NewRegistry(nil)
 
 	// Core memory/knowledge tools: always on, scoped to the calling agent.
-	registry.Register(tools.NewMemorySearch(e.store, ag.Key))
-	registry.Register(tools.NewMemorySave(e.store, ag.Key))
-	registry.Register(tools.NewRecordObservation(e.store, ag.Key))
-	registry.Register(tools.NewSearchDocs(e.docSearcher(ag.Key)))
-	registry.Register(tools.NewReadDoc(e.docReader(ag.Key)))
-	registry.Register(tools.NewListAgentImages(e.imageLister(ag.Key)))
+	registry.Register(tools.AdaptFuncTool(tools.NewMemorySearch(e.store, ag.Key)))
+	registry.Register(tools.AdaptFuncTool(tools.NewMemorySave(e.store, ag.Key)))
+	registry.Register(tools.AdaptFuncTool(tools.NewRecordObservation(e.store, ag.Key)))
+	registry.Register(tools.AdaptFuncTool(tools.NewSearchDocs(e.docSearcher(ag.Key))))
+	registry.Register(tools.AdaptFuncTool(tools.NewReadDoc(e.docReader(ag.Key))))
+	registry.Register(tools.AdaptFuncTool(tools.NewListAgentImages(e.imageLister(ag.Key))))
 
 	// Image sink: collects images fetched by fetch_agent_image so the engine
 	// can inject them into the next LLM turn (the model can actually see them,
 	// not just the data-URL string).
 	sink := newImageSink()
-	registry.Register(tools.NewFetchAgentImage(e.imageFetcher(ag.Key), sink))
+	registry.Register(tools.AdaptFuncTool(tools.NewFetchAgentImage(e.imageFetcher(ag.Key), sink)))
 
 	// Built-in filesystem tools, jailed to the agent's workspace. The global
 	// AGENTICGO_TOOL_ALLOWLIST is the ceiling; the agent may narrow it further

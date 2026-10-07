@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -54,7 +53,8 @@ func fakeDocs() (DocSearcher, DocReader) {
 
 func TestSearchDocsReturnsIDAndTitle(t *testing.T) {
 	search, _ := fakeDocs()
-	out, err := NewSearchDocs(search).Call(context.Background(), json.RawMessage(`{"query":"payments"}`))
+	outAny, err := NewSearchDocs(search).Call(context.Background(), `{"query":"payments"}`)
+	out, _ := outAny.(string)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,8 @@ func TestSearchDocsReturnsIDAndTitle(t *testing.T) {
 
 func TestSearchDocsNoMatch(t *testing.T) {
 	search, _ := fakeDocs()
-	out, err := NewSearchDocs(search).Call(context.Background(), json.RawMessage(`{"query":"nonexistent"}`))
+	outAny, err := NewSearchDocs(search).Call(context.Background(), `{"query":"nonexistent"}`)
+	out, _ := outAny.(string)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,8 @@ func TestSearchDocsNoMatch(t *testing.T) {
 
 func TestReadDocReturnsContent(t *testing.T) {
 	_, read := fakeDocs()
-	out, err := NewReadDoc(read).Call(context.Background(), json.RawMessage(`{"id":1}`))
+	outAny, err := NewReadDoc(read).Call(context.Background(), `{"id":1}`)
+	out, _ := outAny.(string)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,21 +93,22 @@ func TestReadDocReturnsContent(t *testing.T) {
 func TestReadDocUnknownID(t *testing.T) {
 	_, read := fakeDocs()
 	// Unknown id (e.g. another agent's doc id) must error, not leak content.
-	if _, err := NewReadDoc(read).Call(context.Background(), json.RawMessage(`{"id":99}`)); err == nil {
+	if _, err := NewReadDoc(read).Call(context.Background(), `{"id":99}`); err == nil {
 		t.Error("read_doc with unknown id should error")
 	}
 }
 
 func TestReadDocBadID(t *testing.T) {
 	_, read := fakeDocs()
-	if _, err := NewReadDoc(read).Call(context.Background(), json.RawMessage(`{"id":0}`)); err == nil {
+	if _, err := NewReadDoc(read).Call(context.Background(), `{"id":0}`); err == nil {
 		t.Error("read_doc with id 0 should error")
 	}
 }
 
 func TestMemorySavePersists(t *testing.T) {
 	fm := &fakeMem{}
-	out, err := NewMemorySave(fm, "demo").Call(context.Background(), json.RawMessage(`{"content":"User prefers terse answers"}`))
+	outAny, err := NewMemorySave(fm, "demo").Call(context.Background(), `{"content":"User prefers terse answers"}`)
+	out, _ := outAny.(string)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +122,7 @@ func TestMemorySavePersists(t *testing.T) {
 
 func TestMemorySaveRejectsEmpty(t *testing.T) {
 	fm := &fakeMem{}
-	if _, err := NewMemorySave(fm, "demo").Call(context.Background(), json.RawMessage(`{"content":"  "}`)); err == nil {
+	if _, err := NewMemorySave(fm, "demo").Call(context.Background(), `{"content":"  "}`); err == nil {
 		t.Error("memory_save with empty content should error")
 	}
 	if len(fm.saved) != 0 {
