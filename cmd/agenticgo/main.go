@@ -23,6 +23,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/server"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
+	"github.com/microsoft/agent-framework-go/tool"
 )
 
 func main() {
@@ -94,10 +95,10 @@ func main() {
 
 	// Tool registry with built-ins, gated by the tool allow-list.
 	reg := tools.NewRegistry(cfg.ToolAllowList)
-	mustRegister(reg, func() (tools.Tool, error) { return tools.NewReadFile(cfg.WorkspaceDir) })
-	mustRegister(reg, func() (tools.Tool, error) { return tools.NewWriteFile(cfg.WorkspaceDir) })
-	mustRegister(reg, func() (tools.Tool, error) { return tools.NewListFiles(cfg.WorkspaceDir) })
-	reg.Register(tools.NewExec(cfg.WorkspaceDir, cfg.ExecAllowList))
+	mustRegister(reg, func() (tools.Tool, error) { return adaptTool(tools.NewReadFile(cfg.WorkspaceDir)) })
+	mustRegister(reg, func() (tools.Tool, error) { return adaptTool(tools.NewWriteFile(cfg.WorkspaceDir)) })
+	mustRegister(reg, func() (tools.Tool, error) { return adaptTool(tools.NewListFiles(cfg.WorkspaceDir)) })
+	reg.Register(tools.AdaptFuncTool(tools.NewExec(cfg.WorkspaceDir, cfg.ExecAllowList)))
 
 	engine := agent.New(cfg, reg, st, agentReg)
 	engine.SetProviderLookup(providerStore)
@@ -149,4 +150,12 @@ func mustRegister(reg *tools.Registry, make func() (tools.Tool, error)) {
 		log.Fatalf("tool init: %v", err)
 	}
 	reg.Register(t)
+}
+
+// adaptTool adapts a functool constructor result to the legacy registry.
+func adaptTool(ft tool.FuncTool, err error) (tools.Tool, error) {
+	if err != nil {
+		return nil, err
+	}
+	return tools.AdaptFuncTool(ft), nil
 }

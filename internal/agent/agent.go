@@ -580,21 +580,21 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 		if err != nil {
 			return nil, nil, err
 		}
-		registry.Register(t)
+		registry.Register(tools.AdaptFuncTool(t))
 	}
 	if builtin["write_file"] {
 		t, err := tools.NewWriteFile(workspace)
 		if err != nil {
 			return nil, nil, err
 		}
-		registry.Register(t)
+		registry.Register(tools.AdaptFuncTool(t))
 	}
 	if builtin["list_files"] {
 		t, err := tools.NewListFiles(workspace)
 		if err != nil {
 			return nil, nil, err
 		}
-		registry.Register(t)
+		registry.Register(tools.AdaptFuncTool(t))
 	}
 
 	// Exec: safe commands from the global AGENTICGO_EXEC_ALLOWLIST plus the
@@ -610,7 +610,7 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 				execExtra = append(execExtra, cmd)
 			}
 		}
-		registry.Register(tools.NewExecWithExtra(workspace, execAllow, execExtra))
+		registry.Register(tools.AdaptFuncTool(tools.NewExecWithExtra(workspace, execAllow, execExtra)))
 	}
 
 	// Custom (MCP) tools enabled for this agent. Tools whose server is not
