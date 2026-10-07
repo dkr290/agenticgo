@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"sync"
@@ -347,6 +348,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	// MAF execution path (AGENTICGO_USE_MAF): same contract, MAF agent loop.
 	// The legacy loop below is removed once this proves out.
 	if e.cfg.UseMAF {
+		log.Println("Using MAF packages now")
 		op, ok := provider.(*llm.OpenAIProvider)
 		if !ok {
 			return "", fmt.Errorf("MAF path requires an OpenAI-compatible provider, got %T", provider)
