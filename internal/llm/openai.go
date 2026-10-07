@@ -59,6 +59,20 @@ func (p *OpenAIProvider) SetLogger(l logger.Logger) {
 	p.log = l
 }
 
+// RequestOptions returns the client options the MAF engine path uses to build
+// its own openai.Client with the same endpoint and credentials. The key
+// placeholder logic matches NewOpenAI (the SDK requires a non-empty key).
+func (p *OpenAIProvider) RequestOptions() []option.RequestOption {
+	key := p.apiKey
+	if key == "" {
+		key = "unused" // required by the SDK, ignored by local servers
+	}
+	return []option.RequestOption{
+		option.WithBaseURL(p.baseURL),
+		option.WithAPIKey(key),
+	}
+}
+
 // Name returns the provider name.
 func (p *OpenAIProvider) Name() string { return "openai-compatible" }
 

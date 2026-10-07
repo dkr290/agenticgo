@@ -76,3 +76,13 @@ func (r *Registry) Call(ctx context.Context, name string, args json.RawMessage) 
 	}
 	return t.Call(ctx, args)
 }
+
+// Tools returns the registered tools in unspecified order. The MAF engine
+// path uses it to unwrap the registry into a []tool.Tool.
+func (r *Registry) Tools() []Tool {
+	out := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		out = append(out, t)
+	}
+	return out
+}

@@ -95,6 +95,13 @@ type Config struct {
 	// Debug enables verbose debug logging to stderr (AGENTICGO_DEBUG=true).
 	Debug bool
 
+	// UseMAF routes Engine.Run through the Microsoft Agent Framework loop
+	// (AGENTICGO_USE_MAF=true) instead of the legacy hand-rolled loop. Both
+	// paths share history storage, tool gating, and the WS event contract;
+	// the flag exists to A/B them during the migration. The legacy path is
+	// removed once the MAF path proves out.
+	UseMAF bool
+
 	// SystemPrompt is the base system prompt; knowledge is appended to it.
 	SystemPrompt string
 }
@@ -144,6 +151,7 @@ func Load() (*Config, error) {
 	// Engine.StartRetentionSweeper.
 	cfg.RetentionSweepMinutes = getEnvInt("AGENTICGO_RETENTION_SWEEP_MINUTES", 60)
 	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
+	cfg.UseMAF = getEnvBool("AGENTICGO_USE_MAF", false)
 
 	// No default: empty means "generate/persist a key under DataDir".
 	cfg.SecretKey = getEnv("AGENTICGO_SECRET_KEY", "")

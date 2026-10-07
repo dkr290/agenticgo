@@ -231,6 +231,22 @@ func dataURLContent(dataURL string) *message.DataContent {
 	}
 }
 
+// UserMessage builds a MAF user message from text plus optional base64
+// data-URL images (the chat attachment / fetch_agent_image vision path).
+// Invalid data-URLs are dropped silently — the engine only forwards images
+// for vision-capable providers anyway.
+func UserMessage(text string, images []string) *message.Message {
+	cs := message.Contents{&message.TextContent{Text: text}}
+	for _, img := range images {
+		if dc := dataURLContent(img); dc != nil {
+			cs = append(cs, dc)
+		}
+	}
+	msg := message.New(cs...)
+	msg.Role = message.RoleUser
+	return msg
+}
+
 // replayHistory preserves tool metadata and drops incomplete tool exchanges
 // caused by a history-window boundary or an interrupted run. Moved verbatim
 // from internal/agent — the correctness invariants (dangling calls, orphaned

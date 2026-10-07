@@ -344,6 +344,16 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	// non-fatal. Each knob at 0 disables that limit.
 	e.pruneRetention(ctx, agentKey)
 
+	// MAF execution path (AGENTICGO_USE_MAF): same contract, MAF agent loop.
+	// The legacy loop below is removed once this proves out.
+	if e.cfg.UseMAF {
+		op, ok := provider.(*llm.OpenAIProvider)
+		if !ok {
+			return "", fmt.Errorf("MAF path requires an OpenAI-compatible provider, got %T", provider)
+		}
+		return e.runMAF(ctx, ag, agentKey, session, userMessage, op, images, vision, emit)
+	}
+
 	// Persist the user turn.
 	if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleUser), userMessage); err != nil {
 		return "", fmt.Errorf("save user message: %w", err)

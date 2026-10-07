@@ -69,3 +69,13 @@ func (a *funcToolAdapter) Call(ctx context.Context, args json.RawMessage) (strin
 	}
 	return string(data), nil
 }
+
+// UnwrapFuncTool returns the underlying MAF FuncTool when t was produced by
+// AdaptFuncTool — used by the MAF engine path to recover the native tool from
+// the legacy registry. ok is false for legacy tools.Tool implementations.
+func UnwrapFuncTool(t Tool) (tool.FuncTool, bool) {
+	if a, ok := t.(*funcToolAdapter); ok {
+		return a.ft, true
+	}
+	return nil, false
+}
