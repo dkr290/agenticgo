@@ -32,6 +32,44 @@ type ChatConfig struct {
 // outer agent is the sole owner of the lifecycle. This exposes the provider
 // boundary for the v0.1.0 stream compatibility fix and run-scoped image context,
 // while MAF still owns request translation, invocation, and iteration limits.
+//
+// TODO(maf-upgrade): This package pins compatibility workarounds to MAF v0.1.0.
+// When bumping github.com/microsoft/agent-framework-go, re-test each adapter
+// below against the new version and delete whichever upstream has fixed; the
+// goal is to converge back to a single openaiprovider.NewChatCompletionsAgent
+// with fused autocall (the documented wiring) once it is correct.
+//
+// Verified against upstream source and issue tracker (Oct 2026):
+//
+//   - completionUpdates (streamed tool-call assembly): STILL REQUIRED.
+//     provider/openaiprovider/chat.go on main still emits at most one
+//     FunctionCallContent per chunk via acc.JustFinishedToolCall(); the
+//     non-streaming path correctly ranges over all Message.ToolCalls. Repro
+//     (scratch test, since deleted): a single chunk packing two tool calls
+//     emitted ZERO FunctionCallContents under stock v0.1.0 wiring, so autocall
+//     invoked neither. No upstream issue filed yet — consider filing one and
+//     linking it here. Delete this adapter only when the streaming path emits
+//     every accumulated call.
+//
+//   - toolLoop image retention: STILL REQUIRED. agent/messageinjection.go's
+//     MessageInjector.run returns as soon as an actionable FunctionCallContent
+//     appears, so injected messages reach only one downstream request. Our
+//     run-scoped re-injection keeps fetched images in context for every
+//     remaining round. Re-check MessageInjector on upgrade; if it gains
+//     persistent/positional injection, drop the retention logic (keep the
+//     drain hook shape).
+//
+//   - GuardTools (cancellation before dispatch): LIKELY REDUNDANT after upgrade.
+//     Upstream issue #1076 / PR #1077 ("Stop tool invocation on request
+//     cancellation", merged 2026-09-16, after v0.1.0) makes toolautocall check
+//     ctx.Err() before provider/tool calls and bypass the recoverable-error
+//     path on cancellation. Once we pin a release containing #1077, remove
+//     GuardTools and rely on the framework; keep
+//     TestChatCancellationStopsRemainingBatchAndKeepsResults as the guard.
+//
+//   - HistoryProvider/CheckpointMiddleware: NOT a workaround — this is our
+//     intended persistence design (SQLite owns history, MAF sessions never do).
+//     Keep regardless of upstream changes.
 func NewChatAgent(client openai.Client, cfg ChatConfig) *agent.Agent {
 	zero := 0
 	provider := openaiprovider.NewChatCompletionsAgent(client, openaiprovider.AgentConfig{
