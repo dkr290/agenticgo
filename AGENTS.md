@@ -71,7 +71,17 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   names are safe. Built-in tools stay gated by the global
   `AGENTICGO_TOOL_ALLOWLIST`; MCP tools are purely additive per agent.
 - **LLM providers**: OpenAI-compatible endpoints only (Ollama / LM Studio / vLLM /
-  OpenAI), behind a `llm.Provider` interface. Named provider configs are managed
+  OpenAI / Azure Foundry's OpenAI-compatible endpoint), behind a `llm.Provider`
+  interface. The agent loop itself runs on the **Microsoft Agent Framework**
+  (`github.com/microsoft/agent-framework-go`): per run, the engine builds a
+  `openaiprovider.NewChatCompletionsAgent` with the composed system prompt, the
+  gated tool set, and `toolautocall` middleware as the tool loop
+  (`MaximumIterationsPerRequest` = `AGENTICGO_MAX_ITERATIONS`). History stays in
+  SQLite via a `HistoryProvider` bridge (`internal/maf`) — MAF sessions never own
+  conversation state. All tools are MAF `tool.FuncTool`s: built-ins and core
+  memory/docs tools are `functool` typed funcs (schema derived from the args
+  struct), MCP tools wrap `Manager.CallTool` (namespaced `mcp_<server>_<tool>`,
+  lazy reconnect, soft-fail). Named provider configs are managed
   from the UI, persisted to `data/providers.json` (nothing is seeded — a
   provider is created manually from the UI before anything can chat). A chat
   request may override the provider (`wsMessage.Provider`); each
@@ -94,7 +104,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   a per-request access line (method/path/status/duration) is debug-level only.
   Other packages keep `logger.Nop()` until adopted.
   Secrets are redacted (`****` + last 4) before logging.
-- **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec`. The `exec`
+- **Built-in tools**: `read_file`, `write_file`, `list_files`, `exec` — MAF
+  `functool` typed funcs in `internal/tools` (schema derived from the args
+  struct via `jsonschema` tags). The `exec`
   tool's safe commands come from `AGENTICGO_EXEC_ALLOWLIST`; additional dangerous
   commands (`AGENTICGO_EXTRA_EXEC_COMMANDS`) are enabled per agent. The global
   `AGENTICGO_TOOL_ALLOWLIST` is the ceiling for which built-ins exist at all;
@@ -102,7 +114,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   (nil = inherit the global allow-list, the common case; a list = exactly those;
   `[]` = no built-ins — Agents → Built-in Tools tab, or
   `GET/PUT/DELETE /api/agents/{k}/builtin-tools[/{name}]`). Narrowing can never
-  exceed the global ceiling, and the always-on core tools are unaffected.
+  exceed the global ceiling, and the always-on core tools are unaffected. The
+  Built-in Tools page is served from a static catalog (`tools.BuiltinTools`),
+  not a runtime registry.
 - **Vision / images**: a provider can be flagged `vision` (its model understands
   images — set manually, there's no reliable API to detect it). An agent's
   `config.json` `vision` tri-state overrides it (nil = inherit) for when the agent
@@ -158,12 +172,12 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   `AGENTICGO_TOOL_ALLOWLIST` and cannot be disabled per agent. They are listed
   read-only on the Built-in Tools page via `GET /api/tools/core` (single source of
   truth: `tools.CoreTools()`).
-- **Per-run tool registry**: `Engine.runRegistry` composes every tool a run sees —
+- **Per-run tool set**: `Engine.runTools` composes every tool a run sees —
   core memory/docs tools, workspace-jailed built-ins (narrowed per agent), exec
   (safe + enabled extra commands), and enabled MCP tools — into one
-  `tools.Registry`. `Run` uses its `Specs()` for the LLM request and `Call()` for
-  dispatch, so the spec list and execution can never drift, and a tool absent
-  from the registry is invisible to the model and rejected at dispatch.
+  `[]tool.Tool` slice handed to the MAF agent, whose `toolautocall` middleware
+  can only invoke what it was given: a tool absent from the slice is invisible
+  to the model and unreachable at dispatch, by construction.
 - **Self-evolution (simplified)**: `Engine.Evolve` extracts learnings from a session
   into the agent's knowledge store; re-injected into its system prompt.
 - **Cron**: `internal/cron` is a real scheduler — jobs are persisted to
@@ -194,8 +208,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 
 - `cmd/agenticgo/main.go` — wiring: config → agents.Registry (no agent is
   seeded; agents are created from the UI once a provider is configured) →
-  store → llm.Provider → providers.Store (not seeded; created from the UI) →
-  mcp.Manager + cron.Scheduler → tools.Registry → agent.Engine → server.
+  store → providers.Store (not seeded; created from the UI) →
+  mcp.Manager + cron.Scheduler → agent.Engine → server. Tools are composed
+  per run by the engine; there is no process-global tool registry.
   The cron scheduler is started after the engine exists and stopped on shutdown.
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
   `AgentsDir`. `Agent.SystemPrompt()` composes context files. `Registry.Create`
@@ -215,13 +230,18 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   (`data/cron.json`), `robfig/cron` for scheduling, each enabled job runs
   `Engine.Run` on its own `cron-<id>` session.
 - `internal/agent` — `Engine` resolves an agent, builds the system prompt
-  (base + context files + skills + per-agent knowledge) and runs the tool loop,
-  persisting turns under `(agent, session)`. `SetProviderLookup` enables
-  per-request provider overrides; `SetMCPManager` enables per-agent MCP tools.
-  `runRegistry` composes the per-run tool set (core memory/docs tools,
-  workspace-jailed built-ins narrowed by `enabled_builtin_tools`, exec with
-  enabled extra commands, enabled MCP tools) whose `Specs()`/`Call()` serve
-  both the LLM request and dispatch.
+  (base + context files + skills + per-agent knowledge) and runs the MAF
+  agent loop, persisting turns under `(agent, session)`. `runTools` composes
+  the per-run tool set (core memory/docs tools, workspace-jailed built-ins
+  narrowed by `enabled_builtin_tools`, exec with enabled extra commands,
+  enabled MCP tools) whose slice serves both the LLM request and dispatch.
+  `SetProviderLookup` enables per-request provider overrides;
+  `SetMCPManager` enables per-agent MCP tools.
+- `internal/maf` — the only package importing agent-framework-go internals:
+  the `HistoryProvider` bridge over the SQLite store (with the history-repair
+  rules for interrupted/tool-call exchanges), the `llm.Message` ↔
+  `message.Message` translation, the MCP tool FuncTool wrapper, and the
+  user-message (text + images) builder.
 - `internal/server` — all REST routes are **Huma operations** registered in
   `routes.go` via `huma.Register` on a stdlib `http.ServeMux` (adapter
   `github.com/danielgtaylor/huma/v2/adapters/humago`), so `/openapi.json`,
@@ -295,10 +315,16 @@ Per-agent workspaces are wired into the tool loop.
 - API framework: `github.com/danielgtaylor/huma/v2` on the **humago** adapter
   (stdlib `http.ServeMux`) — OpenAPI 3.1 + docs UI at `/docs` are
   self-generated. (chi was replaced by Huma; the router is now stdlib.)
+- Agent framework: `github.com/microsoft/agent-framework-go` — the agent loop,
+  tool auto-invocation (`toolautocall`), and tool plumbing (`functool`) run on
+  it. All framework-facing code is quarantined in `internal/maf` (history
+  bridge, message translation, MCP wrapper) so a preview-API upgrade touches
+  one package.
 - LLM client: `github.com/openai/openai-go/v3` (official SDK, Chat Completions
   API with base-URL override — works with Ollama / LM Studio / LocalAI / vLLM /
-  OpenAI). The old hand-rolled SSE client is kept, bug-fixed, as reference only
-  in `internal/llm/openai.go.bak` (not compiled).
+  OpenAI / Azure Foundry's OpenAI-compatible endpoint). The engine passes
+  endpoint credentials to MAF via `OpenAIProvider.RequestOptions`; the old
+  hand-rolled streaming provider was removed in the MAF migration.
 - Router: stdlib `http.ServeMux` (via the Huma humago adapter; chi was removed).
 - WebSocket: `github.com/coder/websocket`.
 - SQLite: `modernc.org/sqlite` (no cgo — static binary / k8s friendly).
@@ -335,7 +361,10 @@ curl -X POST localhost:18099/api/chat \
 ## Key files
 
 - `cmd/agenticgo/main.go` — wiring
-- `internal/agent/agent.go` — `Engine` tool loop + `Evolve` (self-evolution)
+- `internal/agent/agent.go` — `Engine` (provider resolution, system prompt,
+  retention, `Evolve`) + `run_maf.go` (the MAF agent loop + one-shot runs)
+- `internal/maf/` — framework bridge: `history.go` (HistoryProvider +
+  translation), `mcp.go` (MCP tool FuncTool)
 - `internal/agents/agents.go` — agent registry + context files
 - `internal/agenttemplates/agenttemplates.go` — `go:embed` initial context-file templates (`templates/`)
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition
@@ -344,11 +373,13 @@ curl -X POST localhost:18099/api/chat \
 - `internal/logger/logger.go` — minimal `Logger` interface + slog backend (debug via `AGENTICGO_DEBUG`)
 - `internal/cron/cron.go` — cron scheduler: JSON-persisted jobs + `robfig/cron` runner
 - `internal/mcp/mcp.go` — MCP client manager (server registry, discovery, `CallTool`)
-- `internal/llm/openai.go` — OpenAI-compatible provider on the official SDK
-  (streaming + tool calls); `openai.go.bak` = pre-SDK reference copy (not compiled)
-- `internal/tools/{tools,fs,exec,memory}.go` — registry, filesystem jail,
-  allow-listed exec, core memory/knowledge tools (`memory_search`, `memory_save`,
-  `record_observation`, `search_docs`, `read_doc`) + `CoreTools()` metadata
+- `internal/llm/{llm,openai}.go` — provider interface + endpoint config
+  carrier (`OpenAIProvider.RequestOptions`, `ListModels` for the Providers UI)
+- `internal/tools/{fs,exec,memory,catalog}.go` — functool built-ins
+  (filesystem jail, allow-listed exec), core memory/knowledge tools
+  (`memory_search`, `memory_save`, `record_observation`, `search_docs`,
+  `read_doc`, `list_agent_images`, `fetch_agent_image`), `CoreTools()` +
+  `BuiltinTools()` metadata for the UI
 - `internal/store/store.go` — SQLite schema + queries (per-agent; FTS5 knowledge +
   observations)
 - `internal/server/server.go` — wiring (humago adapter on stdlib mux), `/ws`

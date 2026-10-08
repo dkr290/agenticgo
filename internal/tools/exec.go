@@ -3,7 +3,6 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +11,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/microsoft/agent-framework-go/tool"
+	"github.com/microsoft/agent-framework-go/tool/functool"
 )
 
 // execTool sandboxes standard commands; explicitly enabled dangerous extras
@@ -25,27 +27,34 @@ type execTool struct {
 	extra []string
 }
 
+type execArgs struct {
+	Command string `json:"command" jsonschema:"The command line to run, e.g. \"ls -la\". Only allow-listed commands are permitted."`
+}
+
 // NewExec creates the exec tool. allowList contains permitted command names
 // (e.g. "ls", "cat"). workspace is the working directory for commands.
-func NewExec(workspace string, allowList []string) Tool {
-	allow := map[string]bool{}
-	for _, c := range allowList {
-		allow[c] = true
-	}
-	return &execTool{workspace: workspace, allow: allow, timeout: 30 * time.Second}
+func NewExec(workspace string, allowList []string) tool.FuncTool {
+	return NewExecWithExtra(workspace, allowList, nil)
 }
 
 // NewExecWithExtra creates the exec tool like NewExec but records which
 // commands came from the extra (dangerous) allow-list so the description can
 // name them — otherwise the model cannot tell which extra commands it may run.
-func NewExecWithExtra(workspace string, allowList, extra []string) Tool {
-	t := NewExec(workspace, allowList).(*execTool)
-	t.extra = extra
-	return t
+func NewExecWithExtra(workspace string, allowList, extra []string) tool.FuncTool {
+	allow := map[string]bool{}
+	for _, c := range allowList {
+		allow[c] = true
+	}
+	t := &execTool{workspace: workspace, allow: allow, timeout: 30 * time.Second, extra: extra}
+	return functool.MustNew(functool.Config{
+		Name:        "exec",
+		Description: t.description(),
+	}, t.run)
 }
 
-func (t *execTool) Name() string { return "exec" }
-func (t *execTool) Description() string {
+// description names the enabled extra commands so the model can tell which
+// dangerous commands it may run beyond the safe standard set.
+func (t *execTool) description() string {
 	d := "Run an allow-listed command (arguments are whitespace-separated). Standard commands run in an isolated workspace sandbox."
 	if len(t.extra) > 0 {
 		d += " In addition to the standard safe commands, you may run these " +
@@ -54,28 +63,11 @@ func (t *execTool) Description() string {
 	}
 	return d
 }
-func (t *execTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"command": map[string]any{
-				"type":        "string",
-				"description": "The command line to run, e.g. \"ls -la\". Only allow-listed commands are permitted.",
-			},
-		},
-		"required": []string{"command"},
-	}
-}
 
-func (t *execTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Command string `json:"command"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-
-	fields := strings.Fields(in.Command)
+// run is the tool body. functool binds and validates the arguments (required
+// "command", no additional properties) before this is called.
+func (t *execTool) run(ctx context.Context, args execArgs) (string, error) {
+	fields := strings.Fields(args.Command)
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty command")
 	}

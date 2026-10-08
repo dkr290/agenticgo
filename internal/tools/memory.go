@@ -2,9 +2,11 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/microsoft/agent-framework-go/tool"
+	"github.com/microsoft/agent-framework-go/tool/functool"
 )
 
 // MemoryStore is the subset of the store the memory tools need.
@@ -19,213 +21,9 @@ type MemoryStore interface {
 // The engine adapts store.SearchDocs to this, keeping tools decoupled.
 type DocSearcher func(ctx context.Context, query string, limit int) ([]string, error)
 
-// memorySearchTool lets the agent query its own curated knowledge by keyword,
-// instead of relying on all of it being injected into the prompt. Selective
-// retrieval reduces noise (and hallucination from irrelevant context).
-type memorySearchTool struct {
-	store MemoryStore
-	agent string
-}
-
-// NewMemorySearch creates the memory_search tool scoped to an agent.
-func NewMemorySearch(store MemoryStore, agentKey string) Tool {
-	return &memorySearchTool{store: store, agent: agentKey}
-}
-
-func (t *memorySearchTool) Name() string { return "memory_search" }
-func (t *memorySearchTool) Description() string {
-	return "Search your long-term curated knowledge for relevant facts by keyword. " +
-		"Use this to recall prior learnings instead of guessing."
-}
-func (t *memorySearchTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"query": map[string]any{"type": "string", "description": "Keywords to search for."},
-			"limit": map[string]any{"type": "integer", "description": "Max results (default 8)."},
-		},
-		"required": []string{"query"},
-	}
-}
-
-func (t *memorySearchTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	if in.Limit <= 0 {
-		in.Limit = 8
-	}
-	hits, err := t.store.SearchKnowledge(ctx, t.agent, in.Query, in.Limit)
-	if err != nil {
-		return "", err
-	}
-	if len(hits) == 0 {
-		return "No relevant knowledge found.", nil
-	}
-	var b strings.Builder
-	b.WriteString("Relevant knowledge (may be from past sessions — verify it is still current):\n")
-	for _, h := range hits {
-		b.WriteString("- ")
-		b.WriteString(strings.TrimSpace(h))
-		b.WriteString("\n")
-	}
-	return strings.TrimSpace(b.String()), nil
-}
-
-// memorySaveTool lets the agent persist a durable fact, preference, or lesson
-// to its curated long-term knowledge. This is the agent-initiated write path
-// (complementing the background self-evolution pass): when the user says
-// "remember this", the agent saves it in the same turn. Stored knowledge is
-// full-text searchable via memory_search and selectively recalled, not
-// bulk-injected.
-type memorySaveTool struct {
-	store MemoryStore
-	agent string
-}
-
-// NewMemorySave creates the memory_save tool scoped to an agent.
-func NewMemorySave(store MemoryStore, agentKey string) Tool {
-	return &memorySaveTool{store: store, agent: agentKey}
-}
-
-func (t *memorySaveTool) Name() string { return "memory_save" }
-func (t *memorySaveTool) Description() string {
-	return "Save a durable fact, user preference, or lesson to your long-term curated " +
-		"knowledge. Use when the user asks you to remember something, or when you learn " +
-		"something worth keeping across sessions. Not for time-bound state — use " +
-		"record_observation for that. Saved knowledge is searchable via memory_search."
-}
-func (t *memorySaveTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"content": map[string]any{"type": "string", "description": "One concise durable fact, preference, or lesson to remember."},
-		},
-		"required": []string{"content"},
-	}
-}
-
-func (t *memorySaveTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	if strings.TrimSpace(in.Content) == "" {
-		return "", fmt.Errorf("content must not be empty")
-	}
-	if err := t.store.AddKnowledge(ctx, t.agent, in.Content); err != nil {
-		return "", err
-	}
-	return "saved to long-term memory", nil
-}
-
-// recordObservationTool lets a recurring agent (e.g. a cron job) record a
-// timestamped observation. Observations are pruned by retention and only the
-// latest is injected into prompts, so stale state does not mislead the model.
-type recordObservationTool struct {
-	store MemoryStore
-	agent string
-}
-
-// NewRecordObservation creates the record_observation tool scoped to an agent.
-func NewRecordObservation(store MemoryStore, agentKey string) Tool {
-	return &recordObservationTool{store: store, agent: agentKey}
-}
-
-func (t *recordObservationTool) Name() string { return "record_observation" }
-func (t *recordObservationTool) Description() string {
-	return "Record a timestamped observation about the current state of something " +
-		"(e.g. a k8s cluster health check). Observations are time-bound and pruned " +
-		"automatically; record durable patterns as knowledge instead."
-}
-func (t *recordObservationTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"content": map[string]any{"type": "string", "description": "The observation, e.g. 'pod payments-api has 3 restarts'."},
-		},
-		"required": []string{"content"},
-	}
-}
-
-func (t *recordObservationTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	if strings.TrimSpace(in.Content) == "" {
-		return "", fmt.Errorf("content must not be empty")
-	}
-	if err := t.store.AddObservation(ctx, t.agent, in.Content); err != nil {
-		return "", err
-	}
-	return "observation recorded", nil
-}
-
-// searchDocsTool searches the agent's knowledge-base documents (uploaded
-// reference material). Returns "id — title" lines so the agent can follow up
-// with read_doc to fetch the actual content.
-type searchDocsTool struct {
-	search DocSearcher
-}
-
-// NewSearchDocs creates the search_docs tool from a search function.
-func NewSearchDocs(search DocSearcher) Tool {
-	return &searchDocsTool{search: search}
-}
-
-func (t *searchDocsTool) Name() string { return "search_docs" }
-func (t *searchDocsTool) Description() string {
-	return "Search your knowledge base (documents uploaded for you) by keyword. " +
-		"Returns matching documents as 'id — title'. Call read_doc with a document's " +
-		"id to read its full content before relying on it."
-}
-func (t *searchDocsTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"query": map[string]any{"type": "string", "description": "Keywords to search for."},
-			"limit": map[string]any{"type": "integer", "description": "Max results (default 5)."},
-		},
-		"required": []string{"query"},
-	}
-}
-
-func (t *searchDocsTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	if in.Limit <= 0 {
-		in.Limit = 5
-	}
-	lines, err := t.search(ctx, in.Query, in.Limit)
-	if err != nil {
-		return "", err
-	}
-	if len(lines) == 0 {
-		return "No documents matched.", nil
-	}
-	var b strings.Builder
-	b.WriteString("Matching documents (use read_doc with the id to read content):\n")
-	for _, l := range lines {
-		b.WriteString("- ")
-		b.WriteString(l)
-		b.WriteString("\n")
-	}
-	return strings.TrimSpace(b.String()), nil
-}
+// DocReader fetches one document's content by ID, scoped to the agent.
+// Implemented by the engine over store.GetKnowledgeDocForAgent.
+type DocReader func(ctx context.Context, id int64) (title, content string, err error)
 
 // ImageLister lists the images available for an agent.
 type ImageLister func(ctx context.Context) ([]string, error)
@@ -242,99 +40,226 @@ type ImageSink interface {
 	DrainImages() []string
 }
 
-// listAgentImagesTool lists the images available in the agent's images directory.
-// It lets the agent discover what reference images exist so it can fetch one
-// with fetch_agent_image when it needs visual context.
-type listAgentImagesTool struct {
-	list ImageLister
+// --- memory_search ---
+
+type memorySearchArgs struct {
+	Query string `json:"query"          jsonschema:"Keywords to search for."`
+	Limit int    `json:"limit,omitempty" jsonschema:"Max results (default 8)."`
 }
 
-// NewListAgentImages creates the list_agent_images tool from a lister function.
-func NewListAgentImages(list ImageLister) Tool {
-	return &listAgentImagesTool{list: list}
+// NewMemorySearch creates the memory_search tool scoped to an agent. It lets
+// the agent query its own curated knowledge by keyword, instead of relying on
+// all of it being injected into the prompt. Selective retrieval reduces noise
+// (and hallucination from irrelevant context).
+func NewMemorySearch(store MemoryStore, agentKey string) tool.FuncTool {
+	return functool.MustNew(functool.Config{
+		Name: "memory_search",
+		Description: "Search your long-term curated knowledge for relevant facts by keyword. " +
+			"Use this to recall prior learnings instead of guessing.",
+	}, func(ctx context.Context, args memorySearchArgs) (string, error) {
+		if args.Limit <= 0 {
+			args.Limit = 8
+		}
+		hits, err := store.SearchKnowledge(ctx, agentKey, args.Query, args.Limit)
+		if err != nil {
+			return "", err
+		}
+		if len(hits) == 0 {
+			return "No relevant knowledge found.", nil
+		}
+		var b strings.Builder
+		b.WriteString("Relevant knowledge (may be from past sessions — verify it is still current):\n")
+		for _, h := range hits {
+			b.WriteString("- ")
+			b.WriteString(strings.TrimSpace(h))
+			b.WriteString("\n")
+		}
+		return strings.TrimSpace(b.String()), nil
+	})
 }
 
-func (t *listAgentImagesTool) Name() string { return "list_agent_images" }
-func (t *listAgentImagesTool) Description() string {
-	return "List the reference images available for this agent. " +
-		"Use fetch_agent_image with the image name to retrieve an image."
-}
-func (t *listAgentImagesTool) Parameters() map[string]any {
-	return map[string]any{
-		"type":       "object",
-		"properties": map[string]any{},
-		"required":   []string{},
-	}
+// --- memory_save ---
+
+type memorySaveArgs struct {
+	Content string `json:"content" jsonschema:"One concise durable fact, preference, or lesson to remember."`
 }
 
-func (t *listAgentImagesTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	names, err := t.list(ctx)
-	if err != nil {
-		return "", err
-	}
-	if len(names) == 0 {
-		return "No reference images available.", nil
-	}
-	var b strings.Builder
-	b.WriteString("Available reference images (use fetch_agent_image to retrieve one):\n")
-	for _, n := range names {
-		b.WriteString("- ")
-		b.WriteString(n)
-		b.WriteString("\n")
-	}
-	return strings.TrimSpace(b.String()), nil
+// NewMemorySave creates the memory_save tool scoped to an agent. It lets the
+// agent persist a durable fact, preference, or lesson to its curated
+// long-term knowledge. This is the agent-initiated write path (complementing
+// the background self-evolution pass): when the user says "remember this",
+// the agent saves it in the same turn. Stored knowledge is full-text
+// searchable via memory_search and selectively recalled, not bulk-injected.
+func NewMemorySave(store MemoryStore, agentKey string) tool.FuncTool {
+	return functool.MustNew(functool.Config{
+		Name: "memory_save",
+		Description: "Save a durable fact, user preference, or lesson to your long-term curated " +
+			"knowledge. Use when the user asks you to remember something, or when you learn " +
+			"something worth keeping across sessions. Not for time-bound state — use " +
+			"record_observation for that. Saved knowledge is searchable via memory_search.",
+	}, func(ctx context.Context, args memorySaveArgs) (string, error) {
+		if strings.TrimSpace(args.Content) == "" {
+			return "", fmt.Errorf("content must not be empty")
+		}
+		if err := store.AddKnowledge(ctx, agentKey, args.Content); err != nil {
+			return "", err
+		}
+		return "saved to long-term memory", nil
+	})
 }
 
-// fetchAgentImageTool retrieves one agent image by name and injects it into
-// the next LLM turn via the ImageSink. The model can actually see the image
-// (not just the data-URL string) because the engine attaches it as an
-// image_url content part. Returns a confirmation string.
-type fetchAgentImageTool struct {
-	fetch ImageFetcher
-	sink  ImageSink
+// --- record_observation ---
+
+type recordObservationArgs struct {
+	Content string `json:"content" jsonschema:"The observation, e.g. 'pod payments-api has 3 restarts'."`
 }
 
-// NewFetchAgentImage creates the fetch_agent_image tool from a fetcher and
-// an ImageSink. The sink collects images for injection into the next turn.
-func NewFetchAgentImage(fetch ImageFetcher, sink ImageSink) Tool {
-	return &fetchAgentImageTool{fetch: fetch, sink: sink}
+// NewRecordObservation creates the record_observation tool scoped to an
+// agent. It lets a recurring agent (e.g. a cron job) record a timestamped
+// observation. Observations are pruned by retention and only the latest is
+// injected into prompts, so stale state does not mislead the model.
+func NewRecordObservation(store MemoryStore, agentKey string) tool.FuncTool {
+	return functool.MustNew(functool.Config{
+		Name: "record_observation",
+		Description: "Record a timestamped observation about the current state of something " +
+			"(e.g. a k8s cluster health check). Observations are time-bound and pruned " +
+			"automatically; record durable patterns as knowledge instead.",
+	}, func(ctx context.Context, args recordObservationArgs) (string, error) {
+		if strings.TrimSpace(args.Content) == "" {
+			return "", fmt.Errorf("content must not be empty")
+		}
+		if err := store.AddObservation(ctx, agentKey, args.Content); err != nil {
+			return "", err
+		}
+		return "observation recorded", nil
+	})
 }
 
-func (t *fetchAgentImageTool) Name() string { return "fetch_agent_image" }
-func (t *fetchAgentImageTool) Description() string {
-	return "Fetch a reference image by its name (from list_agent_images results) " +
-		"and make it available to you in the next turn. Use this when you need " +
-		"visual context from a previously stored image."
-}
-func (t *fetchAgentImageTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name": map[string]any{
-				"type":        "string",
-				"description": "The image filename from list_agent_images.",
-			},
-		},
-		"required": []string{"name"},
-	}
+// --- search_docs ---
+
+type searchDocsArgs struct {
+	Query string `json:"query"          jsonschema:"Keywords to search for."`
+	Limit int    `json:"limit,omitempty" jsonschema:"Max results (default 5)."`
 }
 
-func (t *fetchAgentImageTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	if strings.TrimSpace(in.Name) == "" {
-		return "", fmt.Errorf("name must not be empty")
-	}
-	dataURL, err := t.fetch(ctx, in.Name)
-	if err != nil {
-		return "", err
-	}
-	t.sink.AddImage(dataURL)
-	return fmt.Sprintf("Image %q fetched and will be available in the next turn.", in.Name), nil
+// NewSearchDocs creates the search_docs tool from a search function. It
+// searches the agent's knowledge-base documents (uploaded reference
+// material), returning "id — title" lines so the agent can follow up with
+// read_doc to fetch the actual content.
+func NewSearchDocs(search DocSearcher) tool.FuncTool {
+	return functool.MustNew(functool.Config{
+		Name: "search_docs",
+		Description: "Search your knowledge base (documents uploaded for you) by keyword. " +
+			"Returns matching documents as 'id — title'. Call read_doc with a document's " +
+			"id to read its full content before relying on it.",
+	}, func(ctx context.Context, args searchDocsArgs) (string, error) {
+		if args.Limit <= 0 {
+			args.Limit = 5
+		}
+		lines, err := search(ctx, args.Query, args.Limit)
+		if err != nil {
+			return "", err
+		}
+		if len(lines) == 0 {
+			return "No documents matched.", nil
+		}
+		var b strings.Builder
+		b.WriteString("Matching documents (use read_doc with the id to read content):\n")
+		for _, l := range lines {
+			b.WriteString("- ")
+			b.WriteString(l)
+			b.WriteString("\n")
+		}
+		return strings.TrimSpace(b.String()), nil
+	})
+}
+
+// --- read_doc ---
+
+type readDocArgs struct {
+	ID int64 `json:"id" jsonschema:"The document id from search_docs."`
+}
+
+// NewReadDoc creates the read_doc tool from a reader function. It lets the
+// agent read the full content of a knowledge-base document it found via
+// search_docs. Scoped to the agent: it cannot read other agents' documents.
+func NewReadDoc(read DocReader) tool.FuncTool {
+	return functool.MustNew(functool.Config{
+		Name: "read_doc",
+		Description: "Read the full content of a knowledge-base document by its numeric id " +
+			"(from search_docs results). Always read a document before quoting or acting on it.",
+	}, func(ctx context.Context, args readDocArgs) (string, error) {
+		if args.ID <= 0 {
+			return "", fmt.Errorf("id must be a positive number (from search_docs)")
+		}
+		title, content, err := read(ctx, args.ID)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("# %s\n\n%s", title, strings.TrimSpace(content)), nil
+	})
+}
+
+// --- list_agent_images ---
+
+// listAgentImagesArgs takes no arguments.
+type listAgentImagesArgs struct{}
+
+// NewListAgentImages creates the list_agent_images tool from a lister
+// function. It lets the agent discover what reference images exist so it can
+// fetch one with fetch_agent_image when it needs visual context.
+func NewListAgentImages(list ImageLister) tool.FuncTool {
+	return functool.MustNew(functool.Config{
+		Name: "list_agent_images",
+		Description: "List the reference images available for this agent. " +
+			"Use fetch_agent_image with the image name to retrieve an image.",
+	}, func(ctx context.Context, _ listAgentImagesArgs) (string, error) {
+		names, err := list(ctx)
+		if err != nil {
+			return "", err
+		}
+		if len(names) == 0 {
+			return "No reference images available.", nil
+		}
+		var b strings.Builder
+		b.WriteString("Available reference images (use fetch_agent_image to retrieve one):\n")
+		for _, n := range names {
+			b.WriteString("- ")
+			b.WriteString(n)
+			b.WriteString("\n")
+		}
+		return strings.TrimSpace(b.String()), nil
+	})
+}
+
+// --- fetch_agent_image ---
+
+type fetchAgentImageArgs struct {
+	Name string `json:"name" jsonschema:"The image filename from list_agent_images."`
+}
+
+// NewFetchAgentImage creates the fetch_agent_image tool from a fetcher and an
+// ImageSink. It retrieves one agent image by name and injects it into the
+// next LLM turn via the sink. The model can actually see the image (not just
+// the data-URL string) because the engine attaches it as an image_url content
+// part. Returns a confirmation string.
+func NewFetchAgentImage(fetch ImageFetcher, sink ImageSink) tool.FuncTool {
+	return functool.MustNew(functool.Config{
+		Name: "fetch_agent_image",
+		Description: "Fetch a reference image by its name (from list_agent_images results) " +
+			"and make it available to you in the next turn. Use this when you need " +
+			"visual context from a previously stored image.",
+	}, func(ctx context.Context, args fetchAgentImageArgs) (string, error) {
+		if strings.TrimSpace(args.Name) == "" {
+			return "", fmt.Errorf("name must not be empty")
+		}
+		dataURL, err := fetch(ctx, args.Name)
+		if err != nil {
+			return "", err
+		}
+		sink.AddImage(dataURL)
+		return fmt.Sprintf("Image %q fetched and will be available in the next turn.", args.Name), nil
+	})
 }
 
 // CoreTool is the metadata (name + description) of an always-on built-in
@@ -350,9 +275,9 @@ type CoreTool struct {
 // source of truth for their names and descriptions: the engine wires these
 // per run (scoped to the calling agent) and the server lists them read-only.
 // Instances are store/agent-scoped, so metadata is produced by lightweight
-// constructors with a nil store (Call is never invoked here).
+// constructors with nil dependencies (Call is never invoked here).
 func CoreTools() []CoreTool {
-	probes := []Tool{
+	probes := []tool.Tool{
 		NewMemorySearch(nil, ""),
 		NewMemorySave(nil, ""),
 		NewRecordObservation(nil, ""),
@@ -366,52 +291,4 @@ func CoreTools() []CoreTool {
 		out = append(out, CoreTool{Name: t.Name(), Description: t.Description()})
 	}
 	return out
-}
-
-// DocReader fetches one document's content by ID, scoped to the agent.
-// Implemented by the engine over store.GetKnowledgeDocForAgent.
-type DocReader func(ctx context.Context, id int64) (title, content string, err error)
-
-// readDocTool lets the agent read the full content of a knowledge-base
-// document it found via search_docs. Scoped to the agent: it cannot read
-// other agents' documents.
-type readDocTool struct {
-	read DocReader
-}
-
-// NewReadDoc creates the read_doc tool from a reader function.
-func NewReadDoc(read DocReader) Tool {
-	return &readDocTool{read: read}
-}
-
-func (t *readDocTool) Name() string { return "read_doc" }
-func (t *readDocTool) Description() string {
-	return "Read the full content of a knowledge-base document by its numeric id " +
-		"(from search_docs results). Always read a document before quoting or acting on it."
-}
-func (t *readDocTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"id": map[string]any{"type": "integer", "description": "The document id from search_docs."},
-		},
-		"required": []string{"id"},
-	}
-}
-
-func (t *readDocTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		ID int64 `json:"id"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	if in.ID <= 0 {
-		return "", fmt.Errorf("id must be a positive number (from search_docs)")
-	}
-	title, content, err := t.read(ctx, in.ID)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("# %s\n\n%s", title, strings.TrimSpace(content)), nil
 }

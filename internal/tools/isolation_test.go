@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/microsoft/agent-framework-go/tool"
 )
 
 func TestFilesystemContainment(t *testing.T) {
@@ -35,7 +37,7 @@ func TestFilesystemContainment(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name string
-		tool Tool
+		tool tool.FuncTool
 		args string
 	}{
 		{"read symlink", read, `{"path":"escape/secret"}`},
@@ -46,7 +48,7 @@ func TestFilesystemContainment(t *testing.T) {
 		{"malformed list", list, `{"path":17}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := tc.tool.Call(context.Background(), json.RawMessage(tc.args)); err == nil {
+			if _, err := tc.tool.Call(context.Background(), tc.args); err == nil {
 				t.Fatal("unsafe input accepted")
 			}
 		})
@@ -55,12 +57,13 @@ func TestFilesystemContainment(t *testing.T) {
 	if err != nil || string(data) != "outside marker" {
 		t.Fatalf("outside file changed: %q %v", data, err)
 	}
-	if _, err := write.Call(context.Background(), json.RawMessage(`{"path":"sub/file","content":"local"}`)); err != nil {
+	if _, err := write.Call(context.Background(), `{"path":"sub/file","content":"local"}`); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range []string{`{}`, `{"path":""}`, `{"path":"."}`} {
-		out, err := list.Call(context.Background(), json.RawMessage(args))
-		if err != nil || !strings.Contains(out, "sub") {
+		out, err := list.Call(context.Background(), args)
+		outStr, _ := out.(string)
+		if err != nil || !strings.Contains(outStr, "sub") {
 			t.Fatalf("list root: %q %v", out, err)
 		}
 	}
@@ -73,7 +76,7 @@ func TestExecRejectsFindSubprocesses(t *testing.T) {
 	tool := NewExec(t.TempDir(), []string{"find"})
 	for _, action := range []string{"-exec", "-execdir", "-ok", "-okdir"} {
 		args, _ := json.Marshal(map[string]string{"command": "find . " + action + " id ;"})
-		if _, err := tool.Call(context.Background(), args); err == nil || !strings.Contains(err.Error(), "subprocess") {
+		if _, err := tool.Call(context.Background(), string(args)); err == nil || !strings.Contains(err.Error(), "subprocess") {
 			t.Fatalf("%s: %v", action, err)
 		}
 	}
@@ -109,8 +112,9 @@ func TestExecSandboxAndExtraCommands(t *testing.T) {
 		{"cat ../../" + strings.TrimPrefix(secret, "/"), "", true},
 	} {
 		args, _ := json.Marshal(map[string]string{"command": tc.cmd})
-		out, err := tool.Call(context.Background(), args)
-		if (err != nil) != tc.fail || (!tc.fail && !strings.Contains(out, tc.want)) || strings.Contains(out, "private marker") {
+		out, err := tool.Call(context.Background(), string(args))
+		outStr, _ := out.(string)
+		if (err != nil) != tc.fail || (!tc.fail && !strings.Contains(outStr, tc.want)) || strings.Contains(outStr, "private marker") {
 			t.Fatalf("%s: %q %v", tc.cmd, out, err)
 		}
 	}
@@ -126,13 +130,14 @@ func TestEnabledExtraUsesImagePathAndEnvironment(t *testing.T) {
 	}
 	t.Setenv("PATH", bin)
 	t.Setenv("AGENTICGO_TEST_CREDENTIAL", "mounted-credential-marker")
-	tool := NewExecWithExtra(workspace, []string{"image-extra"}, []string{"image-extra"})
-	out, err := tool.Call(context.Background(), json.RawMessage(`{"command":"image-extra"}`))
-	if err != nil || !strings.Contains(out, "mounted-credential-marker") || !strings.Contains(out, workspace) {
+	extra := NewExecWithExtra(workspace, []string{"image-extra"}, []string{"image-extra"})
+	out, err := extra.Call(context.Background(), `{"command":"image-extra"}`)
+	outStr, _ := out.(string)
+	if err != nil || !strings.Contains(outStr, "mounted-credential-marker") || !strings.Contains(outStr, workspace) {
 		t.Fatalf("extra command: %q %v", out, err)
 	}
 	standard := NewExec(workspace, []string{"image-extra"})
-	if _, err := standard.Call(context.Background(), json.RawMessage(`{"command":"image-extra"}`)); err == nil {
+	if _, err := standard.Call(context.Background(), `{"command":"image-extra"}`); err == nil {
 		t.Fatal("standard command ran without sandbox")
 	}
 	if _, err := exec.LookPath("bwrap"); err == nil {

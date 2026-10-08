@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,25 +15,116 @@ import (
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/store"
-	"github.com/dkr290/agenticgo/internal/tools"
+	"github.com/microsoft/agent-framework-go/tool"
 )
 
-// stubProvider satisfies llm.Provider without any network calls; the tests
-// here only exercise the per-run registry directly, so it never actually gets
-// invoked. It is handed out by fakeLookup.
-type stubProvider struct{}
-
-func (stubProvider) ChatCompletion(context.Context, llm.ChatRequest, llm.StreamFunc) (llm.Message, error) {
-	return llm.Message{}, nil
+// scriptedProvider returns a llm.Provider whose "model" is served by a mock
+// Chat Completions server. script is called per completion request with the
+// 1-based request number and the decoded request body; it returns either SSE
+// chunks (stream=true requests) or, for non-streaming requests (Evolve's
+// Collect), a single JSON response body built from the first chunk's text.
+func scriptedProvider(t *testing.T, script func(call int, req map[string]any) []string) llm.Provider {
+	t.Helper()
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		calls++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		chunks := script(calls, body)
+		if body["stream"] == true {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			for _, c := range chunks {
+				_, _ = w.Write([]byte("data: " + c + "\n\n"))
+			}
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		// Non-streaming: fold the scripted text into a plain JSON response.
+		var text string
+		for _, c := range chunks {
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal([]byte(c), &chunk); err == nil && len(chunk.Choices) > 0 {
+				text += chunk.Choices[0].Delta.Content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "c1", "object": "chat.completion",
+			"choices": []any{map[string]any{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": text},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return llm.NewOpenAI(srv.URL+"/v1", "", "test-model")
 }
-func (stubProvider) Name() string  { return "stub" }
-func (stubProvider) Model() string { return "stub" }
 
-// stubLookup is a minimal ProviderLookup: any name (including "" = default)
-// resolves to the stub provider.
-type stubLookup struct{}
+// sseText builds the chunk sequence for a plain assistant text reply.
+func sseText(text string) []string {
+	return []string{
+		`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		fmt.Sprintf(`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":%q},"finish_reason":null}]}`, text),
+		`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	}
+}
 
-func (stubLookup) GetLLM(string) (llm.Provider, error) { return stubProvider{}, nil }
+// sseToolCall builds the chunk sequence for one tool call (no text).
+func sseToolCall(id, name, args string) []string {
+	return []string{
+		`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		fmt.Sprintf(`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":%q,"type":"function","function":{"name":%q,"arguments":""}}]},"finish_reason":null}]}`, id, name),
+		fmt.Sprintf(`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":%q}}]},"finish_reason":null}]}`, args),
+		`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	}
+}
+
+// toolNames extracts the names of the tools offered in a request body.
+func toolNames(req map[string]any) map[string]bool {
+	out := map[string]bool{}
+	tools, _ := req["tools"].([]any)
+	for _, t := range tools {
+		if m, ok := t.(map[string]any); ok {
+			if fn, ok := m["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok {
+					out[name] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// countImages sums the image_url parts across the request's messages.
+func countImages(req map[string]any) int {
+	n := 0
+	msgs, _ := req["messages"].([]any)
+	for _, m := range msgs {
+		msg, _ := m.(map[string]any)
+		parts, _ := msg["content"].([]any)
+		for _, p := range parts {
+			if part, ok := p.(map[string]any); ok && part["type"] == "image_url" {
+				n++
+			}
+		}
+	}
+	return n
+}
 
 func newTestEngine(t *testing.T) (*Engine, *agents.Registry) {
 	t.Helper()
@@ -48,110 +142,83 @@ func newTestEngine(t *testing.T) (*Engine, *agents.Registry) {
 	}
 	t.Cleanup(func() { st.Close() })
 	cfg := &config.Config{
-		MaxAgentIterations: 1,
+		MaxAgentIterations: 3,
 		// Mirror the production default: all built-ins on the global ceiling.
 		ToolAllowList: []string{"read_file", "write_file", "list_files", "exec"},
 		ExecAllowList: []string{"ls", "echo"},
 	}
-	e := New(cfg, tools.NewRegistry(nil), st, ar)
-	e.SetProviderLookup(stubLookup{})
+	e := New(cfg, st, ar)
 	return e, ar
 }
 
-// registryFor builds the per-run registry for an agent, failing the test on error.
-func registryFor(t *testing.T, e *Engine, ar *agents.Registry, agentKey string) *tools.Registry {
+// toolSetFor builds the per-run tool set for an agent, failing on error.
+func toolSetFor(t *testing.T, e *Engine, ar *agents.Registry, agentKey string) []tool.Tool {
 	t.Helper()
 	ag, err := ar.Get(agentKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, _, err := e.runRegistry(ag)
+	ts, _, err := e.runTools(ag)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return reg
+	return ts
 }
 
-func TestCallToolGatesMCPToolsPerAgent(t *testing.T) {
+// toolSetNames indexes a tool set by name.
+func toolSetNames(ts []tool.Tool) map[string]tool.Tool {
+	out := map[string]tool.Tool{}
+	for _, t := range ts {
+		out[t.Name()] = t
+	}
+	return out
+}
+
+func TestRunToolsGatesMCPToolsPerAgent(t *testing.T) {
 	e, ar := newTestEngine(t)
-	ctx := context.Background()
 
-	// No MCP manager wired: mcp_* names are simply not in the registry.
-	reg := registryFor(t, e, ar, "demo")
-	if _, err := reg.Call(ctx, "mcp_kube_pods_list", nil); err == nil {
-		t.Fatal("mcp tool without manager should fail")
+	// No MCP manager wired: no mcp_* tools in the set.
+	if _, ok := toolSetNames(toolSetFor(t, e, ar, "demo"))["mcp_kube_pods_list"]; ok {
+		t.Fatal("mcp tool without manager must be absent")
 	}
 
-	// Wire a real (empty) MCP manager. With nothing enabled, the tool is not
-	// registered, so calls are rejected as unknown.
+	// Wired but nothing enabled: still absent.
 	e.SetMCPManager(newTestMCPManager(t))
-	reg = registryFor(t, e, ar, "demo")
-	if _, err := reg.Call(ctx, "mcp_kube_pods_list", nil); err == nil {
-		t.Fatal("mcp tool not enabled for agent should fail")
-	} else if got := err.Error(); !containsAll(got, "unknown") {
-		t.Fatalf("unexpected error: %v", err)
+	if _, ok := toolSetNames(toolSetFor(t, e, ar, "demo"))["mcp_kube_pods_list"]; ok {
+		t.Fatal("mcp tool not enabled for agent must be absent")
 	}
 
-	// Enable it for the agent. The tool is still not discovered (no server
-	// connected), so it stays out of the registry — the per-agent gate and the
-	// discovery gate together keep it unavailable.
+	// Enabled but not discovered (no server connected): still absent — the
+	// per-agent gate and the discovery gate together keep it unavailable.
 	if _, err := ar.SetEnabledTools("demo", []string{"mcp_kube_pods_list"}); err != nil {
 		t.Fatal(err)
 	}
-	reg = registryFor(t, e, ar, "demo")
-	if _, ok := reg.Get("mcp_kube_pods_list"); ok {
-		t.Fatal("undiscovered mcp tool must not be registered")
-	}
-	if _, err := reg.Call(ctx, "mcp_kube_pods_list", nil); err == nil {
-		t.Fatal("call to undiscovered mcp tool should fail")
+	if _, ok := toolSetNames(toolSetFor(t, e, ar, "demo"))["mcp_kube_pods_list"]; ok {
+		t.Fatal("undiscovered mcp tool must be absent")
 	}
 
 	// A different agent without the tool enabled stays blocked.
 	if _, err := ar.Create("other", "Other", "test", "", agents.AgentConfig{}); err != nil {
 		t.Fatal(err)
 	}
-	otherReg := registryFor(t, e, ar, "other")
-	if _, err := otherReg.Call(ctx, "mcp_kube_pods_list", nil); err == nil {
+	if _, ok := toolSetNames(toolSetFor(t, e, ar, "other"))["mcp_kube_pods_list"]; ok {
 		t.Fatal("tool enabled for demo must not leak to other agents")
 	}
 }
 
-func TestMCPToolSpecsRespectsEnabledTools(t *testing.T) {
-	e, ar := newTestEngine(t)
-	e.SetMCPManager(newTestMCPManager(t))
-
-	reg := registryFor(t, e, ar, "demo")
-	if specs := mcpSpecs(reg.Specs()); len(specs) != 0 {
-		t.Fatalf("specs without enabled tools = %v", specs)
-	}
-
-	// Enabled but not discovered (server offline): still skipped.
-	if _, err := ar.SetEnabledTools("demo", []string{"mcp_kube_pods_list"}); err != nil {
-		t.Fatal(err)
-	}
-	reg = registryFor(t, e, ar, "demo")
-	if specs := mcpSpecs(reg.Specs()); len(specs) != 0 {
-		t.Fatalf("specs with undiscovered tool = %v", specs)
-	}
-}
-
-// mcpSpecs filters a spec list down to MCP tools.
-func mcpSpecs(specs []llm.ToolSpec) []llm.ToolSpec {
-	var out []llm.ToolSpec
-	for _, sp := range specs {
-		if mcp.IsMCPToolName(sp.Function.Name) {
-			out = append(out, sp)
-		}
-	}
-	return out
-}
-
-func TestCallToolMemorySavePersistsPerAgent(t *testing.T) {
+func TestRunToolsMemorySavePersistsPerAgent(t *testing.T) {
 	e, ar := newTestEngine(t)
 	ctx := context.Background()
 
-	reg := registryFor(t, e, ar, "demo")
-	if _, err := reg.Call(ctx, "memory_save", json.RawMessage(`{"content":"demo durable fact"}`)); err != nil {
+	ms, ok := toolSetNames(toolSetFor(t, e, ar, "demo"))["memory_save"]
+	if !ok {
+		t.Fatal("memory_save missing from tool set")
+	}
+	ft, ok := ms.(tool.FuncTool)
+	if !ok {
+		t.Fatalf("memory_save is %T, want tool.FuncTool", ms)
+	}
+	if _, err := ft.Call(ctx, `{"content":"demo durable fact"}`); err != nil {
 		t.Fatalf("memory_save: %v", err)
 	}
 	entries, err := e.store.Knowledge(ctx, "demo", 10)
@@ -168,16 +235,19 @@ func TestCallToolMemorySavePersistsPerAgent(t *testing.T) {
 }
 
 // trackingLookup records the names it was asked to resolve.
-type trackingLookup struct{ got []string }
+type trackingLookup struct {
+	got []string
+	p   llm.Provider
+}
 
 func (f *trackingLookup) GetLLM(name string) (llm.Provider, error) {
 	f.got = append(f.got, name)
-	return stubProvider{}, nil
+	return f.p, nil
 }
 
 func TestResolveProviderRoutesEmptyNameToStoreDefault(t *testing.T) {
 	e, ar := newTestEngine(t)
-	tl := &trackingLookup{}
+	tl := &trackingLookup{p: llm.NewOpenAI("http://unused", "", "m")}
 	e.SetProviderLookup(tl)
 
 	ag, err := ar.Get("demo")
@@ -216,55 +286,33 @@ func TestResolveProviderRoutesEmptyNameToStoreDefault(t *testing.T) {
 		}
 	}
 
-	// Without a provider lookup, resolution fails loudly instead of silently
-	// falling back to an env-built provider.
-	bare := New(e.cfg, tools.NewRegistry(nil), e.store, ar)
+	// Without a provider lookup, resolution fails loudly.
+	bare := New(e.cfg, e.store, ar)
 	if _, err := bare.resolveProvider(ag, ""); err == nil {
 		t.Fatal("resolveProvider without lookup must fail")
 	}
 }
 
-func containsAll(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if !strings.Contains(s, sub) {
-			return false
-		}
-	}
-	return true
-}
-
-func specNames(reg *tools.Registry) map[string]bool {
-	out := map[string]bool{}
-	for _, sp := range reg.Specs() {
-		out[sp.Function.Name] = true
-	}
-	return out
-}
-
-func TestRunRegistryBuiltinToolsInherit(t *testing.T) {
+func TestRunToolsBuiltinToolsInherit(t *testing.T) {
 	e, ar := newTestEngine(t)
-	reg := registryFor(t, e, ar, "demo")
-	names := specNames(reg)
+	names := toolSetNames(toolSetFor(t, e, ar, "demo"))
 	for _, want := range []string{"read_file", "write_file", "list_files", "exec",
 		"memory_search", "memory_save", "record_observation", "search_docs", "read_doc",
 		"list_agent_images", "fetch_agent_image"} {
-		if !names[want] {
-			t.Errorf("inherited registry missing %q (got %v)", want, names)
+		if names[want] == nil {
+			t.Errorf("inherited tool set missing %q", want)
 		}
 	}
 }
 
-// Regression test: runRegistry must return the live imageSink so Run can drain
-// images fetched by fetch_agent_image and inject them into the next LLM turn.
-// Previously it returned a nil sink, so a fetched image never reached the model
-// in a fresh conversation (only directly-attached images did) and the model
-// hallucinated the content. Here we verify an image fetched via the tool lands
-// in the returned sink.
-func TestRunRegistryFetchAgentImageReachesSink(t *testing.T) {
+// Regression test: runTools must return the live imageSink so the run can
+// drain images fetched by fetch_agent_image and inject them into the next
+// provider call. Previously a nil sink was returned, so a fetched image never
+// reached the model and it hallucinated the content.
+func TestRunToolsFetchAgentImageReachesSink(t *testing.T) {
 	e, ar := newTestEngine(t)
 
-	// Store a reference image for the agent (minimal PNG bytes; content is
-	// irrelevant, only that it is a valid, readable image file).
+	// Store a reference image for the agent (minimal PNG bytes).
 	if _, err := ar.SaveImage("demo", "pic.png", []byte("\x89PNG\r\n\x1a\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -273,21 +321,22 @@ func TestRunRegistryFetchAgentImageReachesSink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, sink, err := e.runRegistry(ag)
+	ts, sink, err := e.runTools(ag)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sink == nil {
-		t.Fatal("runRegistry must return the live image sink, not nil")
+		t.Fatal("runTools must return the live image sink, not nil")
 	}
 
-	// The agent sees the image name and fetches it by name.
-	if _, err := reg.Call(context.Background(), "fetch_agent_image", json.RawMessage(`{"name":"pic.png"}`)); err != nil {
+	fetch, ok := toolSetNames(ts)["fetch_agent_image"]
+	if !ok {
+		t.Fatal("fetch_agent_image missing")
+	}
+	if _, err := fetch.(tool.FuncTool).Call(context.Background(), `{"name":"pic.png"}`); err != nil {
 		t.Fatalf("fetch_agent_image: %v", err)
 	}
 
-	// The engine must be able to drain the fetched image for injection into the
-	// next LLM turn.
 	imgs := sink.DrainImages()
 	if len(imgs) != 1 {
 		t.Fatalf("expected 1 fetched image in sink, got %d", len(imgs))
@@ -297,57 +346,60 @@ func TestRunRegistryFetchAgentImageReachesSink(t *testing.T) {
 	}
 }
 
-func TestRunRegistryBuiltinToolsNarrowed(t *testing.T) {
+func TestRunToolsBuiltinToolsNarrowed(t *testing.T) {
 	e, ar := newTestEngine(t)
 
 	// Narrow the agent to read-only built-ins (no write_file, no exec).
 	if _, err := ar.SetEnabledBuiltinTools("demo", &[]string{"read_file", "list_files"}); err != nil {
 		t.Fatal(err)
 	}
-	reg := registryFor(t, e, ar, "demo")
-	names := specNames(reg)
-	if names["exec"] || names["write_file"] {
-		t.Fatalf("narrowed registry must drop exec/write_file, got %v", names)
+	names := toolSetNames(toolSetFor(t, e, ar, "demo"))
+	if names["exec"] != nil || names["write_file"] != nil {
+		t.Fatalf("narrowed tool set must drop exec/write_file")
 	}
-	if !names["read_file"] || !names["list_files"] {
-		t.Fatalf("narrowed registry must keep read_file/list_files, got %v", names)
+	if names["read_file"] == nil || names["list_files"] == nil {
+		t.Fatalf("narrowed tool set must keep read_file/list_files")
 	}
 	// Core tools are always on regardless of narrowing.
-	if !names["memory_search"] || !names["read_doc"] {
-		t.Fatalf("core tools must survive narrowing, got %v", names)
+	if names["memory_search"] == nil || names["read_doc"] == nil {
+		t.Fatalf("core tools must survive narrowing")
 	}
-	// Dispatch enforces the same gate: exec is unknown to this agent.
-	if _, err := reg.Call(context.Background(), "exec", json.RawMessage(`{"command":"ls"}`)); err == nil {
-		t.Fatal("exec must not be callable when narrowed away")
-	}
+	// MAF's autocall can only invoke what it was handed: exec absent from the
+	// slice means unreachable at dispatch.
 
 	// Empty list = no built-ins at all.
 	if _, err := ar.SetEnabledBuiltinTools("demo", &[]string{}); err != nil {
 		t.Fatal(err)
 	}
-	names = specNames(registryFor(t, e, ar, "demo"))
-	if names["read_file"] || names["exec"] {
-		t.Fatalf("empty enabled_builtin_tools must remove all built-ins, got %v", names)
+	names = toolSetNames(toolSetFor(t, e, ar, "demo"))
+	if names["read_file"] != nil || names["exec"] != nil {
+		t.Fatalf("empty enabled_builtin_tools must remove all built-ins")
 	}
 
 	// Reset to nil: inherits again.
 	if _, err := ar.SetEnabledBuiltinTools("demo", nil); err != nil {
 		t.Fatal(err)
 	}
-	names = specNames(registryFor(t, e, ar, "demo"))
-	if !names["exec"] {
-		t.Fatalf("reset to nil must restore inheritance, got %v", names)
+	if toolSetNames(toolSetFor(t, e, ar, "demo"))["exec"] == nil {
+		t.Fatalf("reset to nil must restore inheritance")
 	}
 }
 
-func TestRunRegistryExecExtraCommands(t *testing.T) {
+func TestRunToolsExecExtraCommands(t *testing.T) {
 	e, ar := newTestEngine(t)
 	// A command guaranteed absent from PATH so the post-gate exec always fails.
 	e.cfg.ExtraExecCommands = []string{"definitely-not-a-real-cmd-xyz"}
 
+	callExec := func() (any, error) {
+		ex, ok := toolSetNames(toolSetFor(t, e, ar, "demo"))["exec"]
+		if !ok {
+			t.Fatal("exec missing")
+		}
+		return ex.(tool.FuncTool).Call(context.Background(), `{"command":"definitely-not-a-real-cmd-xyz foo"}`)
+	}
+
 	// Not enabled for the agent: the command is not on exec's allow-list.
-	reg := registryFor(t, e, ar, "demo")
-	if _, err := reg.Call(context.Background(), "exec", json.RawMessage(`{"command":"definitely-not-a-real-cmd-xyz foo"}`)); err == nil {
+	if _, err := callExec(); err == nil {
 		t.Fatal("extra command must not run until enabled per agent")
 	} else if !strings.Contains(err.Error(), "not on the exec allow-list") {
 		t.Fatalf("expected allow-list rejection, got: %v", err)
@@ -358,12 +410,9 @@ func TestRunRegistryExecExtraCommands(t *testing.T) {
 	if _, err := ar.SetEnabledCommands("demo", []string{"definitely-not-a-real-cmd-xyz"}); err != nil {
 		t.Fatal(err)
 	}
-	reg = registryFor(t, e, ar, "demo")
-	_, err := reg.Call(context.Background(), "exec", json.RawMessage(`{"command":"definitely-not-a-real-cmd-xyz foo"}`))
-	if err == nil {
+	if _, err := callExec(); err == nil {
 		t.Fatal("a nonexistent command should fail, but only after passing the gate")
-	}
-	if strings.Contains(err.Error(), "not on the exec allow-list") {
+	} else if strings.Contains(err.Error(), "not on the exec allow-list") {
 		t.Fatalf("enabled extra command must not hit the allow-list rejection: %v", err)
 	}
 }
@@ -406,23 +455,10 @@ func TestObservationInjectResolution(t *testing.T) {
 	}
 }
 
-// fixedProvider returns a canned assistant reply, used to drive Evolve without
-// a network call.
-type fixedProvider struct{ reply string }
-
-func (p fixedProvider) ChatCompletion(context.Context, llm.ChatRequest, llm.StreamFunc) (llm.Message, error) {
-	return llm.Message{Role: llm.RoleAssistant, Content: p.reply}, nil
-}
-func (p fixedProvider) Name() string  { return "fixed" }
-func (p fixedProvider) Model() string { return "fixed" }
-
-type fixedLookup struct{ p llm.Provider }
-
-func (l fixedLookup) GetLLM(string) (llm.Provider, error) { return l.p, nil }
-
-// Regression test: Evolve must skip duplicate learnings and keep saving the
-// rest. Previously it returned ErrKnowledgeDuplicate on the first repeat and
-// aborted the whole pass, silently dropping any new facts listed after it.
+// TestEvolveSkipsDuplicatesAndKeepsRest is the regression test for the
+// duplicate-extraction bug: Evolve must skip duplicate learnings and keep
+// saving the rest (previously one duplicate aborted the whole pass, silently
+// dropping any new facts listed after it).
 func TestEvolveSkipsDuplicatesAndKeepsRest(t *testing.T) {
 	e, _ := newTestEngine(t)
 	ctx := context.Background()
@@ -433,7 +469,9 @@ func TestEvolveSkipsDuplicatesAndKeepsRest(t *testing.T) {
 	}
 
 	// The model re-extracts the known fact plus a brand-new one after it.
-	e.SetProviderLookup(fixedLookup{p: fixedProvider{reply: "- user prefers concise answers\n- deploys happen on Fridays\n"}})
+	e.SetProviderLookup(&trackingLookup{p: scriptedProvider(t, func(int, map[string]any) []string {
+		return sseText("- user prefers concise answers\n- deploys happen on Fridays\n")
+	})})
 
 	// Enough history for Evolve to consider the session worth learning from.
 	for i := 0; i < 4; i++ {
@@ -510,7 +548,7 @@ func TestRetentionSweeperSweepsAllAgents(t *testing.T) {
 	e.cfg.KnowledgeKeepLatest = 2
 	for _, key := range []string{"demo", "idle"} {
 		for i := 1; i <= 3; i++ {
-			if err := e.store.AddKnowledge(ctx, key, key+" fact "+string(rune('0'+i))); err != nil {
+			if err := e.store.AddKnowledge(ctx, key, fmt.Sprintf("%s fact %d", key, i)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -538,12 +576,13 @@ func TestRetentionSweeperSweepsAllAgents(t *testing.T) {
 }
 
 // newTestMCPManager returns an MCP manager with no servers (discovery catalog
-// empty); used to verify per-agent gating without a real MCP server.
+// empty), so mcp_* tools are never discovered.
 func newTestMCPManager(t *testing.T) *mcp.Manager {
 	t.Helper()
 	m, err := mcp.Open(filepath.Join(t.TempDir(), "mcp.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m.CloseAll)
 	return m
 }

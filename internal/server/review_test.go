@@ -17,7 +17,6 @@ import (
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/logger"
-	"github.com/dkr290/agenticgo/internal/tools"
 )
 
 func TestLLMConfigPreservesCapabilities(t *testing.T) {
@@ -91,18 +90,43 @@ func TestDocumentRoutesRespectAgent(t *testing.T) {
 	}
 }
 
-type blockingProvider struct {
+// blockingLLMServer is a mock OpenAI endpoint that announces each request on
+// started, then blocks streaming until the request context is done (client
+// cancel/disconnect), announcing that on stopped. It replaces the legacy
+// blockingProvider for driving WS cancel tests through the MAF engine path.
+type blockingLLMServer struct {
 	started chan struct{}
 	stopped chan struct{}
+	srv     *httptest.Server
 }
 
-func (p *blockingProvider) Model() string { return "blocking" }
-func (p *blockingProvider) Name() string  { return "blocking" }
-func (p *blockingProvider) ChatCompletion(ctx context.Context, _ llm.ChatRequest, _ llm.StreamFunc) (llm.Message, error) {
-	p.started <- struct{}{}
-	<-ctx.Done()
-	p.stopped <- struct{}{}
-	return llm.Message{}, ctx.Err()
+func newBlockingLLMServer(t *testing.T) *blockingLLMServer {
+	t.Helper()
+	b := &blockingLLMServer{started: make(chan struct{}, 4), stopped: make(chan struct{}, 4)}
+	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		b.started <- struct{}{}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		// Block until the client goes away (cancel/disconnect) or a watchdog
+		// fires. The watchdog matters because connection reuse can hold a
+		// cancelled request's context open past the cancel itself, which would
+		// otherwise wedge the test server at Close.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+		b.stopped <- struct{}{}
+	}))
+	t.Cleanup(b.srv.Close)
+	return b
+}
+
+func (b *blockingLLMServer) provider() *llm.OpenAIProvider {
+	return llm.NewOpenAI(b.srv.URL+"/v1", "", "blocking")
 }
 
 type providerLookup struct{ p llm.Provider }
@@ -115,9 +139,9 @@ func TestWebSocketCancelAndDisconnect(t *testing.T) {
 	s.store = openTempStore(t)
 	s.cfg.MaxAgentIterations = 2
 	s.cfg.WorkspaceDir = filepath.Join(t.TempDir(), "workspace")
-	s.engine = agent.New(s.cfg, tools.NewRegistry(nil), s.store, ar)
-	p := &blockingProvider{started: make(chan struct{}, 2), stopped: make(chan struct{}, 2)}
-	s.engine.SetProviderLookup(providerLookup{p})
+	s.engine = agent.New(s.cfg, s.store, ar)
+	p := newBlockingLLMServer(t)
+	s.engine.SetProviderLookup(providerLookup{p: p.provider()})
 	httpServer := httptest.NewServer(http.HandlerFunc(s.handleWS))
 	defer httpServer.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

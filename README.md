@@ -13,6 +13,7 @@ single static Go binary or a Docker container. Kubernetes manifests are on the r
 
 ## What it does
 
+
 - **Multiple agents** — each agent is a directory with context files that define its
   persona and behavior. Pick which agent to chat with from the sidebar.
 - **Context files** — edit `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`,

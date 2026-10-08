@@ -9,7 +9,6 @@ package agent
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -20,10 +19,12 @@ import (
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
 	"github.com/dkr290/agenticgo/internal/llm"
+	"github.com/dkr290/agenticgo/internal/maf"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/skills"
 	"github.com/dkr290/agenticgo/internal/store"
 	"github.com/dkr290/agenticgo/internal/tools"
+	"github.com/microsoft/agent-framework-go/tool"
 )
 
 // Event is emitted during a run so callers can stream progress.
@@ -57,7 +58,6 @@ type VisionLookup interface {
 // Engine runs agent-scoped chat loops.
 type Engine struct {
 	cfg        *config.Config
-	tools      *tools.Registry
 	store      *store.Store
 	agents     *agents.Registry
 	providers  ProviderLookup // required for chat: resolves the default and named providers
@@ -104,8 +104,8 @@ func (e *Engine) lockConversation(ctx context.Context, key conversation) (func()
 }
 
 // New creates an Engine.
-func New(cfg *config.Config, reg *tools.Registry, st *store.Store, ar *agents.Registry) *Engine {
-	return &Engine{cfg: cfg, tools: reg, store: st, agents: ar, basePrompt: cfg.SystemPrompt}
+func New(cfg *config.Config, st *store.Store, ar *agents.Registry) *Engine {
+	return &Engine{cfg: cfg, store: st, agents: ar, basePrompt: cfg.SystemPrompt}
 }
 
 // SetProviderLookup wires the provider store (used by the Providers UI).
@@ -343,195 +343,18 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	// non-fatal. Each knob at 0 disables that limit.
 	e.pruneRetention(ctx, agentKey)
 
-	// Persist the user turn.
-	if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleUser), userMessage); err != nil {
-		return "", fmt.Errorf("save user message: %w", err)
+	op, ok := provider.(*llm.OpenAIProvider)
+	if !ok {
+		return "", fmt.Errorf("chat requires an OpenAI-compatible provider, got %T", provider)
 	}
-
-	// Load recent history for this agent+session.
-	history, err := e.store.Messages(ctx, agentKey, session, 40)
-	if err != nil {
-		return "", fmt.Errorf("load history: %w", err)
-	}
-
-	messages := make([]llm.Message, 0, len(history)+1)
-	messages = append(messages, llm.Message{
-		Role:    llm.RoleSystem,
-		Content: e.buildSystemPrompt(ctx, ag),
-	})
-	replayed, err := replayHistory(history)
-	if err != nil {
-		return "", err
-	}
-	if len(replayed) > 0 && replayed[len(replayed)-1].Role == llm.RoleUser {
-		replayed[len(replayed)-1].Images = images
-	}
-	messages = append(messages, replayed...)
-
-	// Build the per-run tool registry: the single source of truth for both the
-	// tool specs offered to the model and the dispatch of its tool calls.
-	// It composes the always-on core memory/docs tools (scoped to this agent),
-	// the built-in fs/exec tools (jailed to the agent's own workspace), and the
-	// MCP tools this agent has enabled.
-	reg, sink, err := e.runRegistry(ag)
-	if err != nil {
-		return "", fmt.Errorf("build tool registry: %w", err)
-	}
-	specs := reg.Specs()
-
-	for iter := 0; iter < e.cfg.MaxAgentIterations; iter++ {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		req := llm.ChatRequest{
-			Model:       provider.Model(),
-			Messages:    messages,
-			Tools:       specs,
-			Temperature: ag.Config.Temperature,
-			MaxTokens:   ag.Config.MaxTokens,
-			Stream:      true,
-		}
-		if ag.Config.Model != nil && *ag.Config.Model != "" {
-			req.Model = *ag.Config.Model
-		}
-
-		var turnText strings.Builder
-		assistantMsg, err := provider.ChatCompletion(ctx, req, func(d llm.Delta) error {
-			if d.Content != "" {
-				turnText.WriteString(d.Content)
-				emit(Event{Kind: "text", Text: d.Content})
-			}
-			return nil
-		})
-		if err != nil {
-			emit(Event{Kind: "error", Err: err})
-			return "", fmt.Errorf("llm completion: %w", err)
-		}
-
-		// No tool calls => we have the final answer.
-		if len(assistantMsg.ToolCalls) == 0 {
-			finalText := assistantMsg.Content
-			if finalText == "" {
-				finalText = turnText.String()
-			}
-			if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleAssistant), finalText); err != nil {
-				return "", fmt.Errorf("save assistant reply: %w", err)
-			}
-			emit(Event{Kind: "done"})
-			return finalText, nil
-		}
-
-		// Serialize tool calls for persistence.
-		toolCallsJSON, err := json.Marshal(assistantMsg.ToolCalls)
-		if err != nil {
-			emit(Event{Kind: "error", Err: err})
-			return "", fmt.Errorf("marshal tool calls: %w", err)
-		}
-
-		// Persist the assistant turn that requested tools (with tool_calls metadata).
-		if err := e.store.AppendMessageWithToolCalls(ctx, agentKey, session,
-			string(llm.RoleAssistant), assistantMsg.Content, string(toolCallsJSON), "", ""); err != nil {
-			return "", fmt.Errorf("save assistant tool calls: %w", err)
-		}
-
-		// Record the assistant turn that requested tools.
-		messages = append(messages, assistantMsg)
-
-		// Execute each requested tool and append results.
-		for _, tc := range assistantMsg.ToolCalls {
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-			emit(Event{Kind: "tool_call", ToolName: tc.Name, ToolArgs: tc.Arguments})
-
-			var result string
-			var callErr error
-			if tc.Name == "fetch_agent_image" && !vision {
-				callErr = fmt.Errorf("the effective model does not support images")
-			} else {
-				result, callErr = reg.Call(ctx, tc.Name, json.RawMessage(tc.Arguments))
-			}
-			if callErr != nil {
-				result = "error: " + callErr.Error()
-			}
-			emit(Event{Kind: "tool_result", ToolName: tc.Name, ToolResult: result})
-
-			// Persist the tool result as a separate message row.
-			if err := e.store.AppendMessageWithToolCalls(ctx, agentKey, session,
-				string(llm.RoleTool), result, "", tc.ID, tc.Name); err != nil {
-				return "", fmt.Errorf("save tool result: %w", err)
-			}
-
-			messages = append(messages, llm.Message{
-				Role:       llm.RoleTool,
-				Content:    result,
-				ToolCallID: tc.ID,
-				Name:       tc.Name,
-			})
-		}
-
-		// Drain any images fetched by fetch_agent_image and inject them as a
-		// user message so the model can actually see them in the next LLM turn.
-		if imgs := sink.DrainImages(); vision && len(imgs) > 0 {
-			messages = append(messages, llm.Message{
-				Role:    llm.RoleUser,
-				Content: "Describe what you see in the following image(s).",
-				Images:  imgs,
-			})
-		}
-
-		// Loop: let the model observe tool results and continue.
-	}
-
-	return "", fmt.Errorf("agent reached max iterations (%d) without a final answer", e.cfg.MaxAgentIterations)
+	return e.runMAF(ctx, ag, agentKey, session, userMessage, op, images, vision, emit)
 }
 
-// replayHistory preserves tool metadata and drops incomplete tool exchanges
-// caused by a history-window boundary or an interrupted run.
-func replayHistory(history []store.Message) ([]llm.Message, error) {
-	out := make([]llm.Message, 0, len(history))
-	for i := 0; i < len(history); i++ {
-		m := history[i]
-		if m.Role == string(llm.RoleTool) {
-			continue
-		}
-		msg := llm.Message{Role: llm.Role(m.Role), Content: m.Content, Name: m.Name, ToolCallID: m.ToolCallID}
-		if m.ToolCalls != "" {
-			if err := json.Unmarshal([]byte(m.ToolCalls), &msg.ToolCalls); err != nil {
-				return nil, fmt.Errorf("decode stored tool calls: %w", err)
-			}
-		}
-		if len(msg.ToolCalls) > 0 {
-			pending := make(map[string]bool, len(msg.ToolCalls))
-			for _, tc := range msg.ToolCalls {
-				pending[tc.ID] = true
-			}
-			results := []llm.Message{}
-			valid := len(pending) == len(msg.ToolCalls) && !pending[""]
-			for i+1 < len(history) && history[i+1].Role == string(llm.RoleTool) {
-				i++
-				r := history[i]
-				if !pending[r.ToolCallID] {
-					valid = false
-				}
-				delete(pending, r.ToolCallID)
-				results = append(results, llm.Message{Role: llm.RoleTool, Content: r.Content, ToolCallID: r.ToolCallID, Name: r.Name})
-			}
-			if !valid || len(pending) > 0 {
-				continue
-			}
-			out = append(out, msg)
-			out = append(out, results...)
-		} else {
-			out = append(out, msg)
-		}
-	}
-	return out, nil
-}
-
-// runRegistry builds the per-run tool registry for an agent: the single
-// source of truth for both the tool specs offered to the model and the
-// dispatch of tool calls. It composes, in one place:
+// runTools builds the per-run tool set for an agent: the single source of
+// truth for both the tool specs offered to the model and the dispatch of its
+// tool calls (MAF's autocall invokes exactly this slice, so anything absent
+// is invisible to the model and unreachable at dispatch). It composes, in one
+// place:
 //
 //   - the always-on core memory/docs tools (scoped to this agent),
 //   - the built-in fs tools (read_file/write_file/list_files) and exec,
@@ -541,30 +364,27 @@ func replayHistory(history []store.Message) ([]llm.Message, error) {
 //   - the MCP tools this agent has enabled (config.json enabled_tools),
 //     soft-failing per call when their server is unreachable.
 //
-// Building this per run means every tool is constructed once (not per call)
-// and specs can never drift from dispatch, which the old callTool switch
-// allowed. Tools absent from the registry are invisible to the model and
-// rejected by Registry.Call, so per-agent gating is enforced by construction.
-func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, error) {
-	// The registry itself allows everything registered into it; gating happens
-	// when composing it (below). This keeps the always-on core tools and the
-	// per-agent MCP tools out of the global AGENTICGO_TOOL_ALLOWLIST, which
-	// only governs the built-in fs/exec tools.
-	registry := tools.NewRegistry(nil)
+// Building this per run means every tool is constructed once (not per call).
+// The global allow-list only governs the built-in fs/exec tools; the always-on
+// core tools and per-agent MCP tools sit outside it by design.
+func (e *Engine) runTools(ag *agents.Agent) ([]tool.Tool, *imageSink, error) {
+	out := []tool.Tool{}
 
 	// Core memory/knowledge tools: always on, scoped to the calling agent.
-	registry.Register(tools.NewMemorySearch(e.store, ag.Key))
-	registry.Register(tools.NewMemorySave(e.store, ag.Key))
-	registry.Register(tools.NewRecordObservation(e.store, ag.Key))
-	registry.Register(tools.NewSearchDocs(e.docSearcher(ag.Key)))
-	registry.Register(tools.NewReadDoc(e.docReader(ag.Key)))
-	registry.Register(tools.NewListAgentImages(e.imageLister(ag.Key)))
+	out = append(out,
+		tools.NewMemorySearch(e.store, ag.Key),
+		tools.NewMemorySave(e.store, ag.Key),
+		tools.NewRecordObservation(e.store, ag.Key),
+		tools.NewSearchDocs(e.docSearcher(ag.Key)),
+		tools.NewReadDoc(e.docReader(ag.Key)),
+		tools.NewListAgentImages(e.imageLister(ag.Key)),
+	)
 
 	// Image sink: collects images fetched by fetch_agent_image so the engine
 	// can inject them into the next LLM turn (the model can actually see them,
 	// not just the data-URL string).
 	sink := newImageSink()
-	registry.Register(tools.NewFetchAgentImage(e.imageFetcher(ag.Key), sink))
+	out = append(out, tools.NewFetchAgentImage(e.imageFetcher(ag.Key), sink))
 
 	// Built-in filesystem tools, jailed to the agent's workspace. The global
 	// AGENTICGO_TOOL_ALLOWLIST is the ceiling; the agent may narrow it further
@@ -580,21 +400,21 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 		if err != nil {
 			return nil, nil, err
 		}
-		registry.Register(t)
+		out = append(out, t)
 	}
 	if builtin["write_file"] {
 		t, err := tools.NewWriteFile(workspace)
 		if err != nil {
 			return nil, nil, err
 		}
-		registry.Register(t)
+		out = append(out, t)
 	}
 	if builtin["list_files"] {
 		t, err := tools.NewListFiles(workspace)
 		if err != nil {
 			return nil, nil, err
 		}
-		registry.Register(t)
+		out = append(out, t)
 	}
 
 	// Exec: safe commands from the global AGENTICGO_EXEC_ALLOWLIST plus the
@@ -610,7 +430,7 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 				execExtra = append(execExtra, cmd)
 			}
 		}
-		registry.Register(tools.NewExecWithExtra(workspace, execAllow, execExtra))
+		out = append(out, tools.NewExecWithExtra(workspace, execAllow, execExtra))
 	}
 
 	// Custom (MCP) tools enabled for this agent. Tools whose server is not
@@ -623,11 +443,11 @@ func (e *Engine) runRegistry(ag *agents.Agent) (*tools.Registry, *imageSink, err
 			if !ok {
 				continue // not discovered (server offline or tool removed)
 			}
-			registry.Register(newMCPTool(name, t, e.mcp))
+			out = append(out, maf.NewMCPTool(name, t, e.mcp))
 		}
 	}
 
-	return registry, sink, nil
+	return out, sink, nil
 }
 
 // observationInject resolves how many recent observations to inject into the
@@ -666,34 +486,6 @@ func (e *Engine) builtinAllowed(ag *agents.Agent) map[string]bool {
 		}
 	}
 	return out
-}
-
-// mcpTool adapts one discovered MCP tool to the tools.Tool interface so it
-// can live in the per-run registry alongside the built-in and core tools.
-type mcpTool struct {
-	name   string // namespaced: mcp_<server>_<tool>
-	desc   string
-	schema map[string]any
-	mgr    *mcp.Manager
-}
-
-func newMCPTool(name string, info mcp.ToolInfo, mgr *mcp.Manager) tools.Tool {
-	desc := info.Description
-	if desc == "" {
-		desc = "Tool from MCP server " + info.Server
-	}
-	return &mcpTool{name: name, desc: desc, schema: info.Schema, mgr: mgr}
-}
-
-func (t *mcpTool) Name() string               { return t.name }
-func (t *mcpTool) Description() string        { return t.desc }
-func (t *mcpTool) Parameters() map[string]any { return t.schema }
-
-// Call forwards to the MCP manager, which lazily reconnects a configured but
-// disconnected server. Errors are returned for the engine loop to wrap into
-// tool-result strings, so a dead server never breaks the chat.
-func (t *mcpTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	return t.mgr.CallTool(ctx, t.name, args)
 }
 
 // resolveProvider picks the provider for a run: a per-request override wins,
@@ -856,25 +648,19 @@ func (e *Engine) Evolve(ctx context.Context, agentKey, session string) error {
 		"Write each as a single concise line prefixed with '- '. If nothing is worth " +
 		"remembering, reply with exactly: NONE\n\n" + transcript.String()
 
-	req := llm.ChatRequest{
-		Model: provider.Model(),
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: "You extract concise, reusable learnings from conversations."},
-			{Role: llm.RoleUser, Content: prompt},
-		},
-		Stream: false,
+	// One-shot non-streaming MAF run: no tools, no history provider — the
+	// transcript is built into the prompt itself.
+	op, ok := provider.(*llm.OpenAIProvider)
+	if !ok {
+		return fmt.Errorf("evolve requires an OpenAI-compatible provider, got %T", provider)
 	}
-	if ag.Config.Model != nil && *ag.Config.Model != "" {
-		req.Model = *ag.Config.Model
-	}
-
-	// Use a non-streaming call via the streaming API by discarding deltas.
-	msg, err := provider.ChatCompletion(ctx, req, func(llm.Delta) error { return nil })
+	content, err := runOneShotMAF(ctx, op, ag,
+		"You extract concise, reusable learnings from conversations.", prompt)
 	if err != nil {
 		return err
 	}
 
-	content := strings.TrimSpace(msg.Content)
+	content = strings.TrimSpace(content)
 	if content == "" || content == "NONE" {
 		return nil
 	}

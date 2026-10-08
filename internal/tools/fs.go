@@ -2,12 +2,14 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/microsoft/agent-framework-go/tool"
+	"github.com/microsoft/agent-framework-go/tool/functool"
 )
 
 // workspace jails filesystem operations to a root directory.
@@ -40,43 +42,28 @@ func (w *workspace) resolve(p string) (string, error) {
 
 // --- read_file ---
 
-type readFileTool struct{ ws *workspace }
+type readFileArgs struct {
+	Path string `json:"path" jsonschema:"Path to the file, relative to the workspace."`
+}
 
-// NewReadFile creates the read_file tool.
-func NewReadFile(root string) (Tool, error) {
+// NewReadFile creates the read_file tool, jailed to root.
+func NewReadFile(root string) (tool.FuncTool, error) {
 	ws, err := newWorkspace(root)
 	if err != nil {
 		return nil, err
 	}
-	return &readFileTool{ws: ws}, nil
+	return functool.New(functool.Config{
+		Name:        "read_file",
+		Description: "Read the contents of a text file in the workspace. Do not use for images — use fetch_agent_image instead.",
+	}, ws.readFile)
 }
 
-func (t *readFileTool) Name() string { return "read_file" }
-func (t *readFileTool) Description() string {
-	return "Read the contents of a text file in the workspace. Do not use for images — use fetch_agent_image instead."
-}
-func (t *readFileTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Path to the file, relative to the workspace."},
-		},
-		"required": []string{"path"},
-	}
-}
-
-func (t *readFileTool) Call(_ context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	full, err := t.ws.resolve(in.Path)
+func (w *workspace) readFile(_ context.Context, args readFileArgs) (string, error) {
+	full, err := w.resolve(args.Path)
 	if err != nil {
 		return "", err
 	}
-	root, err := os.OpenRoot(t.ws.root)
+	root, err := os.OpenRoot(w.root)
 	if err != nil {
 		return "", fmt.Errorf("open workspace: %w", err)
 	}
@@ -99,45 +86,29 @@ func (t *readFileTool) Call(_ context.Context, args json.RawMessage) (string, er
 
 // --- write_file ---
 
-type writeFileTool struct{ ws *workspace }
+type writeFileArgs struct {
+	Path    string `json:"path"    jsonschema:"Path to the file, relative to the workspace."`
+	Content string `json:"content" jsonschema:"Content to write."`
+}
 
-// NewWriteFile creates the write_file tool.
-func NewWriteFile(root string) (Tool, error) {
+// NewWriteFile creates the write_file tool, jailed to root.
+func NewWriteFile(root string) (tool.FuncTool, error) {
 	ws, err := newWorkspace(root)
 	if err != nil {
 		return nil, err
 	}
-	return &writeFileTool{ws: ws}, nil
+	return functool.New(functool.Config{
+		Name:        "write_file",
+		Description: "Write content to a file in the workspace (overwrites).",
+	}, ws.writeFile)
 }
 
-func (t *writeFileTool) Name() string { return "write_file" }
-func (t *writeFileTool) Description() string {
-	return "Write content to a file in the workspace (overwrites)."
-}
-func (t *writeFileTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"path":    map[string]any{"type": "string", "description": "Path to the file, relative to the workspace."},
-			"content": map[string]any{"type": "string", "description": "Content to write."},
-		},
-		"required": []string{"path", "content"},
-	}
-}
-
-func (t *writeFileTool) Call(_ context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	full, err := t.ws.resolve(in.Path)
+func (w *workspace) writeFile(_ context.Context, args writeFileArgs) (string, error) {
+	full, err := w.resolve(args.Path)
 	if err != nil {
 		return "", err
 	}
-	root, err := os.OpenRoot(t.ws.root)
+	root, err := os.OpenRoot(w.root)
 	if err != nil {
 		return "", fmt.Errorf("open workspace: %w", err)
 	}
@@ -145,54 +116,42 @@ func (t *writeFileTool) Call(_ context.Context, args json.RawMessage) (string, e
 	if err := root.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return "", fmt.Errorf("create dir: %w", err)
 	}
-	if err := root.WriteFile(full, []byte(in.Content), 0o644); err != nil {
+	if err := root.WriteFile(full, []byte(args.Content), 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
-	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
+	return fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path), nil
 }
 
 // --- list_files ---
 
-type listFilesTool struct{ ws *workspace }
+// listFilesArgs takes an optional path; empty (or omitted) lists the
+// workspace root.
+type listFilesArgs struct {
+	Path string `json:"path,omitempty" jsonschema:"Directory to list, relative to the workspace. Empty for root."`
+}
 
-// NewListFiles creates the list_files tool.
-func NewListFiles(root string) (Tool, error) {
+// NewListFiles creates the list_files tool, jailed to root.
+func NewListFiles(root string) (tool.FuncTool, error) {
 	ws, err := newWorkspace(root)
 	if err != nil {
 		return nil, err
 	}
-	return &listFilesTool{ws: ws}, nil
+	return functool.New(functool.Config{
+		Name:        "list_files",
+		Description: "List files and directories under a path in the workspace.",
+	}, ws.listFiles)
 }
 
-func (t *listFilesTool) Name() string { return "list_files" }
-func (t *listFilesTool) Description() string {
-	return "List files and directories under a path in the workspace."
-}
-func (t *listFilesTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Directory to list, relative to the workspace. Empty for root."},
-		},
+func (w *workspace) listFiles(_ context.Context, args listFilesArgs) (string, error) {
+	p := args.Path
+	if p == "" {
+		p = "."
 	}
-}
-
-func (t *listFilesTool) Call(_ context.Context, args json.RawMessage) (string, error) {
-	var in struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-	if in.Path == "" {
-		in.Path = "."
-	}
-
-	full, err := t.ws.resolve(in.Path)
+	full, err := w.resolve(p)
 	if err != nil {
 		return "", err
 	}
-	root, err := os.OpenRoot(t.ws.root)
+	root, err := os.OpenRoot(w.root)
 	if err != nil {
 		return "", fmt.Errorf("open workspace: %w", err)
 	}
