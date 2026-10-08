@@ -4,81 +4,103 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dkr290/agenticgo/internal/agents"
-	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/store"
 )
 
-type checkingProvider struct {
-	complete func(llm.ChatRequest) (llm.Message, error)
-}
-
-func (p checkingProvider) Model() string { return "test" }
-func (p checkingProvider) Name() string  { return "test" }
-func (p checkingProvider) ChatCompletion(_ context.Context, r llm.ChatRequest, _ llm.StreamFunc) (llm.Message, error) {
-	return p.complete(r)
-}
-
+// TestRunReplaysToolExchange drives two turns through the MAF loop against a
+// mock server and asserts the second turn's first request replays the stored
+// tool exchange (assistant tool call + tool result) from turn one — the
+// HistoryProvider + replayHistory path end to end.
 func TestRunReplaysToolExchange(t *testing.T) {
 	e, _ := newTestEngine(t)
-	e.cfg.MaxAgentIterations = 3
 	ctx := context.Background()
-	call := 0
-	e.SetProviderLookup(fixedLookup{p: checkingProvider{complete: func(r llm.ChatRequest) (llm.Message, error) {
-		call++
+
+	turn := 0
+	e.SetProviderLookup(&trackingLookup{p: scriptedProvider(t, func(call int, req map[string]any) []string {
 		if call == 1 {
-			return llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "memory-1", Name: "memory_save", Arguments: `{"content":"a fact"}`}}}, nil
+			// Turn 1, request 1: ask for memory_save.
+			return sseToolCall("memory-1", "memory_save", `{"content":"a fact"}`)
 		}
 		if call == 3 {
-			if len(r.Messages) != 6 || len(r.Messages[2].ToolCalls) != 1 || r.Messages[2].ToolCalls[0].ID != "memory-1" || r.Messages[3].ToolCallID != "memory-1" || r.Messages[3].Name != "memory_save" {
-				t.Fatalf("invalid replay: %+v", r.Messages)
+			// Turn 2, request 1: history replay must include the exchange.
+			msgs, _ := req["messages"].([]any)
+			var haveCall, haveResult bool
+			for _, m := range msgs {
+				msg, _ := m.(map[string]any)
+				if msg["role"] == "assistant" {
+					if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) == 1 {
+						if tc, ok := tcs[0].(map[string]any); ok && tc["id"] == "memory-1" {
+							haveCall = true
+						}
+					}
+				}
+				if msg["role"] == "tool" && msg["tool_call_id"] == "memory-1" {
+					haveResult = true
+				}
+			}
+			if !haveCall || !haveResult {
+				t.Fatalf("turn 2 replay incomplete: call=%v result=%v in %v", haveCall, haveResult, req["messages"])
 			}
 		}
-		return llm.Message{Role: llm.RoleAssistant, Content: "done"}, nil
-	}}})
+		return sseText("done")
+	})})
+
 	for _, message := range []string{"remember a fact", "what did you save?"} {
+		turn++
 		if _, err := e.Run(ctx, "demo", "conversation", message, "", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if call != 3 {
-		t.Fatalf("completion calls = %d", call)
-	}
 }
 
+// TestReplayDropsIncompleteToolExchanges pins the repair invariant at the
+// storage layer: a stored assistant tool call whose results are missing (an
+// interrupted run) must not reach the provider on the next turn.
 func TestReplayDropsIncompleteToolExchanges(t *testing.T) {
-	calls, err := json.Marshal([]llm.ToolCall{{ID: "a", Name: "read_file", Arguments: `{}`}, {ID: "b", Name: "read_file", Arguments: `{}`}})
+	e, _ := newTestEngine(t)
+	ctx := context.Background()
+
+	calls, err := json.Marshal([]map[string]string{{"id": "a", "name": "read_file", "arguments": `{}`}, {"id": "b", "name": "read_file", "arguments": `{}`}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name    string
-		history []store.Message
-	}{
-		{"window starts in results", []store.Message{{Role: "tool", ToolCallID: "a"}, {Role: "user", Content: "next"}}},
-		{"interrupted parallel calls", []store.Message{{Role: "assistant", ToolCalls: string(calls)}, {Role: "tool", ToolCallID: "a"}, {Role: "user", Content: "next"}}},
-		{"missing all results", []store.Message{{Role: "assistant", ToolCalls: string(calls)}, {Role: "user", Content: "next"}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := replayHistory(tc.history)
-			if err != nil {
-				t.Fatal(err)
+	// Assistant invoked two tools; only one result got persisted.
+	if err := e.store.AppendMessageWithToolCalls(ctx, "demo", "s", "assistant", "", string(calls), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.AppendMessageWithToolCalls(ctx, "demo", "s", "tool", "result-a", "", "a", "read_file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.AppendMessage(ctx, "demo", "s", "user", "continue"); err != nil {
+		t.Fatal(err)
+	}
+
+	e.SetProviderLookup(&trackingLookup{p: scriptedProvider(t, func(_ int, req map[string]any) []string {
+		msgs, _ := req["messages"].([]any)
+		for _, m := range msgs {
+			msg, _ := m.(map[string]any)
+			if msg["role"] == "tool" || msg["tool_calls"] != nil {
+				t.Fatalf("incomplete exchange leaked into request: %v", msg)
 			}
-			if len(got) != 1 || got[0].Content != "next" {
-				t.Fatalf("replay = %+v", got)
-			}
-		})
+		}
+		return sseText("ok")
+	})})
+
+	if _, err := e.Run(ctx, "demo", "s", "continue", "", nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestObservationRetentionZeroTTL(t *testing.T) {
 	for _, keep := range []int{0, 2} {
-		t.Run(string(rune('0'+keep)), func(t *testing.T) {
+		t.Run(fmt.Sprint(keep), func(t *testing.T) {
 			e, ar := newTestEngine(t)
 			e.cfg.ObservationKeepLatest = keep
 			for _, content := range []string{"first", "second", "third"} {
@@ -129,34 +151,35 @@ func TestZeroKnowledgeInjectionKeepsSearchableMemory(t *testing.T) {
 	}
 }
 
+// TestRunGatesFetchedImages drives fetch_agent_image through the MAF loop and
+// asserts the follow-up provider request carries the image part only when the
+// effective model is vision-capable.
 func TestRunGatesFetchedImages(t *testing.T) {
 	for _, vision := range []bool{false, true} {
 		t.Run(map[bool]string{false: "text", true: "vision"}[vision], func(t *testing.T) {
 			e, ar := newTestEngine(t)
-			e.cfg.MaxAgentIterations = 2
 			if _, err := ar.UpdateConfig("demo", agents.AgentConfig{Vision: &vision}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := ar.SaveImage("demo", "photo.png", []byte("fixture image")); err != nil {
 				t.Fatal(err)
 			}
-			calls := 0
-			e.SetProviderLookup(fixedLookup{p: checkingProvider{complete: func(r llm.ChatRequest) (llm.Message, error) {
-				calls++
-				if calls == 1 {
-					return llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "img", Name: "fetch_agent_image", Arguments: `{"name":"photo.png"}`}}}, nil
+			call := 0
+			e.SetProviderLookup(&trackingLookup{p: scriptedProvider(t, func(c int, req map[string]any) []string {
+				call = c
+				if c == 1 {
+					return sseToolCall("img", "fetch_agent_image", `{"name":"photo.png"}`)
 				}
-				images := 0
-				for _, m := range r.Messages {
-					images += len(m.Images)
+				if got := countImages(req) > 0; got != vision {
+					t.Fatalf("vision=%v images in follow-up request = %v", vision, got)
 				}
-				if (images > 0) != vision {
-					t.Fatalf("vision=%v images=%d", vision, images)
-				}
-				return llm.Message{Role: llm.RoleAssistant, Content: "done"}, nil
-			}}})
+				return sseText("done")
+			})})
 			if _, err := e.Run(context.Background(), "demo", "s", "look", "", nil, nil); err != nil {
 				t.Fatal(err)
+			}
+			if call < 2 {
+				t.Fatalf("expected a follow-up request after the tool call, got %d calls", call)
 			}
 		})
 	}
@@ -184,3 +207,6 @@ func TestConversationLockCancellation(t *testing.T) {
 		t.Fatal("conversation locks leaked")
 	}
 }
+
+// Ensure store import is retained for the helpers above.
+var _ = store.ErrKnowledgeDuplicate

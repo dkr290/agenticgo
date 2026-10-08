@@ -1,5 +1,11 @@
 # Plan: Convert agenticgo to microsoft/agent-framework-go (MAF)
 
+## Status: ✅ COMPLETE (merged on branch `maf`)
+
+All phases landed. The legacy hand-rolled loop, `tools.Registry`, both tool
+adapters, `openai.go.bak`, and the `AGENTICGO_USE_MAF` flag are gone; MAF is
+the only execution path. Kept as a record of the migration approach.
+
 ## Goal
 
 Replace the hand-rolled LLM/tool-call plumbing (`internal/llm`, `internal/tools`, the tool

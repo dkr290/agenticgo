@@ -52,7 +52,7 @@ type Server struct {
 	cfg        *config.Config
 	engine     *agent.Engine
 	agents     *agents.Registry
-	tools      *tools.Registry
+	tools      []tools.BuiltinToolInfo // static catalog for the Built-in Tools page
 	store      *store.Store
 	providers  *providers.Store
 	cron       *cron.Scheduler
@@ -66,8 +66,8 @@ type Server struct {
 }
 
 // New builds the server.
-func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, tr *tools.Registry, st *store.Store, ps *providers.Store, cs *cron.Scheduler, mm *mcp.Manager) *Server {
-	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tr, store: st, providers: ps, cron: cs, mcp: mm, log: logger.Nop()}
+func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, st *store.Store, ps *providers.Store, cs *cron.Scheduler, mm *mcp.Manager) *Server {
+	s := &Server{cfg: cfg, engine: eng, agents: ar, tools: tools.BuiltinTools(cfg.ToolAllowList), store: st, providers: ps, cron: cs, mcp: mm, log: logger.Nop()}
 
 	mux := http.NewServeMux()
 

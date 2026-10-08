@@ -8,6 +8,7 @@ import (
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
 	"github.com/dkr290/agenticgo/internal/skills"
+	"github.com/dkr290/agenticgo/internal/tools"
 )
 
 // --- Chat (non-streaming REST) ---
@@ -145,13 +146,8 @@ type deleteSessionOutput struct {
 
 // --- Built-in tools ---
 
-type builtinToolInfo struct {
-	Name        string `json:"name" example:"read_file"`
-	Description string `json:"description" example:"Read a file from the workspace"`
-}
-
 type listToolsOutput struct {
-	Body []builtinToolInfo
+	Body []tools.BuiltinToolInfo
 }
 
 // --- Providers ---

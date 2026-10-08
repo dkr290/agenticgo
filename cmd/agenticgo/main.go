@@ -22,8 +22,6 @@ import (
 	"github.com/dkr290/agenticgo/internal/providers"
 	"github.com/dkr290/agenticgo/internal/server"
 	"github.com/dkr290/agenticgo/internal/store"
-	"github.com/dkr290/agenticgo/internal/tools"
-	"github.com/microsoft/agent-framework-go/tool"
 )
 
 func main() {
@@ -93,14 +91,11 @@ func main() {
 	mcpMgr.SetLogger(lg)
 	defer mcpMgr.CloseAll()
 
-	// Tool registry with built-ins, gated by the tool allow-list.
-	reg := tools.NewRegistry(cfg.ToolAllowList)
-	mustRegister(reg, func() (tools.Tool, error) { return adaptTool(tools.NewReadFile(cfg.WorkspaceDir)) })
-	mustRegister(reg, func() (tools.Tool, error) { return adaptTool(tools.NewWriteFile(cfg.WorkspaceDir)) })
-	mustRegister(reg, func() (tools.Tool, error) { return adaptTool(tools.NewListFiles(cfg.WorkspaceDir)) })
-	reg.Register(tools.AdaptFuncTool(tools.NewExec(cfg.WorkspaceDir, cfg.ExecAllowList)))
+	// The tool set is composed per run by the engine (core memory/docs tools,
+	// workspace-jailed built-ins gated by AGENTICGO_TOOL_ALLOWLIST, enabled
+	// MCP tools) — there is no process-global registry anymore.
 
-	engine := agent.New(cfg, reg, st, agentReg)
+	engine := agent.New(cfg, st, agentReg)
 	engine.SetProviderLookup(providerStore)
 	engine.SetMCPManager(mcpMgr)
 
@@ -115,7 +110,7 @@ func main() {
 	}
 	cronSched.SetLogger(lg)
 
-	srv := server.New(cfg, engine, agentReg, reg, st, providerStore, cronSched, mcpMgr)
+	srv := server.New(cfg, engine, agentReg, st, providerStore, cronSched, mcpMgr)
 	srv.SetLogger(lg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -136,26 +131,10 @@ func main() {
 	}
 	log.Printf("  data:      %s", cfg.DataDir)
 	log.Printf("  agents:    %s", cfg.AgentsDir)
-	log.Printf("  tools:     %d registered", len(reg.Specs()))
+	log.Printf("  tools:     per-run composition (core + built-ins + MCP)")
 
 	if err := srv.Start(ctx); err != nil {
 		log.Fatalf("server: %v", err)
 	}
 	log.Println("agenticgo stopped")
-}
-
-func mustRegister(reg *tools.Registry, make func() (tools.Tool, error)) {
-	t, err := make()
-	if err != nil {
-		log.Fatalf("tool init: %v", err)
-	}
-	reg.Register(t)
-}
-
-// adaptTool adapts a functool constructor result to the legacy registry.
-func adaptTool(ft tool.FuncTool, err error) (tools.Tool, error) {
-	if err != nil {
-		return nil, err
-	}
-	return tools.AdaptFuncTool(ft), nil
 }

@@ -1,18 +1,18 @@
 package agent
 
-// run_maf.go is the MAF (microsoft/agent-framework-go) execution path for
-// Engine.Run. It replaces the hand-rolled tool loop with a per-run MAF agent:
+// run_maf.go is the agent execution path, built on the Microsoft Agent
+// Framework (github.com/microsoft/agent-framework-go):
 //
 //   - the composed system prompt becomes AgentConfig.Instructions,
-//   - the per-run tool set (runRegistry output — core memory/docs tools,
+//   - the per-run tool set (runTools output — core memory/docs tools,
 //     jailed built-ins, enabled MCP tools) becomes Config.Tools, so a tool
-//     absent from the set is still invisible to the model and now unreachable
-//     by construction (MAF's autocall only invokes what it was handed),
+//     absent from the set is invisible to the model and unreachable by
+//     construction (MAF's autocall only invokes what it was handed),
 //   - history stays in SQLite via maf.NewHistoryProvider — no MAF sessions
 //     own conversation state,
 //   - the tool loop runs as toolautocall middleware with
 //     MaximumIterationsPerRequest = cfg.MaxAgentIterations; unknown tool
-//     calls soft-fail into a "not found" result like the legacy registry,
+//     calls soft-fail into a "not found" result,
 //   - WS events (text / tool_call / tool_result / done) are derived from the
 //     ResponseStream, keeping the SPA contract byte-identical,
 //   - cancellation is the run context: WS kind:cancel and shutdown propagate
@@ -20,10 +20,6 @@ package agent
 //   - images become DataContent parts on the outgoing user message; the
 //     fetch_agent_image imageSink is drained between provider calls via
 //     agent.MessageInjector (the model sees the image, not a data-URL string).
-//
-// The legacy loop in agent.go stays until this path proves out against real
-// providers; Engine.Run dispatches between them on cfg.UseMAF
-// (AGENTICGO_USE_MAF).
 
 import (
 	"context"
@@ -34,12 +30,10 @@ import (
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/maf"
-	"github.com/dkr290/agenticgo/internal/tools"
 	mafgent "github.com/microsoft/agent-framework-go/agent"
 	"github.com/microsoft/agent-framework-go/agent/harness/toolautocall"
 	"github.com/microsoft/agent-framework-go/message"
 	"github.com/microsoft/agent-framework-go/provider/openaiprovider"
-	"github.com/microsoft/agent-framework-go/tool"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
@@ -53,20 +47,12 @@ var maxConsecutiveToolErrors = 100
 // runMAF executes one user turn through the MAF agent loop. Same signature
 // and event contract as the legacy path in Run.
 func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session, userMessage string, prov *llm.OpenAIProvider, images []string, vision bool, emit func(Event)) (string, error) {
-	// Build the per-run tool set with the legacy composition (single source of
-	// truth for gating), then unwrap to MAF tools: every tool in the registry
-	// today is an AdaptFuncTool wrapper around a tool.FuncTool.
-	reg, sink, err := e.runRegistry(ag)
+	// Build the per-run tool set: the single source of truth for gating. MAF's
+	// autocall invokes exactly this slice, so a tool absent from the set is
+	// invisible to the model and unreachable at dispatch.
+	mafTools, sink, err := e.runTools(ag)
 	if err != nil {
-		return "", fmt.Errorf("build tool registry: %w", err)
-	}
-	mafTools := make([]tool.Tool, 0)
-	for _, t := range reg.Tools() {
-		ft, ok := tools.UnwrapFuncTool(t)
-		if !ok {
-			return "", fmt.Errorf("tool %q is not a MAF FuncTool — legacy registry tools are not supported on the MAF path", t.Name())
-		}
-		mafTools = append(mafTools, ft)
+		return "", fmt.Errorf("build tool set: %w", err)
 	}
 
 	// Model + sampling settings: agent config pins win over provider defaults.
@@ -217,6 +203,28 @@ func mafResultText(c *message.FunctionResultContent) string {
 	default:
 		return fmt.Sprintf("%v", r)
 	}
+}
+
+// runOneShotMAF runs a single non-streaming MAF completion with no tools and
+// no history provider — used by Evolve, where the transcript is baked into
+// the prompt and there is nothing to persist. Returns the reply text.
+func runOneShotMAF(ctx context.Context, prov *llm.OpenAIProvider, ag *agents.Agent, instructions, prompt string) (string, error) {
+	model := prov.Model()
+	if ag.Config.Model != nil && *ag.Config.Model != "" {
+		model = *ag.Config.Model
+	}
+	a := openaiprovider.NewChatCompletionsAgent(
+		openai.NewClient(prov.RequestOptions()...),
+		openaiprovider.AgentConfig{
+			Model:        model,
+			Instructions: instructions,
+		},
+	)
+	resp, err := a.RunText(ctx, prompt).Collect()
+	if err != nil {
+		return "", err
+	}
+	return resp.String(), nil
 }
 
 // ensure option import is used even if request options change shape

@@ -1,8 +1,10 @@
-// Package llm defines the provider abstraction and message types shared by the
-// agent loop. Providers talk to an LLM and stream back deltas plus tool calls.
+// Package llm defines the provider abstraction and message types shared by
+// the agent engine and the persistence bridge. The agent loop runs on the
+// Microsoft Agent Framework (see internal/agent/run_maf.go); what remains
+// here is the named-provider seam (providers.Store resolves to a Provider,
+// concretely *OpenAIProvider) plus the flat message shape the SQLite history
+// store persists and internal/maf translates.
 package llm
-
-import "context"
 
 // Role identifies who produced a message.
 type Role string
@@ -14,14 +16,17 @@ const (
 	RoleTool      Role = "tool"
 )
 
-// ToolCall is a request from the model to invoke a tool.
+// ToolCall is a request from the model to invoke a tool, as persisted in
+// history rows.
 type ToolCall struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"` // raw JSON
 }
 
-// Message is a single turn in the conversation.
+// Message is a single turn in the conversation as persisted by the history
+// store (flat rows; internal/maf translates these to and from MAF
+// content-part messages).
 type Message struct {
 	Role       Role       `json:"role"`
 	Content    string     `json:"content"`
@@ -29,57 +34,16 @@ type Message struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"` // for RoleTool results
 	Name       string     `json:"name,omitempty"`         // tool name for RoleTool results
 	// Images are base64 data-URLs ("data:image/png;base64,...") attached to a
-	// user message for vision-capable models. Ignored unless the model supports
-	// images; providers serialize them as image_url content parts.
+	// user message for vision-capable models.
 	Images []string `json:"images,omitempty"`
 }
 
-// ToolSpec describes a tool to the model (OpenAI-compatible schema).
-type ToolSpec struct {
-	Type     string       `json:"type"` // always "function"
-	Function FunctionSpec `json:"function"`
-}
-
-// FunctionSpec describes a callable function.
-type FunctionSpec struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"` // JSON Schema
-}
-
-// Delta is one streamed chunk from the provider.
-type Delta struct {
-	// Content is incremental assistant text (may be empty).
-	Content string
-	// ToolCalls accumulates completed tool calls as they finish streaming.
-	// Providers may deliver tool calls incrementally; Complete marks the end.
-	ToolCalls []ToolCall
-	// Done is true on the final delta.
-	Done bool
-	// Err is set if the stream failed.
-	Err error
-}
-
-// StreamFunc receives each Delta. Returning an error aborts the stream.
-type StreamFunc func(Delta) error
-
-// Provider is an LLM backend that supports streaming chat with tool use.
+// Provider is a named LLM backend configuration. The engine builds its MAF
+// client from the provider's endpoint settings (see
+// OpenAIProvider.RequestOptions).
 type Provider interface {
-	// ChatCompletion streams a reply for the given messages and tools.
-	// The model may emit tool calls instead of (or before) final text.
-	ChatCompletion(ctx context.Context, req ChatRequest, onDelta StreamFunc) (Message, error)
 	// Name identifies the provider for logging.
 	Name() string
 	// Model returns the model identifier requests are sent with.
 	Model() string
-}
-
-// ChatRequest is a single completion request.
-type ChatRequest struct {
-	Model       string     `json:"model"`
-	Messages    []Message  `json:"messages"`
-	Tools       []ToolSpec `json:"tools,omitempty"`
-	Temperature *float64   `json:"temperature,omitempty"`
-	MaxTokens   *int       `json:"max_tokens,omitempty"`
-	Stream      bool       `json:"stream"`
 }

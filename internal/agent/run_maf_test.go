@@ -6,7 +6,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,9 +59,8 @@ func TestRunMAFEndToEnd(t *testing.T) {
 	defer srv.Close()
 
 	e, ar := newTestEngine(t)
-	e.cfg.UseMAF = true
 	// Point the provider lookup at the mock server.
-	e.SetProviderLookup(staticLookup{p: llm.NewOpenAI(srv.URL+"/v1", "", "test-model")})
+	e.SetProviderLookup(&trackingLookup{p: llm.NewOpenAI(srv.URL+"/v1", "", "test-model")})
 
 	var events []Event
 	reply, err := e.Run(context.Background(), "demo", "s1", "remember that I like Go", "", nil, func(ev Event) {
@@ -126,8 +124,7 @@ func TestRunMAFStreamedTextMatchesReply(t *testing.T) {
 	defer srv.Close()
 
 	e, _ := newTestEngine(t)
-	e.cfg.UseMAF = true
-	e.SetProviderLookup(staticLookup{p: llm.NewOpenAI(srv.URL+"/v1", "", "test-model")})
+	e.SetProviderLookup(&trackingLookup{p: llm.NewOpenAI(srv.URL+"/v1", "", "test-model")})
 
 	var streamed strings.Builder
 	reply, err := e.Run(context.Background(), "demo", "s2", "hi", "", nil, func(ev Event) {
@@ -142,16 +139,3 @@ func TestRunMAFStreamedTextMatchesReply(t *testing.T) {
 		t.Errorf("streamed %q != reply %q", streamed.String(), reply)
 	}
 }
-
-// staticLookup resolves every provider name to the same provider (the mock).
-type staticLookup struct{ p llm.Provider }
-
-func (s staticLookup) GetLLM(string) (llm.Provider, error) { return s.p, nil }
-
-// jsonMarshal is a tiny helper to keep the mock payloads readable.
-func jsonMarshal(v any) string {
-	data, _ := json.Marshal(v)
-	return string(data)
-}
-
-var _ = jsonMarshal

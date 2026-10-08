@@ -866,11 +866,7 @@ func (s *Server) registerToolRoutes(api huma.API) {
 		Description: "Lists the built-in tools available under the global AGENTICGO_TOOL_ALLOWLIST ceiling.",
 		Tags:        tag,
 	}, func(ctx context.Context, _ *struct{}) (*listToolsOutput, error) {
-		specs := s.tools.Specs()
-		out := make([]builtinToolInfo, 0, len(specs))
-		for _, sp := range specs {
-			out = append(out, builtinToolInfo{Name: sp.Function.Name, Description: sp.Function.Description})
-		}
+		out := s.tools
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 		return &listToolsOutput{Body: out}, nil
 	})
