@@ -5,9 +5,10 @@ package maf
 //
 // The store remains the single source of truth for conversation history —
 // MAF sessions are NOT used for history ownership (a second source of truth
-// would fight the store). The engine wires one historyProvider per run,
-// scoped to (agent, session), and MAF calls Provide before the provider run
-// and Store after it completes.
+// would fight the store). The engine wires one HistoryProvider per run,
+// scoped to (agent, session). Invoking loads history and saves the incoming
+// user turn; middleware checkpoints completed tool rounds; Invoked saves the
+// remaining successful response without duplicating those checkpoints.
 //
 // The translation boundary: the store keeps its existing flat rows (role,
 // content, tool_calls JSON, tool_call_id, name); MAF speaks message.Message
@@ -25,7 +26,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"strings"
+	"time"
 
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/store"
@@ -37,23 +40,26 @@ import (
 // window the legacy engine used.
 const historyWindow = 40
 
-// historyProvider implements agent.HistoryProvider over store.Store for one
-// (agent, session) conversation.
-type historyProvider struct {
+// HistoryProvider implements agent.HistoryProvider over store.Store for one
+// serialized (agent, session) turn. It must be paired with CheckpointMiddleware
+// to preserve completed tool rounds when a later request fails or is cancelled.
+type HistoryProvider struct {
 	st      *store.Store
 	agent   string
 	session string
+	saved   int // response messages already checkpointed during this turn
 }
 
 // NewHistoryProvider creates the MAF history bridge for one conversation.
-func NewHistoryProvider(st *store.Store, agentKey, session string) agent.HistoryProvider {
-	return &historyProvider{st: st, agent: agentKey, session: session}
+func NewHistoryProvider(st *store.Store, agentKey, session string) *HistoryProvider {
+	return &HistoryProvider{st: st, agent: agentKey, session: session}
 }
 
-// Invoking loads recent history and returns it as additional messages to
-// prepend (the default NewHistoryProvider semantics: Provide results are
-// prepended to caller-supplied request messages).
-func (h *historyProvider) Invoking(ctx context.Context, _ agent.InvokingContext) ([]*message.Message, error) {
+// Invoking returns the full input, including the caller's original multimodal
+// messages. Load history before storing the incoming user text to avoid adding
+// that turn twice, including when the user repeats an identical prompt.
+func (h *HistoryProvider) Invoking(ctx context.Context, invoking agent.InvokingContext) ([]*message.Message, error) {
+	h.saved = 0
 	rows, err := h.st.Messages(ctx, h.agent, h.session, historyWindow)
 	if err != nil {
 		return nil, fmt.Errorf("load history: %w", err)
@@ -62,66 +68,108 @@ func (h *historyProvider) Invoking(ctx context.Context, _ agent.InvokingContext)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*message.Message, 0, len(replayed))
+	out := make([]*message.Message, 0, len(replayed)+len(invoking.Messages))
 	for _, m := range replayed {
 		out = append(out, llmToMAF(m))
+	}
+	var incoming []store.Message
+	for _, m := range invoking.Messages {
+		if m == nil {
+			continue
+		}
+		out = append(out, m)
+		incoming = append(incoming, store.Message{Role: string(m.Role), Content: m.String()})
+	}
+	if err := h.st.AppendMessages(ctx, h.agent, h.session, incoming); err != nil {
+		return nil, fmt.Errorf("save incoming messages: %w", err)
 	}
 	return out, nil
 }
 
-// Invoked persists newly produced messages. MAF hands us the request and
-// response messages; only the ones that are not already in the store get
-// appended. The engine persists the user turn itself before the run, so the
-// provider stores only response messages (assistant text, tool calls, tool
-// results) — anything else would double-write.
-func (h *historyProvider) Invoked(ctx context.Context, invoked agent.InvokedContext) error {
+// Invoked stores only the successful tail. On failure the completed tool
+// rounds are already durable; unfinished assistant text is not replayed.
+func (h *HistoryProvider) Invoked(ctx context.Context, invoked agent.InvokedContext) error {
 	if invoked.Err != nil {
-		return nil // failed runs persist nothing (matches the legacy engine)
+		return nil
 	}
-	for _, m := range invoked.ResponseMessages {
-		if err := h.storeMessage(ctx, m); err != nil {
-			return err
-		}
-	}
-	return nil
+	return h.checkpoint(ctx, invoked.ResponseMessages)
 }
 
-// storeMessage persists one response message in the store's flat-row format,
-// matching the rows the legacy engine wrote so Chat History renders unchanged.
-func (h *historyProvider) storeMessage(ctx context.Context, m *message.Message) error {
-	text, calls, results := splitContents(m.Contents)
-
-	switch {
-	case len(calls) > 0:
-		// Assistant turn that invoked tools: text + tool_calls metadata.
-		tcJSON, err := json.Marshal(calls)
-		if err != nil {
-			return fmt.Errorf("marshal tool calls: %w", err)
-		}
-		return h.st.AppendMessageWithToolCalls(ctx, h.agent, h.session,
-			string(llm.RoleAssistant), text, string(tcJSON), "", "")
-	case len(results) > 0:
-		// Tool results: one row per result, linked by tool_call_id.
-		for _, r := range results {
-			if err := h.st.AppendMessageWithToolCalls(ctx, h.agent, h.session,
-				string(llm.RoleTool), r.content, "", r.callID, r.name); err != nil {
-				return err
+// CheckpointMiddleware saves each completed MAF tool round before the next
+// provider request. Cleanup has a bounded independent context so cancellation
+// cannot erase results of side effects that have already happened.
+func (h *HistoryProvider) CheckpointMiddleware() agent.Middleware {
+	return agent.MiddlewareFunc(func(next agent.RunFunc, ctx context.Context, messages []*message.Message, opts ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+		return func(yield func(*agent.ResponseUpdate, error) bool) {
+			var response agent.Response
+			for update, err := range next(ctx, messages, opts...) {
+				response.Update(update)
+				if update != nil && hasToolResults(update.Contents) {
+					saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					saveErr := h.checkpoint(saveCtx, response.Messages)
+					cancel()
+					if saveErr != nil {
+						yield(nil, saveErr)
+						return
+					}
+				}
+				if !yield(update, err) || err != nil {
+					return
+				}
 			}
 		}
-		return nil
-	default:
-		role := string(m.Role)
-		if role == "" {
-			role = string(llm.RoleAssistant)
+	})
+}
+
+func hasToolResults(contents message.Contents) bool {
+	for _, c := range contents {
+		if _, ok := c.(*message.FunctionResultContent); ok {
+			return true
 		}
-		return h.st.AppendMessage(ctx, h.agent, h.session, role, text)
 	}
+	return false
+}
+
+func (h *HistoryProvider) checkpoint(ctx context.Context, messages []*message.Message) error {
+	names := make(map[string]string)
+	var rows []store.Message
+	for i, m := range messages {
+		text, calls, results := splitContents(m.Contents)
+		for _, call := range calls {
+			names[call.ID] = call.Name
+		}
+		if i < h.saved {
+			continue
+		}
+		switch {
+		case len(calls) > 0:
+			tcJSON, err := json.Marshal(calls)
+			if err != nil {
+				return fmt.Errorf("marshal tool calls: %w", err)
+			}
+			rows = append(rows, store.Message{Role: string(llm.RoleAssistant), Content: text, ToolCalls: string(tcJSON)})
+		case len(results) > 0:
+			for _, r := range results {
+				rows = append(rows, store.Message{Role: string(llm.RoleTool), Content: r.content, ToolCallID: r.callID, Name: names[r.callID]})
+			}
+		case text != "":
+			role := string(m.Role)
+			if role == "" {
+				role = string(llm.RoleAssistant)
+			}
+			rows = append(rows, store.Message{Role: role, Content: text})
+		}
+	}
+	if err := h.st.AppendMessages(ctx, h.agent, h.session, rows); err != nil {
+		return fmt.Errorf("save response messages: %w", err)
+	}
+	h.saved = len(messages)
+	return nil
 }
 
 // toolResult is one pending row for a tool-result message.
 type toolResult struct {
 	callID  string
-	name    string
 	content string
 }
 
@@ -134,6 +182,8 @@ func splitContents(cs message.Contents) (text string, calls []llm.ToolCall, resu
 		switch c := c.(type) {
 		case *message.TextContent:
 			b.WriteString(c.Text)
+		case *message.ErrorContent:
+			b.WriteString(c.Message)
 		case *message.FunctionCallContent:
 			calls = append(calls, llm.ToolCall{ID: c.CallID, Name: c.Name, Arguments: c.Arguments})
 		case *message.FunctionResultContent:
@@ -141,7 +191,7 @@ func splitContents(cs message.Contents) (text string, calls []llm.ToolCall, resu
 			if c.Error != nil {
 				content = "error: " + c.Error.Error()
 			}
-			results = append(results, toolResult{callID: c.CallID, name: resultName(c), content: content})
+			results = append(results, toolResult{callID: c.CallID, content: content})
 		}
 	}
 	return b.String(), calls, results
@@ -166,16 +216,6 @@ func resultText(result any) string {
 		}
 		return string(data)
 	}
-}
-
-// resultName recovers the tool name MAF stashed in the result's raw
-// representation when available; empty otherwise (the store tolerates this —
-// replay links by call ID, and the UI only uses name for display).
-func resultName(c *message.FunctionResultContent) string {
-	if fc, ok := c.RawRepresentation.(*message.FunctionCallContent); ok {
-		return fc.Name
-	}
-	return ""
 }
 
 // --- llm.Message ↔ message.Message translation ---

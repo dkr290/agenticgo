@@ -1153,7 +1153,7 @@
   });
   $('cf-reset').addEventListener('click', () => {
     if (!detailAgent || !confirm('Clear all LLM settings for this agent and use defaults?')) return;
-    api('/api/agents/' + encodeURIComponent(detailAgent) + '/config', {
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/llm-config', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}'
     }).then(a => { agentDetail = a; renderAgentConfig(); })
       .catch(e => toast('Reset failed: ' + e.message));

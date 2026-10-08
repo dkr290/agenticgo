@@ -193,6 +193,30 @@ func (s *Store) AppendMessage(ctx context.Context, agent, session, role, content
 	return s.AppendMessageWithToolCalls(ctx, agent, session, role, content, "", "", "")
 }
 
+// AppendMessages checkpoints a completed exchange atomically, so a storage
+// failure cannot leave half of an assistant/tool-result batch in history.
+func (s *Store) AppendMessages(ctx context.Context, agent, session string, messages []Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin message checkpoint: %w", err)
+	}
+	defer tx.Rollback()
+	for _, m := range messages {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO messages (agent, session, role, content, tool_calls, tool_call_id, name, created_at) VALUES (?,?,?,?,?,?,?,?)`,
+			agent, session, m.Role, m.Content, m.ToolCalls, m.ToolCallID, m.Name, time.Now().Unix()); err != nil {
+			return fmt.Errorf("checkpoint message: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit message checkpoint: %w", err)
+	}
+	return nil
+}
+
 // Messages returns the stored messages for an agent+session, oldest first.
 func (s *Store) Messages(ctx context.Context, agent, session string, limit int) ([]Message, error) {
 	if limit <= 0 {

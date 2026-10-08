@@ -158,7 +158,7 @@ func toolSetFor(t *testing.T, e *Engine, ar *agents.Registry, agentKey string) [
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts, _, err := e.runTools(ag)
+	ts, _, err := e.runTools(ag, e.EffectiveVision(ag, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestRunToolsFetchAgentImageReachesSink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts, sink, err := e.runTools(ag)
+	ts, sink, err := e.runTools(ag, true)
 	if err != nil {
 		t.Fatal(err)
 	}

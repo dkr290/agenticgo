@@ -173,6 +173,14 @@ func TestRunGatesFetchedImages(t *testing.T) {
 				if got := countImages(req) > 0; got != vision {
 					t.Fatalf("vision=%v images in follow-up request = %v", vision, got)
 				}
+				if !vision {
+					for _, raw := range req["messages"].([]any) {
+						m := raw.(map[string]any)
+						if m["role"] == "tool" && !strings.Contains(fmt.Sprint(m["content"]), "does not support images") {
+							t.Errorf("non-vision fetch must explain failure: %v", m)
+						}
+					}
+				}
 				return sseText("done")
 			})})
 			if _, err := e.Run(context.Background(), "demo", "s", "look", "", nil, nil); err != nil {

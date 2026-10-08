@@ -51,3 +51,28 @@ func TestMessagesLegacyNullToolColumns(t *testing.T) {
 		t.Fatalf("tool_calls lost: %+v", msgs[1])
 	}
 }
+
+func TestAppendMessagesRollsBackIncompleteCheckpoint(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	if err := st.AppendMessage(ctx, "demo", "s", "user", "existing turn"); err != nil {
+		t.Fatal(err)
+	}
+	// Fail on the second insert to ensure the assistant call is rolled back
+	// along with its missing result, while existing history remains intact.
+	if _, err := st.db.Exec(`CREATE TRIGGER reject_tool BEFORE INSERT ON messages WHEN NEW.role = 'tool'
+		BEGIN SELECT RAISE(ABORT, 'checkpoint failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	err := st.AppendMessages(ctx, "demo", "s", []Message{
+		{Role: "assistant", ToolCalls: `[{"id":"a","name":"read_file","arguments":"{}"}]`},
+		{Role: "tool", ToolCallID: "a", Content: "result", Name: "read_file"},
+	})
+	if err == nil {
+		t.Fatal("expected checkpoint failure")
+	}
+	rows, err := st.Messages(ctx, "demo", "s", 40)
+	if err != nil || len(rows) != 1 || rows[0].Content != "existing turn" {
+		t.Fatalf("partial checkpoint committed: %+v %v", rows, err)
+	}
+}

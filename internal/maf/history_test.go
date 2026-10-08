@@ -29,7 +29,7 @@ func openTestStore(t *testing.T) *store.Store {
 func TestHistoryRoundTrip(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
-	hp := NewHistoryProvider(st, "demo", "s1").(*historyProvider)
+	hp := NewHistoryProvider(st, "demo", "s1")
 
 	// The engine persists the user turn itself before the run.
 	if err := st.AppendMessage(ctx, "demo", "s1", "user", "list the files"); err != nil {
@@ -104,8 +104,8 @@ func TestHistoryRoundTrip(t *testing.T) {
 	}
 }
 
-// TestHistoryInvokedSkipsFailedRuns: a run that errored persists nothing,
-// matching the legacy engine (a partial exchange must not corrupt history).
+// TestHistoryInvokedSkipsFailedRuns: incomplete assistant text is not saved.
+// Completed tool rounds are persisted separately by CheckpointMiddleware.
 func TestHistoryInvokedSkipsFailedRuns(t *testing.T) {
 	st := openTestStore(t)
 	hp := NewHistoryProvider(st, "demo", "s1")
