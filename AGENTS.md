@@ -73,12 +73,20 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - **LLM providers**: OpenAI-compatible endpoints only (Ollama / LM Studio / vLLM /
   OpenAI / Azure Foundry's OpenAI-compatible endpoint), behind a `llm.Provider`
   interface. The agent loop itself runs on the **Microsoft Agent Framework**
-  (`github.com/microsoft/agent-framework-go`): per run, the engine builds a
-  `openaiprovider.NewChatCompletionsAgent` with the composed system prompt, the
-  gated tool set, and `toolautocall` middleware as the tool loop
+  (`github.com/microsoft/agent-framework-go`): per run, `maf.NewChatAgent`
+  composes the OpenAI provider with the system prompt, the gated tool set,
+  and MAF's `toolautocall` middleware as the tool loop
   (`MaximumIterationsPerRequest` = `AGENTICGO_MAX_ITERATIONS`). History stays in
   SQLite via a `HistoryProvider` bridge (`internal/maf`) — MAF sessions never own
-  conversation state. All tools are MAF `tool.FuncTool`s: built-ins and core
+  conversation state. The bridge checkpoints completed tool rounds atomically
+  before the next completion, retaining them on failure/cancellation; only the
+  successful response tail is saved by `HistoryProvider.Invoked`. Incoming
+  multimodal messages are preserved and their text is saved once by `Invoking`.
+  A narrow v0.1.0 compatibility layer assembles streamed tool calls from the
+  official OpenAI SDK accumulator (including interleaved and terminal-chunk
+  calls); MAF still owns request translation and the tool loop. Fetched images
+  remain in context throughout the run. Tool wrappers check cancellation before
+  every dispatch. All tools are MAF `tool.FuncTool`s: built-ins and core
   memory/docs tools are `functool` typed funcs (schema derived from the args
   struct), MCP tools wrap `Manager.CallTool` (namespaced `mcp_<server>_<tool>`,
   lazy reconnect, soft-fail). Named provider configs are managed
@@ -135,7 +143,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   Extra, dangerous commands (e.g. `kubectl`, `git`) are declared via
   `AGENTICGO_EXTRA_EXEC_COMMANDS` but are **never** runnable until an agent enables
   them via `config.json` `enabled_commands` (Agents → Extra Dangerous Exec Commands
-  tab); `Engine.runRegistry` re-checks per run. Enabled extras run from the agent's
+  tab); `Engine.runTools` re-checks per run. Enabled extras run from the agent's
   workspace with process/container privileges, PATH, network and mounted credentials,
   so image-installed kubectl/git remain usable. Context-file names are validated
   against an allow-list (`validContextFile`) to prevent path traversal; agent keys are
@@ -167,7 +175,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
     (default 1 = only the latest; 0 = none; N>1 renders a `## Recent Observations`
     block, newest first) — a monitor that diffs run-over-run uses the last few.
   These **core agent tools** (`memory_search`, `memory_save`, `record_observation`,
-  `search_docs`, `read_doc`) are built per-run in `Engine.runRegistry` (scoped to the
+  `search_docs`, `read_doc`) are built per-run in `Engine.runTools` (scoped to the
   agent) and registered unconditionally — they are not gated by
   `AGENTICGO_TOOL_ALLOWLIST` and cannot be disabled per agent. They are listed
   read-only on the Built-in Tools page via `GET /api/tools/core` (single source of
@@ -237,11 +245,12 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   enabled MCP tools) whose slice serves both the LLM request and dispatch.
   `SetProviderLookup` enables per-request provider overrides;
   `SetMCPManager` enables per-agent MCP tools.
-- `internal/maf` — the only package importing agent-framework-go internals:
-  the `HistoryProvider` bridge over the SQLite store (with the history-repair
-  rules for interrupted/tool-call exchanges), the `llm.Message` ↔
-  `message.Message` translation, the MCP tool FuncTool wrapper, and the
-  user-message (text + images) builder.
+- `internal/maf` — framework integration and compatibility middleware:
+  `NewChatAgent` composes MAF's OpenAI provider and toolautocall, repairs v0.1.0
+  streaming tool-call assembly, retains run-scoped images, and guards dispatch
+  on cancellation. The SQLite `HistoryProvider` and checkpoint middleware own
+  persistence and history repair. Also contains `llm.Message` ↔ `message.Message`
+  translation, the MCP FuncTool wrapper, and the user-message builder.
 - `internal/server` — all REST routes are **Huma operations** registered in
   `routes.go` via `huma.Register` on a stdlib `http.ServeMux` (adapter
   `github.com/danielgtaylor/huma/v2/adapters/humago`), so `/openapi.json`,
@@ -317,9 +326,9 @@ Per-agent workspaces are wired into the tool loop.
   self-generated. (chi was replaced by Huma; the router is now stdlib.)
 - Agent framework: `github.com/microsoft/agent-framework-go` — the agent loop,
   tool auto-invocation (`toolautocall`), and tool plumbing (`functool`) run on
-  it. All framework-facing code is quarantined in `internal/maf` (history
-  bridge, message translation, MCP wrapper) so a preview-API upgrade touches
-  one package.
+  it. Framework compatibility code lives in `internal/maf` (chat composition,
+  streaming repair, history bridge, message translation, MCP wrapper). The
+  engine and typed tools also use MAF's public message/tool APIs.
 - LLM client: `github.com/openai/openai-go/v3` (official SDK, Chat Completions
   API with base-URL override — works with Ollama / LM Studio / LocalAI / vLLM /
   OpenAI / Azure Foundry's OpenAI-compatible endpoint). The engine passes
@@ -363,8 +372,9 @@ curl -X POST localhost:18099/api/chat \
 - `cmd/agenticgo/main.go` — wiring
 - `internal/agent/agent.go` — `Engine` (provider resolution, system prompt,
   retention, `Evolve`) + `run_maf.go` (the MAF agent loop + one-shot runs)
-- `internal/maf/` — framework bridge: `history.go` (HistoryProvider +
-  translation), `mcp.go` (MCP tool FuncTool)
+- `internal/maf/` — framework bridge: `chat.go` (MAF composition, streaming
+  compatibility, retained images, cancellation), `history.go` (HistoryProvider,
+  atomic checkpoints + translation), `mcp.go` (MCP tool FuncTool)
 - `internal/agents/agents.go` — agent registry + context files
 - `internal/agenttemplates/agenttemplates.go` — `go:embed` initial context-file templates (`templates/`)
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition

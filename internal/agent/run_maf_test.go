@@ -1,6 +1,6 @@
 package agent
 
-// run_maf_test.go exercises the MAF execution path (cfg.UseMAF) end to end
+// run_maf_test.go exercises the MAF execution path end to end
 // against a mock OpenAI Chat Completions server: tool call round-trip, WS
 // event stream, and history persistence in the legacy row format.
 
@@ -58,7 +58,7 @@ func TestRunMAFEndToEnd(t *testing.T) {
 	srv := chatCompletionsMock(t)
 	defer srv.Close()
 
-	e, ar := newTestEngine(t)
+	e, _ := newTestEngine(t)
 	// Point the provider lookup at the mock server.
 	e.SetProviderLookup(&trackingLookup{p: llm.NewOpenAI(srv.URL+"/v1", "", "test-model")})
 
@@ -85,8 +85,6 @@ func TestRunMAFEndToEnd(t *testing.T) {
 
 	// History persisted in the legacy row format: user, assistant+tool_calls,
 	// tool result, final assistant.
-	ag, _ := ar.Get("demo")
-	_ = ag
 	rows, err := e.store.Messages(context.Background(), "demo", "s1", 40)
 	if err != nil {
 		t.Fatal(err)
@@ -117,8 +115,8 @@ func TestRunMAFEndToEnd(t *testing.T) {
 	}
 }
 
-// TestRunMAFStreamedTextMatchesReply: text deltas emitted during the run
-// concatenate to the returned reply (the WS contract the SPA relies on).
+// TestRunMAFStreamedTextMatchesReply: when there is no intermediate narration,
+// text deltas concatenate to the final reply.
 func TestRunMAFStreamedTextMatchesReply(t *testing.T) {
 	srv := chatCompletionsMock(t)
 	defer srv.Close()

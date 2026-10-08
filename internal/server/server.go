@@ -470,7 +470,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 			emit := func(ev agent.Event) {
 				// Send a single terminal event after releasing the active run.
-				if ev.Kind == "done" || ev.Kind == "error" {
+				if ev.Kind == "done" || ev.Kind == "error" || ev.Kind == "cancelled" {
 					return
 				}
 				out := wsEvent{

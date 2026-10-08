@@ -17,9 +17,8 @@ package agent
 //     ResponseStream, keeping the SPA contract byte-identical,
 //   - cancellation is the run context: WS kind:cancel and shutdown propagate
 //     through the stream unchanged,
-//   - images become DataContent parts on the outgoing user message; the
-//     fetch_agent_image imageSink is drained between provider calls via
-//     agent.MessageInjector (the model sees the image, not a data-URL string).
+//   - images become DataContent parts on the outgoing user message; MAF bridge
+//     middleware retains fetched images throughout the remaining tool rounds.
 
 import (
 	"context"
@@ -31,18 +30,10 @@ import (
 	"github.com/dkr290/agenticgo/internal/llm"
 	"github.com/dkr290/agenticgo/internal/maf"
 	mafgent "github.com/microsoft/agent-framework-go/agent"
-	"github.com/microsoft/agent-framework-go/agent/harness/toolautocall"
 	"github.com/microsoft/agent-framework-go/message"
 	"github.com/microsoft/agent-framework-go/provider/openaiprovider"
 	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
 )
-
-// maxConsecutiveToolErrors mirrors the toolautocall default the legacy engine
-// effectively had (unlimited retries within the iteration cap); 0 here would
-// abort the run on the first failing tool, which is NOT the legacy behavior —
-// tool errors are results the model reads and recovers from.
-var maxConsecutiveToolErrors = 100
 
 // runMAF executes one user turn through the MAF agent loop. Same signature
 // and event contract as the legacy path in Run.
@@ -50,7 +41,7 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 	// Build the per-run tool set: the single source of truth for gating. MAF's
 	// autocall invokes exactly this slice, so a tool absent from the set is
 	// invisible to the model and unreachable at dispatch.
-	mafTools, sink, err := e.runTools(ag)
+	mafTools, sink, err := e.runTools(ag, vision)
 	if err != nil {
 		return "", fmt.Errorf("build tool set: %w", err)
 	}
@@ -64,65 +55,28 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 	// The outgoing user message: text plus image parts when vision is on.
 	userMsg := maf.UserMessage(userMessage, images)
 
-	// Image injection between provider calls: fetch_agent_image fills the
-	// sink; the injector drains it into the next provider call as a user
-	// message with the image parts attached.
-	injector := &mafgent.MessageInjector{}
-	drain := func(s *mafgent.Session) {
-		if !vision {
-			return
-		}
-		if imgs := sink.DrainImages(); len(imgs) > 0 {
-			_ = injector.EnqueueMessages(s, maf.UserMessage(
-				"Describe what you see in the following image(s).", imgs))
-		}
-	}
-
-	maxIter := e.cfg.MaxAgentIterations
-	mafAgent := openaiprovider.NewChatCompletionsAgent(
+	mafAgent := maf.NewChatAgent(
 		openai.NewClient(prov.RequestOptions()...),
-		openaiprovider.AgentConfig{
-			Model:        model,
-			Instructions: e.buildSystemPrompt(ctx, ag),
-			ToolAutoCall: &toolautocall.Config{
-				MaximumIterationsPerRequest:                 &maxIter,
-				MaximumConsecutiveErrorsPerRequest:          &maxConsecutiveToolErrors,
-				IncludeDetailedErrors:                       true, // model reads tool errors, like the legacy loop
-				TerminateOnUnknownCalls:                     false,
-				AllowConcurrentInvocations:                  false,
-				DisableApprovalResponseBinding:              true, // no approval flow in agenticgo
-				DisableApprovalNotRequiredFunctionBypassing: true,
-			},
-			Config: mafgent.Config{
-				Name:            ag.Key,
-				HistoryProvider: maf.NewHistoryProvider(e.store, agentKey, session),
-				Tools:           mafTools,
-				MessageInjector: injector,
-			},
+		maf.ChatConfig{
+			Name:          ag.Key,
+			Model:         model,
+			Instructions:  e.buildSystemPrompt(ctx, ag),
+			MaxIterations: e.cfg.MaxAgentIterations,
+			History:       maf.NewHistoryProvider(e.store, agentKey, session),
+			Tools:         mafTools,
+			DrainImages:   sink.DrainImages,
 		},
 	)
 
-	// Per-run MAF session: carries no history (the store owns it) but MAF
-	// requires one for the injector; created fresh per run.
-	mafSession, err := mafAgent.CreateSession(ctx)
-	if err != nil {
-		return "", fmt.Errorf("create maf session: %w", err)
-	}
-	drain(mafSession) // no-op on an empty sink; keeps the drain closure honest
-
-	// Persist the user turn BEFORE the run, as the legacy path does: the
-	// HistoryProvider prepends stored history, and a cancelled run still
-	// leaves the user's message in history.
-	if err := e.store.AppendMessage(ctx, agentKey, session, string(llm.RoleUser), userMessage); err != nil {
-		return "", fmt.Errorf("save user message: %w", err)
-	}
-
-	opts := []mafgent.Option{mafgent.WithSession(mafSession), mafgent.Stream(true)}
+	// MAF creates a fresh session; the custom history provider owns SQLite
+	// persistence and preserves the original multimodal input.
+	opts := []mafgent.Option{mafgent.Stream(true)}
 	if params := chatParams(ag); params != nil {
 		opts = append(opts, params)
 	}
 
 	var finalText strings.Builder
+	names := make(map[string]string)
 	var runErr error
 	for update, err := range mafAgent.Run(ctx, []*message.Message{userMsg}, opts...) {
 		if err != nil {
@@ -132,18 +86,27 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 		if update == nil {
 			continue
 		}
+		// A tool result ends the intermediate assistant message. Stream all
+		// narration to the UI, but return only the final answer to REST callers.
+		if update.Role == message.RoleTool {
+			finalText.Reset()
+		}
 		for _, c := range update.Contents {
 			switch c := c.(type) {
 			case *message.TextContent:
 				finalText.WriteString(c.Text)
 				emit(Event{Kind: "text", Text: c.Text})
+			case *message.ErrorContent:
+				// MAF represents provider refusals as content rather than Go errors.
+				finalText.WriteString(c.Message)
+				emit(Event{Kind: "text", Text: c.Message})
 			case *message.FunctionCallContent:
+				names[c.CallID] = c.Name
 				emit(Event{Kind: "tool_call", ToolName: c.Name, ToolArgs: c.Arguments})
 			case *message.FunctionResultContent:
-				emit(Event{Kind: "tool_result", ToolName: resultToolName(c), ToolResult: mafResultText(c)})
+				emit(Event{Kind: "tool_result", ToolName: names[c.CallID], ToolResult: mafResultText(c)})
 			}
 		}
-		drain(mafSession)
 	}
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
@@ -178,16 +141,6 @@ func chatParams(ag *agents.Agent) mafgent.Option {
 	return openaiprovider.ChatCompletionNewParams(p)
 }
 
-// resultToolName recovers the tool name for a result event; MAF does not
-// carry it on the result content, so it is empty when unknown (the SPA
-// tolerates this — the tool_call event immediately precedes it).
-func resultToolName(c *message.FunctionResultContent) string {
-	if fc, ok := c.RawRepresentation.(*message.FunctionCallContent); ok {
-		return fc.Name
-	}
-	return ""
-}
-
 // mafResultText flattens a function result for the WS event.
 func mafResultText(c *message.FunctionResultContent) string {
 	if c.Error != nil {
@@ -213,9 +166,9 @@ func runOneShotMAF(ctx context.Context, prov *llm.OpenAIProvider, ag *agents.Age
 	if ag.Config.Model != nil && *ag.Config.Model != "" {
 		model = *ag.Config.Model
 	}
-	a := openaiprovider.NewChatCompletionsAgent(
+	a := maf.NewChatAgent(
 		openai.NewClient(prov.RequestOptions()...),
-		openaiprovider.AgentConfig{
+		maf.ChatConfig{
 			Model:        model,
 			Instructions: instructions,
 		},
@@ -224,8 +177,10 @@ func runOneShotMAF(ctx context.Context, prov *llm.OpenAIProvider, ag *agents.Age
 	if err != nil {
 		return "", err
 	}
+	for c := range resp.Contents() {
+		if failure, ok := c.(*message.ErrorContent); ok {
+			return "", fmt.Errorf("model declined extraction: %s", failure.Message)
+		}
+	}
 	return resp.String(), nil
 }
-
-// ensure option import is used even if request options change shape
-var _ = option.WithAPIKey

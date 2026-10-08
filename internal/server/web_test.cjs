@@ -97,3 +97,17 @@ test('Huma details are displayed by API actions', async () => {
   $('pf-save').click(); await flush();
   assert.equal($('toast').textContent,'Save failed: Provider URL is invalid');
 });
+
+test('LLM reset uses the capability-preserving endpoint', async () => {
+  const {$, context, fixtures, requests} = await app();
+  fixtures.set('/api/agents/demo', {key:'demo', name:'Demo', files:[], config:{
+    model:'pinned', enabled_builtin_tools:[], enabled_skills:['review'],
+    enabled_tools:['mcp_test_echo'], enabled_commands:['kubectl']
+  }});
+  context.showPage('agents'); await flush();
+  $('agents-grid').children[0].click(); await flush();
+  $('cf-reset').click(); await flush();
+  const reset = requests.find(r => r.opts?.method === 'PUT');
+  assert.equal(reset.url, '/api/agents/demo/llm-config');
+  assert.deepEqual(JSON.parse(reset.opts.body), {});
+});

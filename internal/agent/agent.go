@@ -367,7 +367,7 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 // Building this per run means every tool is constructed once (not per call).
 // The global allow-list only governs the built-in fs/exec tools; the always-on
 // core tools and per-agent MCP tools sit outside it by design.
-func (e *Engine) runTools(ag *agents.Agent) ([]tool.Tool, *imageSink, error) {
+func (e *Engine) runTools(ag *agents.Agent, vision bool) ([]tool.Tool, *imageSink, error) {
 	out := []tool.Tool{}
 
 	// Core memory/knowledge tools: always on, scoped to the calling agent.
@@ -384,7 +384,7 @@ func (e *Engine) runTools(ag *agents.Agent) ([]tool.Tool, *imageSink, error) {
 	// can inject them into the next LLM turn (the model can actually see them,
 	// not just the data-URL string).
 	sink := newImageSink()
-	out = append(out, tools.NewFetchAgentImage(e.imageFetcher(ag.Key), sink))
+	out = append(out, tools.NewFetchAgentImage(e.imageFetcher(ag.Key, vision), sink))
 
 	// Built-in filesystem tools, jailed to the agent's workspace. The global
 	// AGENTICGO_TOOL_ALLOWLIST is the ceiling; the agent may narrow it further
@@ -569,8 +569,11 @@ func (e *Engine) imageLister(agentKey string) tools.ImageLister {
 
 // imageFetcher adapts agents.ReadImage into a tools.ImageFetcher for an agent.
 // It reads the raw bytes, converts them to a base64 data-URL, and returns it.
-func (e *Engine) imageFetcher(agentKey string) tools.ImageFetcher {
+func (e *Engine) imageFetcher(agentKey string, vision bool) tools.ImageFetcher {
 	return func(ctx context.Context, name string) (string, error) {
+		if !vision {
+			return "", fmt.Errorf("the effective model does not support images")
+		}
 		data, mime, err := e.agents.ReadImage(agentKey, name)
 		if err != nil {
 			return "", err

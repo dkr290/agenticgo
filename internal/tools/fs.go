@@ -58,7 +58,10 @@ func NewReadFile(root string) (tool.FuncTool, error) {
 	}, ws.readFile)
 }
 
-func (w *workspace) readFile(_ context.Context, args readFileArgs) (string, error) {
+func (w *workspace) readFile(ctx context.Context, args readFileArgs) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	full, err := w.resolve(args.Path)
 	if err != nil {
 		return "", err
@@ -103,7 +106,10 @@ func NewWriteFile(root string) (tool.FuncTool, error) {
 	}, ws.writeFile)
 }
 
-func (w *workspace) writeFile(_ context.Context, args writeFileArgs) (string, error) {
+func (w *workspace) writeFile(ctx context.Context, args writeFileArgs) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	full, err := w.resolve(args.Path)
 	if err != nil {
 		return "", err
@@ -142,7 +148,10 @@ func NewListFiles(root string) (tool.FuncTool, error) {
 	}, ws.listFiles)
 }
 
-func (w *workspace) listFiles(_ context.Context, args listFilesArgs) (string, error) {
+func (w *workspace) listFiles(ctx context.Context, args listFilesArgs) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	p := args.Path
 	if p == "" {
 		p = "."
