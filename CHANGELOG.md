@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/dkr290/agenticgo/compare/v0.1.2...v0.2.0) (2026-10-08)
+
+
+### Features
+
+* Maf ([#43](https://github.com/dkr290/agenticgo/issues/43)) ([01d7da7](https://github.com/dkr290/agenticgo/commit/01d7da79cf4e79b5a03f563d3fbbe2ed4f896c6b))
+
 ## [0.1.2](https://github.com/dkr290/agenticgo/compare/v0.1.1...v0.1.2) (2026-10-05)
 
 
