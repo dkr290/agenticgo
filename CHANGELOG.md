@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/dkr290/agenticgo/compare/v0.2.0...v0.2.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* MAF migration regressions ([#45](https://github.com/dkr290/agenticgo/issues/45)) ([62e60df](https://github.com/dkr290/agenticgo/commit/62e60dfc9b23d33108e2a2c015b0d95761a15d26))
+
 ## [0.2.0](https://github.com/dkr290/agenticgo/compare/v0.1.2...v0.2.0) (2026-10-08)
 
 
