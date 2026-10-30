@@ -16,7 +16,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   files `AGENTS.md` (operating instructions), `SOUL.md` (persona), `IDENTITY.md`
   (name/role), `USER.md`, `USER_PREDEFINED.md`, `CAPABILITIES.md`, `HEARTBEAT.md`,
   a `config.json` (per-agent LLM settings: provider/model/temperature/max_tokens/vision,
-  nil = inherit, plus `enabled_skills`, `enabled_tools`, `enabled_commands`,
+  nil = inherit, plus `disable_reasoning` (send `reasoning_effort: "none"` —
+  required for tool use on reasoning deployments such as Azure gpt-6-astra),
+  `enabled_skills`, `enabled_tools`, `enabled_commands`,
   `enabled_builtin_tools` and `observation_inject`), a per-agent `images/`
   dir (reference pictures/screenshots for vision models), and a per-agent
   `workspace/` (tool jail).

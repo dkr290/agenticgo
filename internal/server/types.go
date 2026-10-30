@@ -72,6 +72,7 @@ type agentLLMConfig struct {
 	Temperature       *float64 `json:"temperature,omitempty" minimum:"0" maximum:"2"`
 	MaxTokens         *int     `json:"max_tokens,omitempty" minimum:"1"`
 	Vision            *bool    `json:"vision,omitempty"`
+	DisableReasoning  *bool    `json:"disable_reasoning,omitempty" doc:"Send reasoning_effort=none; required for tool use on reasoning models (e.g. gpt-6-astra)"`
 	ObservationInject *int     `json:"observation_inject,omitempty" minimum:"0"`
 }
 

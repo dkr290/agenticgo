@@ -33,6 +33,7 @@ import (
 	"github.com/microsoft/agent-framework-go/message"
 	"github.com/microsoft/agent-framework-go/provider/openaiprovider"
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // runMAF executes one user turn through the MAF agent loop. Same signature
@@ -128,7 +129,7 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 // chatParams passes per-agent sampling settings through to the Chat
 // Completions request when set.
 func chatParams(ag *agents.Agent) mafgent.Option {
-	if ag.Config.Temperature == nil && ag.Config.MaxTokens == nil {
+	if ag.Config.Temperature == nil && ag.Config.MaxTokens == nil && ag.Config.DisableReasoning == nil {
 		return nil
 	}
 	p := openai.ChatCompletionNewParams{}
@@ -137,6 +138,11 @@ func chatParams(ag *agents.Agent) mafgent.Option {
 	}
 	if ag.Config.MaxTokens != nil {
 		p.MaxTokens = openai.Int(int64(*ag.Config.MaxTokens))
+	}
+	if ag.Config.DisableReasoning != nil && *ag.Config.DisableReasoning {
+		// Reasoning deployments reject tool use on /chat/completions at the
+		// default effort; "none" turns them into plain tool-calling chat models.
+		p.ReasoningEffort = shared.ReasoningEffortNone
 	}
 	return openaiprovider.ChatCompletionNewParams(p)
 }

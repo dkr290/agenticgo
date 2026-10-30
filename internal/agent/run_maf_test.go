@@ -6,11 +6,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/llm"
 )
 
@@ -112,6 +114,74 @@ func TestRunMAFEndToEnd(t *testing.T) {
 	}
 	if len(knowledge) != 1 || !strings.Contains(knowledge[0].Content, "User likes Go") {
 		t.Errorf("knowledge = %+v", knowledge)
+	}
+}
+
+// TestRunMAFDisableReasoning asserts the per-agent disable_reasoning toggle
+// puts reasoning_effort="none" on the wire, and that the field is omitted
+// entirely when the toggle is unset (ordinary chat models must see no
+// reasoning parameters at all).
+func TestRunMAFDisableReasoning(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for _, c := range []string{
+			`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`,
+			`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		} {
+			_, _ = w.Write([]byte("data: " + c + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	e, ar := newTestEngine(t)
+	e.SetProviderLookup(&trackingLookup{p: llm.NewOpenAI(srv.URL+"/v1", "", "test-model")})
+
+	run := func(session string) map[string]any {
+		t.Helper()
+		before := len(bodies)
+		if _, err := e.Run(context.Background(), "demo", session, "hi", "", nil, func(Event) {}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(bodies) != before+1 {
+			t.Fatalf("expected 1 request, got %d", len(bodies)-before)
+		}
+		return bodies[len(bodies)-1]
+	}
+
+	// Unset toggle: no reasoning fields on the wire.
+	if body := run("plain"); body["reasoning_effort"] != nil {
+		t.Errorf("unset toggle sent reasoning_effort: %v", body["reasoning_effort"])
+	}
+
+	// Enabled toggle: reasoning_effort="none".
+	on := true
+	if _, err := ar.UpdateConfig("demo", agents.AgentConfig{DisableReasoning: &on}); err != nil {
+		t.Fatal(err)
+	}
+	if body := run("disabled"); body["reasoning_effort"] != "none" {
+		t.Errorf("enabled toggle: reasoning_effort = %v, want \"none\"", body["reasoning_effort"])
+	}
+
+	// Explicit false: omitted again.
+	off := false
+	if _, err := ar.UpdateConfig("demo", agents.AgentConfig{DisableReasoning: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if body := run("explicit-off"); body["reasoning_effort"] != nil {
+		t.Errorf("explicit false sent reasoning_effort: %v", body["reasoning_effort"])
 	}
 }
 

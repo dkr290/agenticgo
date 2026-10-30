@@ -76,6 +76,7 @@ func (s *Server) registerAgentRoutes(api huma.API) {
 			cfg.Provider, cfg.Model = input.Body.Provider, input.Body.Model
 			cfg.Temperature, cfg.MaxTokens = input.Body.Temperature, input.Body.MaxTokens
 			cfg.Vision, cfg.ObservationInject = input.Body.Vision, input.Body.ObservationInject
+			cfg.DisableReasoning = input.Body.DisableReasoning
 			return nil
 		})
 		if err != nil {
