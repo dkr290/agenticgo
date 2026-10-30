@@ -15,6 +15,21 @@
   multipart/ZIP uploads, and browser rendering. Current regressions exercise Go
   runtime paths and SPA events; use `go test -race ./...` and
   `node --test internal/server/web_test.cjs`.
+- **Optional (really not needed) — reasoning-model support via the OpenAI
+  Responses API (`/v1/responses`).** Context: reasoning deployments (e.g. Azure
+  `gpt-6-astra`, `gpt-6.1-sol`) reject tool use on `/chat/completions` unless
+  reasoning is disabled; the per-agent `disable_reasoning` toggle handles that
+  by sending `reasoning_effort: "none"`, which turns them into plain
+  tool-calling chat models. For agentic troubleshooting loops (call tool →
+  observe → call next tool) the *orchestration* is done by the agent framework,
+  so internal model deliberation mostly adds latency and token cost — which is
+  why full Responses-API support is not needed today. It would only become a
+  feature if we ever want visible reasoning traces or controllable effort
+  (low/medium/high) from reasoning models. That means a second, per-provider
+  opt-in provider path in `internal/maf` wired to MAF's Responses support
+  (`provider/openaiprovider/responses.go`) instead of
+  `NewChatCompletionsAgent` — opt-in because most OpenAI-compatible local
+  servers (Ollama, LM Studio, vLLM) only implement `/chat/completions`.
 
 ## Project-review fixes
 

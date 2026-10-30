@@ -48,6 +48,14 @@ type AgentConfig struct {
 	// when the agent pins a different Model than the provider's default and that
 	// model does/doesn't support images. nil = inherit the provider's Vision flag.
 	Vision *bool `json:"vision,omitempty"`
+	// DisableReasoning, when true, sends reasoning_effort="none" on chat
+	// requests. Reasoning deployments (e.g. Azure gpt-6-astra, gpt-6.1-sol)
+	// reject tool use on /chat/completions unless reasoning is disabled —
+	// the endpoint answers 400 "Function tools with reasoning_effort are not
+	// supported ... or set reasoning_effort to 'none'". Set this for such
+	// models; leave it unset for ordinary chat models so the field is omitted
+	// from the request entirely. nil/false = unchanged behavior.
+	DisableReasoning *bool `json:"disable_reasoning,omitempty"`
 	// EnabledSkills lists keys from the global skills library that are active
 	// for this agent. nil/empty = none: skills are never inherited implicitly,
 	// they must be enabled per agent (UI Skills tab or this field).

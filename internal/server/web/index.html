@@ -304,6 +304,13 @@
           <option value="false">Force off — no images</option>
         </select>
         <div style="color:var(--muted); font-size:11.5px; margin-top:4px">Override the provider's vision flag when this agent pins a different model. Controls whether the Images tab and chat attach are enabled.</div>
+        <label>Reasoning (reasoning models)</label>
+        <select id="cf-disable-reasoning">
+          <option value="">Default — request unchanged</option>
+          <option value="true">Disable reasoning (reasoning_effort=none) — required for tool use on reasoning models</option>
+          <option value="false">Off — explicitly leave reasoning untouched</option>
+        </select>
+        <div style="color:var(--muted); font-size:11.5px; margin-top:4px">Reasoning deployments (e.g. Azure gpt-6-astra, gpt-6.1-sol) reject tool calls on /chat/completions unless reasoning is disabled — enable this when chat fails with 400 "Function tools with reasoning_effort are not supported". Leave on Default for ordinary chat models.</div>
         <div class="toolbar" style="margin-top:16px; margin-bottom:0">
           <button id="cf-save">Save</button>
           <button class="ghost" id="cf-reset">Clear all (use defaults)</button>
@@ -1128,6 +1135,7 @@
     $('cf-maxtok').value = c.max_tokens != null ? c.max_tokens : '';
     $('cf-obsinject').value = c.observation_inject != null ? c.observation_inject : '';
     $('cf-vision').value = c.vision == null ? '' : (c.vision ? 'true' : 'false');
+    $('cf-disable-reasoning').value = c.disable_reasoning == null ? '' : (c.disable_reasoning ? 'true' : 'false');
     $('cf-saved').textContent = '';
   }
   $('cf-save').addEventListener('click', () => {
@@ -1139,12 +1147,14 @@
     const maxtok = $('cf-maxtok').value;
     const obsinject = $('cf-obsinject').value;
     const vision = $('cf-vision').value;
+    const disableReasoning = $('cf-disable-reasoning').value;
     if (prov) body.provider = prov;
     if (model) body.model = model;
     if (temp !== '') body.temperature = parseFloat(temp);
     if (maxtok !== '') body.max_tokens = parseInt(maxtok, 10);
     if (obsinject !== '') body.observation_inject = parseInt(obsinject, 10);
     if (vision !== '') body.vision = (vision === 'true');
+    if (disableReasoning !== '') body.disable_reasoning = (disableReasoning === 'true');
     api('/api/agents/' + encodeURIComponent(detailAgent) + '/llm-config', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     }).then(a => {

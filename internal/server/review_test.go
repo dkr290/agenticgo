@@ -27,7 +27,7 @@ func TestLLMConfigPreservesCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := newTestAPI(t, s.registerAgentRoutes)
-	for _, body := range []string{`{"model":"new-model","temperature":0}`, `{}`} {
+	for _, body := range []string{`{"model":"new-model","temperature":0,"disable_reasoning":true}`, `{}`} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/api/agents/demo/llm-config", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -42,8 +42,12 @@ func TestLLMConfigPreservesCapabilities(t *testing.T) {
 		if len(ag.Config.EnabledTools) != 1 || len(ag.Config.EnabledSkills) != 1 || len(ag.Config.EnabledCommands) != 1 || ag.Config.EnabledBuiltinTools == nil || len(*ag.Config.EnabledBuiltinTools) != 0 {
 			t.Fatalf("lost capabilities: %+v", ag.Config)
 		}
-		if body == `{}` && (ag.Config.Model != nil || ag.Config.Temperature != nil) {
-			t.Fatal("settings did not reset to inherit")
+		if body == `{}` {
+			if ag.Config.Model != nil || ag.Config.Temperature != nil || ag.Config.DisableReasoning != nil {
+				t.Fatal("settings did not reset to inherit")
+			}
+		} else if ag.Config.DisableReasoning == nil || !*ag.Config.DisableReasoning {
+			t.Fatalf("disable_reasoning did not round-trip: %+v", ag.Config)
 		}
 	}
 }
