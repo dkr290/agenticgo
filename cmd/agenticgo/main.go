@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/dkr290/agenticgo/internal/agent"
 	"github.com/dkr290/agenticgo/internal/agents"
@@ -89,6 +90,7 @@ func main() {
 		log.Fatalf("mcp servers: %v", err)
 	}
 	mcpMgr.SetLogger(lg)
+	mcpMgr.SetReconnectPolicy(cfg.MCPReconnectAttempts, time.Duration(cfg.MCPReconnectIntervalS)*time.Second)
 	defer mcpMgr.CloseAll()
 
 	// The tool set is composed per run by the engine (core memory/docs tools,
@@ -124,6 +126,11 @@ func main() {
 	// lazy and only fires when an agent runs). Starts only when retention is
 	// configured (some TTL/Keep knob non-zero); stops with the shared ctx.
 	engine.StartRetentionSweeper(ctx)
+
+	// Auto-reconnect MCP servers marked should-stay-connected (enabled), so a
+	// pod restart doesn't leave cron-triggered agents without their MCP tools.
+	// Bounded retry per server; stops with the shared ctx.
+	mcpMgr.Start(ctx)
 
 	log.Printf("agenticgo starting")
 	if d := providerStore.Default(); d != nil {

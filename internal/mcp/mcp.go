@@ -38,6 +38,12 @@ type ServerConfig struct {
 	Args      []string  `json:"args,omitempty"`
 	URL       string    `json:"url,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitempty"`
+	// Enabled records the operator's intent that this server "should be
+	// connected". Set by Connect, cleared ONLY by Disconnect (GUI or API).
+	// After a pod restart the manager auto-reconnects every Enabled server
+	// (bounded retry); an Enabled server whose connection drops is likewise
+	// redialed. Disabled servers are never dialed automatically.
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // ToolInfo is one discovered tool on a connected server.
@@ -74,7 +80,9 @@ type connection struct {
 // Manager is a thread-safe registry of MCP servers: CRUD persisted to JSON,
 // plus on-demand connections and a discovered-tool catalog. Connections are
 // established manually (the Connect API / UI button) or lazily re-established
-// when a tool call arrives for a configured-but-disconnected server.
+// when a tool call arrives for a configured-but-disconnected server. Servers
+// marked Enabled are additionally auto-reconnected by a bounded-retry
+// background loop (Start) so they survive pod restarts and dropped sessions.
 type Manager struct {
 	path string
 	log  logger.Logger
@@ -84,9 +92,31 @@ type Manager struct {
 	// stdio/HTTP transports.
 	dial func(ctx context.Context, srv *ServerConfig) (sdk.Transport, error)
 
+	// reconnectAttempts bounds how many times the auto-reconnect loop dials an
+	// Enabled server before giving up (0 = use the default). reconnectInterval
+	// is the base delay between attempts (exponential backoff, capped).
+	reconnectAttempts int
+	reconnectInterval time.Duration
+
 	mu      sync.RWMutex
 	servers map[string]*ServerConfig
 	conns   map[string]*connection // keyed by server ID
+
+	// retry tracks the auto-reconnect loop's per-server failure count and the
+	// cancel func for an in-flight dial, so Disconnect/Delete stop it.
+	retry map[string]*retryState
+
+	// bgCtx is the long-lived context passed to Start (cancelled on shutdown).
+	// Update uses it to re-arm the reconnect loop for a still-Enabled server
+	// whose config changed. Nil until Start runs.
+	bgCtx context.Context
+}
+
+// retryState is the auto-reconnect bookkeeping for one server.
+type retryState struct {
+	failures int
+	cancel   context.CancelFunc
+	ctx      context.Context // the loop's lctx; nil-Err means still live
 }
 
 // Open loads (or initializes) the MCP server registry at path.
@@ -99,6 +129,7 @@ func Open(path string) (*Manager, error) {
 		log:     logger.Nop(),
 		servers: map[string]*ServerConfig{},
 		conns:   map[string]*connection{},
+		retry:   map[string]*retryState{},
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -135,6 +166,36 @@ func (m *Manager) SetDial(dial func(ctx context.Context, srv *ServerConfig) (sdk
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dial = dial
+}
+
+// Default reconnect policy for Enabled servers, overridable via SetReconnectPolicy.
+const (
+	defaultReconnectAttempts = 10
+	defaultReconnectInterval = 5 * time.Second
+	maxReconnectBackoff      = 60 * time.Second
+)
+
+// SetReconnectPolicy tunes the auto-reconnect loop for Enabled servers:
+// attempts bounds the dials before giving up (<=0 uses the default), interval
+// is the base backoff delay (<=0 uses the default).
+func (m *Manager) SetReconnectPolicy(attempts int, interval time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconnectAttempts = attempts
+	m.reconnectInterval = interval
+}
+
+// reconnectConfig resolves the effective retry policy.
+func (m *Manager) reconnectConfig() (attempts int, interval time.Duration) {
+	attempts = m.reconnectAttempts
+	if attempts <= 0 {
+		attempts = defaultReconnectAttempts
+	}
+	interval = m.reconnectInterval
+	if interval <= 0 {
+		interval = defaultReconnectInterval
+	}
+	return attempts, interval
 }
 
 func (m *Manager) saveLocked() error {
@@ -213,7 +274,8 @@ func (m *Manager) Add(srv ServerConfig) (*ServerConfig, error) {
 }
 
 // Update replaces an existing server definition and drops its old connection
-// and discovery cache. New settings apply on the next connect.
+// and discovery cache. The stay-connected intent (Enabled) is preserved; a
+// still-Enabled server is reconnected automatically with the new settings.
 func (m *Manager) Update(id string, srv ServerConfig) (*ServerConfig, error) {
 	if err := validateServer(&srv); err != nil {
 		return nil, err
@@ -231,18 +293,30 @@ func (m *Manager) Update(id string, srv ServerConfig) (*ServerConfig, error) {
 	}
 	srv.ID = id
 	srv.CreatedAt = cur.CreatedAt
+	srv.Enabled = cur.Enabled // config edits never change the stay-connected intent
 	m.servers[id] = &srv
 	if err := m.saveLocked(); err != nil {
 		m.servers[id] = cur
 		return nil, err
 	}
+	m.stopRetryLocked(id)
 	if conn, ok := m.conns[id]; ok {
 		if conn.session != nil {
 			_ = conn.session.Close()
 		}
 		delete(m.conns, id)
 	}
+	// A still-enabled server whose config changed should reconnect with the new
+	// settings without waiting for a pod restart or a manual Connect.
+	bg := m.bgCtx
+	stillEnabled := srv.Enabled
 	out := srv
+	if stillEnabled && bg != nil && bg.Err() == nil {
+		// Unlock before arming the loop (retryLoop takes m.mu itself).
+		m.mu.Unlock()
+		m.retryLoop(bg, id)
+		m.mu.Lock()
+	}
 	return &out, nil
 }
 
@@ -259,6 +333,7 @@ func (m *Manager) Delete(id string) error {
 		m.servers[id] = srv
 		return err
 	}
+	m.stopRetryLocked(id)
 	conn, connected := m.conns[id]
 	if connected {
 		if conn.session != nil {
@@ -352,7 +427,9 @@ func (m *Manager) connectLocked(ctx context.Context, id string) (*connection, er
 }
 
 // Connect establishes (or re-establishes) the connection to a server and
-// refreshes its discovered tool list.
+// refreshes its discovered tool list. On success it marks the server Enabled
+// (should-stay-connected) and persists that intent so it is auto-reconnected
+// after a pod restart; on failure the prior Enabled value is left unchanged.
 func (m *Manager) Connect(ctx context.Context, id string) (*ServerStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -363,24 +440,159 @@ func (m *Manager) Connect(ctx context.Context, id string) (*ServerStatus, error)
 		st := m.statusLocked(id)
 		return &st, err
 	}
+	// Success: clear any retry bookkeeping and record the stay-connected intent.
+	delete(m.retry, id)
+	if !m.servers[id].Enabled {
+		m.servers[id].Enabled = true
+		if err := m.saveLocked(); err != nil {
+			return nil, fmt.Errorf("persist enabled: %w", err)
+		}
+	}
 	st := m.statusLocked(id)
 	return &st, nil
 }
 
-// Disconnect closes the connection to a server (keeping its definition).
+// Disconnect closes the connection to a server (keeping its definition),
+// clears the stay-connected intent (so it is NOT auto-reconnected), and stops
+// any in-flight retry loop. This is the only place Enabled is cleared.
 func (m *Manager) Disconnect(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.servers[id]; !ok {
 		return fmt.Errorf("mcp server %q not found", id)
 	}
+	m.stopRetryLocked(id)
 	if conn, ok := m.conns[id]; ok {
 		if conn.session != nil {
 			_ = conn.session.Close()
 		}
 		delete(m.conns, id)
 	}
+	if m.servers[id].Enabled {
+		m.servers[id].Enabled = false
+		if err := m.saveLocked(); err != nil {
+			return fmt.Errorf("persist disabled: %w", err)
+		}
+	}
 	return nil
+}
+
+// stopRetryLocked cancels an in-flight retry dial and clears bookkeeping.
+// Caller holds m.mu.
+func (m *Manager) stopRetryLocked(id string) {
+	if rs, ok := m.retry[id]; ok {
+		if rs.cancel != nil {
+			rs.cancel()
+		}
+		delete(m.retry, id)
+	}
+}
+
+// Start launches a bounded-retry auto-reconnect for every server marked
+// Enabled (should-stay-connected). It runs in the background so a slow or
+// unreachable server never blocks boot. Each Enabled server is dialed until it
+// connects, Disconnect is pressed, the retry budget is exhausted, or ctx is
+// cancelled (shutdown). Disabled servers are never touched.
+func (m *Manager) Start(ctx context.Context) {
+	m.mu.Lock()
+	m.bgCtx = ctx
+	var enabled []string
+	for id, srv := range m.servers {
+		if srv.Enabled {
+			enabled = append(enabled, id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range enabled {
+		m.retryLoop(ctx, id)
+	}
+}
+
+// retryLoop dials one Enabled server with exponential backoff until it
+// connects, is disconnected/deleted, the attempt budget runs out, or ctx is
+// cancelled. Bookkeeping lives in m.retry so Disconnect/Delete can stop it.
+func (m *Manager) retryLoop(ctx context.Context, id string) {
+	maxAttempts, base := m.reconnectConfig()
+
+	m.mu.Lock()
+	// A live (not-yet-cancelled) loop is already running for this server; don't
+	// double-dial. A loop whose context was already cancelled (e.g. by
+	// stopRetryLocked in Update/Disconnect) is tearing down and must not block
+	// a fresh arm — replace its bookkeeping.
+	if rs, ok := m.retry[id]; ok && rs.cancel != nil && rs.ctx.Err() == nil {
+		m.mu.Unlock()
+		return
+	}
+	lctx, cancel := context.WithCancel(ctx)
+	self := &retryState{cancel: cancel, ctx: lctx}
+	m.retry[id] = self
+	m.mu.Unlock()
+
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			// Remove bookkeeping only if it still belongs to THIS loop — a new
+			// loop may have been armed (e.g. by Update) after this one stopped.
+			if rs, ok := m.retry[id]; ok && rs == self {
+				delete(m.retry, id)
+			}
+			m.mu.Unlock()
+		}()
+		backoff := base
+		for failures := 0; ; {
+			// Stop if the server went away or is no longer meant to be connected.
+			m.mu.RLock()
+			srv, ok := m.servers[id]
+			enabled := ok && srv.Enabled
+			m.mu.RUnlock()
+			if !enabled {
+				return
+			}
+
+			m.mu.Lock()
+			// If a newer loop has taken over (Update/Disconnect re-armed), or our
+			// context is already cancelled, exit WITHOUT touching m.conns — a stale
+			// connectLocked would close the newer loop's healthy session and then
+			// overwrite its state with a cancelled-context error.
+			if m.retry[id] != self || lctx.Err() != nil {
+				m.mu.Unlock()
+				return
+			}
+			_, err := m.connectLocked(lctx, id)
+			name := ""
+			if s, ok := m.servers[id]; ok {
+				name = s.Name
+			}
+			if err == nil {
+				m.mu.Unlock()
+				m.log.Info("mcp server auto-reconnected", "server", name)
+				return
+			}
+			failures++
+			// Record failures on OUR entry only if it's still the current one.
+			if rs := m.retry[id]; rs == self {
+				rs.failures = failures
+			}
+			m.mu.Unlock()
+
+			if failures >= maxAttempts {
+				m.log.Error("mcp auto-reconnect gave up", "server", name, "attempts", failures, "error", err)
+				return
+			}
+			m.log.Debug("mcp auto-reconnect failed, retrying", "server", name, "attempt", failures, "of", maxAttempts, "in", backoff, "error", err)
+
+			select {
+			case <-lctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			// Exponential backoff, capped.
+			backoff *= 2
+			if backoff > maxReconnectBackoff {
+				backoff = maxReconnectBackoff
+			}
+		}
+	}()
 }
 
 // Tools returns the discovered tool catalog across all connected servers,
@@ -514,10 +726,13 @@ func (m *Manager) CallTool(ctx context.Context, discoveredName string, args json
 	return out, nil
 }
 
-// CloseAll closes every live connection (server shutdown).
+// CloseAll closes every live connection and stops every retry loop (shutdown).
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for id := range m.retry {
+		m.stopRetryLocked(id)
+	}
 	for id, conn := range m.conns {
 		if conn.session != nil {
 			_ = conn.session.Close()
