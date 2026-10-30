@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/dkr290/agenticgo/compare/v0.2.1...v0.3.0) (2026-10-30)
+
+
+### Features
+
+* **agents:** per-agent disable_reasoning toggle for reasoning models ([#50](https://github.com/dkr290/agenticgo/issues/50)) ([cefac62](https://github.com/dkr290/agenticgo/commit/cefac622af0e6cc0af0b89f0c71ceb47fd4ee338))
+* **mcp:** auto-reconnect enabled MCP servers after pod restart ([#52](https://github.com/dkr290/agenticgo/issues/52)) ([4e4c834](https://github.com/dkr290/agenticgo/commit/4e4c8344edfa20db0a08ea1e83b87e55682d6c0f))
+
 ## [0.2.1](https://github.com/dkr290/agenticgo/compare/v0.2.0...v0.2.1) (2026-10-08)
 
 
