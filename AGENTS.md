@@ -82,11 +82,15 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   before the next completion, retaining them on failure/cancellation; only the
   successful response tail is saved by `HistoryProvider.Invoked`. Incoming
   multimodal messages are preserved and their text is saved once by `Invoking`.
-  A narrow v0.1.0 compatibility layer assembles streamed tool calls from the
+  A narrow v0.2.1 compatibility layer assembles streamed tool calls from the
   official OpenAI SDK accumulator (including interleaved and terminal-chunk
   calls); MAF still owns request translation and the tool loop. Fetched images
-  remain in context throughout the run. Tool wrappers check cancellation before
-  every dispatch. All tools are MAF `tool.FuncTool`s: built-ins and core
+  remain in context throughout the run. MAF checks cancellation before dispatch;
+  function-invocation middleware captures tool outcomes so a cancelled batch
+  still emits completed results and cancellation results for unexecuted calls.
+  Tool-round updates remain incremental even with non-streaming model requests,
+  allowing SQLite checkpoints before later failures. All tools are MAF
+  `tool.FuncTool`s: built-ins and core
   memory/docs tools are `functool` typed funcs (schema derived from the args
   struct), MCP tools wrap `Manager.CallTool` (namespaced `mcp_<server>_<tool>`,
   lazy reconnect, soft-fail). Named provider configs are managed
@@ -246,9 +250,10 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   `SetProviderLookup` enables per-request provider overrides;
   `SetMCPManager` enables per-agent MCP tools.
 - `internal/maf` — framework integration and compatibility middleware:
-  `NewChatAgent` composes MAF's OpenAI provider and toolautocall, repairs v0.1.0
-  streaming tool-call assembly, retains run-scoped images, and guards dispatch
-  on cancellation. The SQLite `HistoryProvider` and checkpoint middleware own
+  `NewChatAgent` composes MAF's OpenAI provider and toolautocall, repairs v0.2.1
+  streaming tool-call assembly, retains run-scoped images, and recovers cancelled
+  tool-batch results using MAF's function-invocation middleware. MAF owns dispatch
+  cancellation. The SQLite `HistoryProvider` and checkpoint middleware own
   persistence and history repair. Also contains `llm.Message` ↔ `message.Message`
   translation, the MCP FuncTool wrapper, and the user-message builder.
 - `internal/server` — all REST routes are **Huma operations** registered in
