@@ -60,9 +60,18 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - **Agent loop**: LLM may call tools, observe results, iterate (capped).
 - **MCP tools**: external MCP servers (stdio or HTTP, e.g.
   kubernetes-mcp-server) are registered in `data/mcp_servers.json` and connected
-  **manually** (Connect button / `POST /api/mcp-servers/{id}/connect`) — nothing
-  spawns at startup. On connect, `internal/mcp` discovers the server's tools and
-  caches them namespaced as `mcp_<server>_<tool>`. Agents then enable exactly the
+  **manually** (Connect button / `POST /api/mcp-servers/{id}/connect`) — but the
+  Connect action records a persisted stay-connected intent (`ServerConfig.enabled`,
+  cleared only by Disconnect / `POST /api/mcp-servers/{id}/disconnect`). After a
+  pod restart `Manager.Start` auto-reconnects every `enabled` server with bounded
+  exponential-backoff retry (`AGENTICGO_MCP_RECONNECT_ATTEMPTS` default 10,
+  `AGENTICGO_MCP_RECONNECT_INTERVAL_SECONDS` default 5 base, capped at 60s) so
+  cron-triggered agents aren't left without their MCP tools; a server that
+  exhausts its budget keeps `enabled` and surfaces the error in its status, but
+  the loop stops until the next Connect/restart. On connect, `internal/mcp`
+  discovers the server's tools and caches them namespaced as
+  `mcp_<server>_<tool>` (in-memory only — there is deliberately no on-disk tool
+  cache, so discovery re-runs on each connect). Agents then enable exactly the
   tools they may use via `config.json` `enabled_tools` (Agents → MCP Tools tab,
   or `PUT/DELETE /api/agents/{k}/custom-tools/{name}`); only enabled tools enter
   the per-run registry, so anything else is invisible to the model and rejected
@@ -213,6 +222,10 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   terminal events include `cancelled`. Disconnect/shutdown cancels active runs.
 - MCP subprocess lifetime belongs to the SDK session, not the Connect HTTP context.
   Failed/missing sessions are valid manager states; never dereference them blindly.
+- The MCP stay-connected intent (`ServerConfig.enabled`) is set only by Connect and
+  cleared only by Disconnect; `Update`/`Delete` never silently change it. The
+  auto-reconnect loop is bounded (`AGENTICGO_MCP_RECONNECT_ATTEMPTS`) and must stop
+  on Disconnect/Delete/shutdown. There is no on-disk tool cache.
 - Each retention limit is independent: observations default to 14 days / 200 rows,
   knowledge to 0 / 0. A zero TTL disables age pruning even with a positive count cap.
 - Cron skips overlapping executions of the same job and cancels/waits on shutdown.

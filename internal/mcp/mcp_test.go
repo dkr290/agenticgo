@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -194,4 +196,283 @@ func TestEndToEnd(t *testing.T) {
 	if got := m.Tools(); len(got) != 0 {
 		t.Fatalf("Tools after CloseAll = %+v", got)
 	}
+}
+
+// dialFuncDialer builds a SetDial override whose behavior the test controls:
+// fail=true makes every dial error; otherwise it connects to the in-memory srv.
+func controllableDial(t *testing.T, srv *sdk.Server, fail *bool) func(context.Context, *ServerConfig) (sdk.Transport, error) {
+	t.Helper()
+	return func(ctx context.Context, _ *ServerConfig) (sdk.Transport, error) {
+		if *fail {
+			return nil, errDial
+		}
+		clientT, serverT := sdk.NewInMemoryTransports()
+		if _, err := srv.Connect(ctx, serverT, nil); err != nil {
+			return nil, err
+		}
+		return clientT, nil
+	}
+}
+
+var errDial = errors.New("dial refused")
+
+func newEchoServer(t *testing.T) *sdk.Server {
+	t.Helper()
+	s := sdk.NewServer(&sdk.Implementation{Name: "t", Version: "0.0.1"}, nil)
+	type in struct {
+		Text string `json:"text"`
+	}
+	sdk.AddTool[in, any](s, &sdk.Tool{Name: "echo", Description: "echo"},
+		func(_ context.Context, _ *sdk.CallToolRequest, in in) (*sdk.CallToolResult, any, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: in.Text}}}, nil, nil
+		})
+	return s
+}
+
+// Connect must persist Enabled=true; Disconnect must persist Enabled=false.
+func TestConnectDisconnectPersistEnabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	fail := false
+	m, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetDial(controllableDial(t, newEchoServer(t), &fail))
+
+	srv, err := m.Add(ServerConfig{Name: "test", Transport: "stdio", Command: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.Enabled {
+		t.Fatal("new server should not be Enabled")
+	}
+
+	if _, err := m.Connect(context.Background(), srv.ID); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	// Reopen and confirm Enabled survived.
+	m2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.ListServers(); len(got) != 1 || !got[0].Enabled {
+		t.Fatalf("after connect, reopened Enabled = %+v", got)
+	}
+
+	if err := m.Disconnect(srv.ID); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	m3, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m3.ListServers(); len(got) != 1 || got[0].Enabled {
+		t.Fatalf("after disconnect, reopened Enabled = %+v", got)
+	}
+}
+
+// A failed Connect must leave the prior Enabled value unchanged.
+func TestFailedConnectLeavesEnabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	fail := false
+	m, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetDial(controllableDial(t, newEchoServer(t), &fail))
+	srv, err := m.Add(ServerConfig{Name: "test", Transport: "stdio", Command: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Never-connected server: a failed Connect must NOT set Enabled.
+	fail = true
+	if _, err := m.Connect(context.Background(), srv.ID); err == nil {
+		t.Fatal("expected connect failure")
+	}
+	if m.servers[srv.ID].Enabled {
+		t.Fatal("failed connect should not set Enabled")
+	}
+
+	// Connected-then-failed re-Connect must keep Enabled=true.
+	fail = false
+	if _, err := m.Connect(context.Background(), srv.ID); err != nil {
+		t.Fatal(err)
+	}
+	fail = true
+	if _, err := m.Connect(context.Background(), srv.ID); err == nil {
+		t.Fatal("expected reconnect failure")
+	}
+	if !m.servers[srv.ID].Enabled {
+		t.Fatal("failed reconnect should keep prior Enabled=true")
+	}
+}
+
+// Start must auto-reconnect only Enabled servers, and give up after the
+// configured number of attempts when the server keeps refusing.
+func TestStartAutoReconnectsEnabledOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	fail := false
+	m, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetDial(controllableDial(t, newEchoServer(t), &fail))
+	m.SetReconnectPolicy(3, time.Millisecond)
+
+	enabledSrv, err := m.Add(ServerConfig{Name: "on", Transport: "stdio", Command: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Connect(context.Background(), enabledSrv.ID); err != nil {
+		t.Fatal(err)
+	}
+	offSrv, err := m.Add(ServerConfig{Name: "off", Transport: "stdio", Command: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.CloseAll() // drop live sessions; Enabled flags persist
+
+	// Reopen (simulates pod restart): only "on" is Enabled.
+	m2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.SetDial(controllableDial(t, newEchoServer(t), &fail))
+	m2.SetReconnectPolicy(3, time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m2.Start(ctx)
+
+	// The Enabled server reconnects quickly.
+	waitFor(t, func() bool {
+		for _, st := range m2.ListServers() {
+			if st.ID == enabledSrv.ID {
+				return st.Connected
+			}
+		}
+		return false
+	})
+	// The disabled server is never dialed.
+	for _, st := range m2.ListServers() {
+		if st.ID == offSrv.ID && st.Connected {
+			t.Fatal("disabled server must not be auto-connected")
+		}
+	}
+}
+
+// Start must give up after the configured attempts on a persistently-dead
+// server, leaving the error in status and Enabled intact.
+func TestStartGivesUpAfterAttempts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	fail := false
+	m, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetDial(controllableDial(t, newEchoServer(t), &fail))
+	srv, err := m.Add(ServerConfig{Name: "dead", Transport: "stdio", Command: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Connect(context.Background(), srv.ID); err != nil {
+		t.Fatal(err)
+	}
+	m.CloseAll()
+
+	m2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.SetDial(controllableDial(t, newEchoServer(t), &fail))
+	m2.SetReconnectPolicy(3, time.Millisecond)
+	fail = true // server now refuses every dial
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m2.Start(ctx)
+
+	// Wait until the retry loop exhausts its budget and clears itself.
+	waitFor(t, func() bool {
+		m2.mu.RLock()
+		defer m2.mu.RUnlock()
+		_, running := m2.retry[srv.ID]
+		return !running
+	})
+
+	for _, st := range m2.ListServers() {
+		if st.ID == srv.ID {
+			if st.Connected {
+				t.Fatal("dead server must not be connected")
+			}
+			if st.Error == "" {
+				t.Fatal("gave-up server should retain its error")
+			}
+			if !st.Enabled {
+				t.Fatal("giving up must not clear the Enabled intent")
+			}
+		}
+	}
+}
+
+// A still-Enabled server whose config is Updated should reconnect automatically
+// with the new settings (no pod restart / manual Connect needed).
+func TestUpdateRearmsEnabledReconnect(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	fail := false
+	m, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetDial(controllableDial(t, newEchoServer(t), &fail))
+	m.SetReconnectPolicy(3, time.Millisecond)
+
+	srv, err := m.Add(ServerConfig{Name: "test", Transport: "stdio", Command: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Connect(context.Background(), srv.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx) // establishes bgCtx
+
+	// Edit the config; Enabled must be preserved and a reconnect re-armed.
+	if _, err := m.Update(srv.ID, ServerConfig{Name: "test", Transport: "http", URL: "http://x/mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.RLock()
+	preserved := m.servers[srv.ID].Enabled
+	m.mu.RUnlock()
+	if !preserved {
+		t.Fatal("Update must preserve Enabled")
+	}
+
+	// The re-armed loop reconnects the edited server.
+	waitFor(t, func() bool {
+		for _, st := range m.ListServers() {
+			if st.ID == srv.ID {
+				return st.Connected && st.URL == "http://x/mcp"
+			}
+		}
+		return false
+	})
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	// Generous deadline: under `go test ./...` (no -race, parallel packages,
+	// CPU contention) goroutine scheduling can delay the reconnect loop well
+	// past the sub-millisecond happy path.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met within deadline")
 }

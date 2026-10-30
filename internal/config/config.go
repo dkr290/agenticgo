@@ -95,6 +95,14 @@ type Config struct {
 	// Debug enables verbose debug logging to stderr (AGENTICGO_DEBUG=true).
 	Debug bool
 
+	// MCP auto-reconnect policy for servers marked "should stay connected"
+	// (the persisted enabled flag set by the Connect button / API). After a pod
+	// restart the manager redials each such server with exponential backoff,
+	// giving up after MCPReconnectAttempts dials. This keeps MCP tools alive
+	// for cron-triggered agents without any tool-schema caching.
+	MCPReconnectAttempts  int // AGENTICGO_MCP_RECONNECT_ATTEMPTS (default 10)
+	MCPReconnectIntervalS int // AGENTICGO_MCP_RECONNECT_INTERVAL_SECONDS (default 5, base backoff)
+
 	// SystemPrompt is the base system prompt; knowledge is appended to it.
 	SystemPrompt string
 }
@@ -144,6 +152,10 @@ func Load() (*Config, error) {
 	// Engine.StartRetentionSweeper.
 	cfg.RetentionSweepMinutes = getEnvInt("AGENTICGO_RETENTION_SWEEP_MINUTES", 60)
 	cfg.Debug = getEnvBool("AGENTICGO_DEBUG", false)
+
+	// MCP auto-reconnect for should-stay-connected servers (see Manager.Start).
+	cfg.MCPReconnectAttempts = getEnvInt("AGENTICGO_MCP_RECONNECT_ATTEMPTS", 10)
+	cfg.MCPReconnectIntervalS = getEnvInt("AGENTICGO_MCP_RECONNECT_INTERVAL_SECONDS", 5)
 
 	// No default: empty means "generate/persist a key under DataDir".
 	cfg.SecretKey = getEnv("AGENTICGO_SECRET_KEY", "")
