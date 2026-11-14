@@ -61,7 +61,7 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 		maf.ChatConfig{
 			Name:          ag.Key,
 			Model:         model,
-			Instructions:  e.buildSystemPrompt(ctx, ag),
+			Instructions:  e.BuildSystemPrompt(ctx, ag),
 			MaxIterations: e.cfg.MaxAgentIterations,
 			History:       maf.NewHistoryProvider(e.store, agentKey, session),
 			Tools:         mafTools,

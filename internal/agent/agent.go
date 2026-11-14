@@ -117,9 +117,9 @@ func (e *Engine) SetProviderLookup(pl ProviderLookup) { e.providers = pl }
 // have enabled (config.json enabled_tools, the MCP Tools tab).
 func (e *Engine) SetMCPManager(m *mcp.Manager) { e.mcp = m }
 
-// buildSystemPrompt composes: base prompt + agent context files + skills +
-// accumulated per-agent knowledge.
-func (e *Engine) buildSystemPrompt(ctx context.Context, ag *agents.Agent) string {
+// BuildSystemPrompt composes: base prompt + agent context files + skills +
+// accumulated per-agent knowledge. Exported for the system-prompt preview API.
+func (e *Engine) BuildSystemPrompt(ctx context.Context, ag *agents.Agent) string {
 	var b strings.Builder
 
 	if p := strings.TrimSpace(e.basePrompt); p != "" {
