@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/dkr290/agenticgo/compare/v0.3.0...v0.4.0) (2026-11-18)
+
+
+### Features
+
+* **agents:** add System Prompt preview tab for agents ([#53](https://github.com/dkr290/agenticgo/issues/53)) ([389b61a](https://github.com/dkr290/agenticgo/commit/389b61a09a44b37da7b305300533ea9cbc45b6a1))
+
+
+### Bug Fixes
+
+* use agent dropdown instead of text input in cron job modal ([#56](https://github.com/dkr290/agenticgo/issues/56)) ([a329cb0](https://github.com/dkr290/agenticgo/commit/a329cb030ad396efb2f9b4b9662a13834e7c93fb))
+
 ## [0.3.0](https://github.com/dkr290/agenticgo/compare/v0.2.1...v0.3.0) (2026-10-30)
 
 
