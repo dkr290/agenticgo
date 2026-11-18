@@ -142,7 +142,7 @@ func TestZeroKnowledgeInjectionKeepsSearchableMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(e.buildSystemPrompt(ctx, ag), "unique durable memory") {
+	if strings.Contains(e.BuildSystemPrompt(ctx, ag), "unique durable memory") {
 		t.Fatal("zero injection exposed memory in system prompt")
 	}
 	hits, err := e.store.SearchKnowledge(ctx, "demo", "unique", 10)

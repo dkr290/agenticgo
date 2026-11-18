@@ -269,3 +269,11 @@ type resetBuiltinToolsOutput struct {
 		BuiltinTools string `json:"builtin_tools" example:"inherit" doc:"Reset result; always 'inherit'"`
 	}
 }
+
+// --- System prompt preview ---
+
+type promptOutput struct {
+	Body struct {
+		Prompt string `json:"prompt" doc:"The full system prompt for this agent"`
+	}
+}

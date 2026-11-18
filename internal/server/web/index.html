@@ -251,6 +251,7 @@
       <button class="tab" data-atab="knowledge">Learnings</button>
       <button class="tab" data-atab="images">Images</button>
       <button class="tab" data-atab="config">Config</button>
+      <button class="tab" data-atab="system-prompt">System Prompt</button>
     </div>
     <div id="atab-files">
       <div id="files-wrap">
@@ -318,6 +319,19 @@
         </div>
       </div>
     </div>
+
+    <div id="atab-system-prompt" style="display:none" class="page-body">
+      <div class="card">
+        <h3 style="margin-top:0">Full System Prompt</h3>
+        <p style="color:var(--muted); font-size:12.5px; margin-bottom:14px">The complete prompt sent to the LLM for this agent — base prompt + context files + skills + knowledge docs list + reference images list + observations + extra commands + accumulated knowledge.</p>
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px">
+          <button class="ghost" id="sp-refresh" style="padding:4px 12px; font-size:12px">Refresh</button>
+          <span id="sp-status" style="color:var(--muted); font-size:12px"></span>
+        </div>
+        <pre id="sp-content" style="white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--border); padding:14px; margin:0; max-height:70vh; overflow:auto; font-size:12.5px; line-height:1.6; color:var(--text)"></pre>
+      </div>
+    </div>
+
   </div>
 
    <!-- Skills -->
@@ -842,6 +856,7 @@
     $('atab-knowledge').style.display = tab === 'knowledge' ? '' : 'none';
     $('atab-images').style.display = tab === 'images' ? '' : 'none';
     $('atab-config').style.display = tab === 'config' ? '' : 'none';
+    $('atab-system-prompt').style.display = tab === 'system-prompt' ? '' : 'none';
     if (tab === 'skills') renderAgentSkills();
     if (tab === 'builtin-tools') renderAgentBuiltinTools();
     if (tab === 'custom-tools') renderAgentCustomTools();
@@ -849,6 +864,7 @@
     if (tab === 'knowledge') renderAgentKnowledge();
     if (tab === 'images') renderAgentImages();
     if (tab === 'config') renderAgentConfig();
+    if (tab === 'system-prompt') renderSystemPrompt();
   }
 
   // Render the Images tab, gating it on the agent's effective vision support.
@@ -1168,6 +1184,23 @@
     }).then(a => { agentDetail = a; renderAgentConfig(); })
       .catch(e => toast('Reset failed: ' + e.message));
   });
+
+  // ---------- system prompt preview ----------
+  function renderSystemPrompt(){
+    if (!detailAgent) return;
+    $('sp-content').textContent = '';
+    $('sp-status').textContent = 'Loading…';
+    api('/api/agents/' + encodeURIComponent(detailAgent) + '/prompt')
+      .then(d => {
+        $('sp-content').textContent = d.prompt || '(empty prompt)';
+        $('sp-status').textContent = '';
+      })
+      .catch(e => {
+        $('sp-content').textContent = 'Failed to load: ' + e.message;
+        $('sp-status').textContent = '';
+      });
+  }
+  $('sp-refresh').addEventListener('click', renderSystemPrompt);
 
   // ---------- skills page (global library) ----------
   function loadSkills(){
