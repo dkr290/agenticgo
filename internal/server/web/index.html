@@ -401,7 +401,7 @@
     <div class="page-head"><h1>Cron</h1><div class="sub">Schedule agents to run on a timer. Enabled jobs run the agent on its own cron session and are persisted across restarts.</div></div>
     <div class="page-body">
       <div class="toolbar"><button id="cron-new">+ New Cron Job</button></div>
-      <table class="list"><thead><tr><th>Name</th><th>Schedule</th><th>Agent</th><th>Prompt</th><th>Status</th><th></th></tr></thead>
+      <table class="list"><thead><tr><th>Name</th><th>Schedule</th><th>Agent</th><th>Prompt</th><th>Retries</th><th>Status</th><th></th></tr></thead>
       <tbody id="cron-tbody"></tbody></table>
       <div class="empty" id="cron-empty" style="display:none">No cron jobs yet.</div>
     </div>
@@ -1368,6 +1368,7 @@
           : '<span class="pill">enabled</span>');
         tr.innerHTML = '<td class="namecell">' + esc(j.name) + '</td><td><code>' + esc(j.schedule) + '</code></td>' +
           '<td>' + esc(j.agent) + '</td><td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">' + esc(j.prompt) + '</td>' +
+          '<td style="font-size:12px; color:var(--muted)">' + (j.max_retries > 0 ? j.max_retries + ' retries' : '—') + '</td>' +
           '<td style="font-size:12px; color:var(--muted)">' + status + '</td>' +
           '<td><button class="danger">Delete</button></td>';
         tr.querySelector('button').addEventListener('click', () =>
@@ -1386,13 +1387,15 @@
         '<label>Agent key</label>' + sel.outerHTML +
         '<label>Prompt</label><textarea id="cj-prompt" rows="3" placeholder="Summarize the workspace and save a report."></textarea>' +
         '<div class="checkrow"><input type="checkbox" id="cj-enabled" checked><label for="cj-enabled" style="margin:0">Enabled</label></div>' +
+        '<label>Max retries (0 = no retry)</label><input id="cj-retries" type="number" min="0" value="0">' +
         '<div class="row"><button class="ghost" id="cj-cancel">Cancel</button><button id="cj-save">Create</button></div>');
       $('cj-cancel').addEventListener('click', closeModal);
       $('cj-save').addEventListener('click', () => {
         const agent = $('cj-agent') ? $('cj-agent').value : '';
         if (!agent) { toast('Please select an agent'); return; }
+        const retries = parseInt($('cj-retries').value, 10) || 0;
         const body = { name: $('cj-name').value.trim(), schedule: $('cj-schedule').value.trim(),
-          agent, prompt: $('cj-prompt').value, enabled: $('cj-enabled').checked };
+          agent, prompt: $('cj-prompt').value, enabled: $('cj-enabled').checked, max_retries: retries };
         api('/api/cron', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
           .then(() => { closeModal(); loadCron(); })
           .catch(e => toast('Create failed: ' + e.message));

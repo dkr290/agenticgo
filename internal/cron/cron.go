@@ -32,15 +32,16 @@ type Runner func(ctx context.Context, agentKey, session, message string) error
 
 // Job is a scheduled agent run. ID and CreatedAt are server-assigned; the
 // omitempty lets a POST body omit them (they're set by Add) while still
-// serializing on responses.
+// serializing on responses. MaxRetries defaults to 0 (no retries).
 type Job struct {
-	ID        string    `json:"id,omitempty"`
-	Name      string    `json:"name"`
-	Schedule  string    `json:"schedule"` // cron expression, e.g. "*/5 * * * *"
-	Agent     string    `json:"agent,omitempty"`
-	Prompt    string    `json:"prompt"`
-	Enabled   bool      `json:"enabled,omitempty"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
+	ID         string    `json:"id,omitempty"`
+	Name       string    `json:"name"`
+	Schedule   string    `json:"schedule"` // cron expression, e.g. "*/5 * * * *"
+	Agent      string    `json:"agent,omitempty"`
+	Prompt     string    `json:"prompt"`
+	Enabled    bool      `json:"enabled,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+	MaxRetries int       `json:"max_retries,omitempty"` // per-job retry budget (0 = no retries)
 }
 
 // JobWithStatus is a Job annotated with its live schedule state, so the UI can
@@ -186,17 +187,22 @@ func (s *Scheduler) Add(j Job) (*Job, error) {
 	if agent == "" {
 		agent = "default"
 	}
+	maxRetries := j.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := Job{
-		ID:        newID(name),
-		Name:      name,
-		Schedule:  strings.TrimSpace(j.Schedule),
-		Agent:     agent,
-		Prompt:    j.Prompt,
-		Enabled:   j.Enabled,
-		CreatedAt: time.Now(),
+		ID:         newID(name),
+		Name:       name,
+		Schedule:   strings.TrimSpace(j.Schedule),
+		Agent:      agent,
+		Prompt:     j.Prompt,
+		Enabled:    j.Enabled,
+		CreatedAt:  time.Now(),
+		MaxRetries: maxRetries,
 	}
 	s.jobs[cp.ID] = &cp
 	if err := s.saveLocked(); err != nil {
@@ -249,7 +255,7 @@ func (s *Scheduler) scheduleLocked(j *Job) {
 		return
 	}
 	jobID, agentKey, prompt := j.ID, j.Agent, j.Prompt
-	eid, err := s.cron.AddFunc(j.Schedule, func() { s.fire(jobID, agentKey, prompt) })
+	eid, err := s.cron.AddFunc(j.Schedule, func() { s.fire(jobID, agentKey, prompt, j.MaxRetries) })
 	if err != nil {
 		s.log.Error("cron schedule failed", "job", jobID, "schedule", j.Schedule, "error", err)
 		return
@@ -268,8 +274,9 @@ func (s *Scheduler) unscheduleLocked(j *Job) {
 }
 
 // fire executes one scheduled run. The agent gets its own session per job so
-// runs accumulate as a resumable conversation.
-func (s *Scheduler) fire(jobID, agentKey, prompt string) {
+// runs accumulate as a resumable conversation. On failure it retries up to
+// maxRetries times with exponential backoff (1s, 2s, 4s, …).
+func (s *Scheduler) fire(jobID, agentKey, prompt string, maxRetries int) {
 	s.mu.Lock()
 	if !s.running || s.active[jobID] {
 		s.mu.Unlock()
@@ -286,12 +293,35 @@ func (s *Scheduler) fire(jobID, agentKey, prompt string) {
 		s.wg.Done()
 	}()
 	defer cancel()
-	s.log.Info("cron run start", "job", jobID, "agent", agentKey)
-	if err := s.run(ctx, agentKey, "cron-"+jobID, prompt); err != nil {
-		s.log.Error("cron run failed", "job", jobID, "agent", agentKey, "error", err)
+
+	session := "cron-" + jobID
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			s.log.Info("cron retrying", "job", jobID, "agent", agentKey, "attempt", attempt+1, "of", maxRetries+1, "backoff", backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				s.log.Error("cron retry cancelled by context", "job", jobID, "agent", agentKey, "error", ctx.Err())
+				return
+			}
+		}
+		if attempt > 0 {
+			s.log.Info("cron run start (retry)", "job", jobID, "agent", agentKey, "attempt", attempt+1)
+		} else {
+			s.log.Info("cron run start", "job", jobID, "agent", agentKey)
+		}
+		if err := s.run(ctx, agentKey, session, prompt); err != nil {
+			if attempt >= maxRetries {
+				s.log.Error("cron run failed after retries", "job", jobID, "agent", agentKey, "attempts", attempt+1, "error", err)
+				return
+			}
+			s.log.Warn("cron run failed (will retry)", "job", jobID, "agent", agentKey, "attempt", attempt+1, "of", maxRetries+1, "error", err)
+			continue
+		}
+		s.log.Info("cron run done", "job", jobID, "agent", agentKey)
 		return
 	}
-	s.log.Info("cron run done", "job", jobID, "agent", agentKey)
 }
 
 // saveLocked persists jobs to JSON atomically (tmp + rename). Caller holds mu.

@@ -23,13 +23,13 @@ func TestSkipOverlappingRunsAndStopCancels(t *testing.T) {
 	}
 	s.Start()
 	defer s.Stop()
-	go s.fire("job", "demo", "wait")
+	go s.fire("job", "demo", "wait", 0)
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("job did not start")
 	}
-	s.fire("job", "demo", "overlap")
+	s.fire("job", "demo", "overlap", 0)
 	if calls.Load() != 1 {
 		t.Fatal("overlapping job ran")
 	}
@@ -45,7 +45,7 @@ func TestSkipOverlappingRunsAndStopCancels(t *testing.T) {
 	default:
 		t.Fatal("Stop returned before runner stopped")
 	}
-	s.fire("job", "demo", "after stop")
+	s.fire("job", "demo", "after stop", 0)
 	if calls.Load() != 1 {
 		t.Fatal("job ran after Stop")
 	}
