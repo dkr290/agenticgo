@@ -1377,21 +1377,27 @@
     }).catch(e => toast('Load failed: ' + e.message));
   }
   $('cron-new').addEventListener('click', () => {
-    openModal('<h2>New cron job</h2>' +
-      '<label>Name</label><input id="cj-name" placeholder="nightly-summary">' +
-      '<label>Schedule (cron expression)</label><input id="cj-schedule" placeholder="0 3 * * *">' +
-      '<label>Agent key</label><input id="cj-agent" placeholder="default">' +
-      '<label>Prompt</label><textarea id="cj-prompt" rows="3" placeholder="Summarize the workspace and save a report."></textarea>' +
-      '<div class="checkrow"><input type="checkbox" id="cj-enabled" checked><label for="cj-enabled" style="margin:0">Enabled</label></div>' +
-      '<div class="row"><button class="ghost" id="cj-cancel">Cancel</button><button id="cj-save">Create</button></div>');
-    $('cj-cancel').addEventListener('click', closeModal);
-    $('cj-save').addEventListener('click', () => {
-      const body = { name: $('cj-name').value.trim(), schedule: $('cj-schedule').value.trim(),
-        agent: $('cj-agent').value.trim() || 'default', prompt: $('cj-prompt').value, enabled: $('cj-enabled').checked };
-      api('/api/cron', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
-        .then(() => { closeModal(); loadCron(); })
-        .catch(e => toast('Create failed: ' + e.message));
-    });
+    api('/api/agents').then(list => {
+      const sel = document.createElement('select'); sel.id = 'cj-agent';
+      (list||[]).forEach(a => { const o=document.createElement('option'); o.value=a.key; o.textContent=a.name+' ('+a.key+')'; sel.appendChild(o); });
+      openModal('<h2>New cron job</h2>' +
+        '<label>Name</label><input id="cj-name" placeholder="nightly-summary">' +
+        '<label>Schedule (cron expression)</label><input id="cj-schedule" placeholder="0 3 * * *">' +
+        '<label>Agent key</label>' + sel.outerHTML +
+        '<label>Prompt</label><textarea id="cj-prompt" rows="3" placeholder="Summarize the workspace and save a report."></textarea>' +
+        '<div class="checkrow"><input type="checkbox" id="cj-enabled" checked><label for="cj-enabled" style="margin:0">Enabled</label></div>' +
+        '<div class="row"><button class="ghost" id="cj-cancel">Cancel</button><button id="cj-save">Create</button></div>');
+      $('cj-cancel').addEventListener('click', closeModal);
+      $('cj-save').addEventListener('click', () => {
+        const agent = $('cj-agent') ? $('cj-agent').value : '';
+        if (!agent) { toast('Please select an agent'); return; }
+        const body = { name: $('cj-name').value.trim(), schedule: $('cj-schedule').value.trim(),
+          agent, prompt: $('cj-prompt').value, enabled: $('cj-enabled').checked };
+        api('/api/cron', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+          .then(() => { closeModal(); loadCron(); })
+          .catch(e => toast('Create failed: ' + e.message));
+      });
+    }).catch(e => toast('Load agents failed: ' + e.message));
   });
 
   // ---------- memory page ----------
