@@ -33,6 +33,7 @@ import (
 	"github.com/microsoft/agent-framework-go/message"
 	"github.com/microsoft/agent-framework-go/provider/openaiprovider"
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
 
@@ -66,13 +67,14 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 			History:       maf.NewHistoryProvider(e.store, agentKey, session),
 			Tools:         mafTools,
 			DrainImages:   sink.DrainImages,
+			Responses:     prov.UseResponses(),
 		},
 	)
 
 	// MAF creates a fresh session; the custom history provider owns SQLite
 	// persistence and preserves the original multimodal input.
 	opts := []mafgent.Option{mafgent.Stream(true)}
-	if params := chatParams(ag); params != nil {
+	if params := requestParams(ag, prov.UseResponses()); params != nil {
 		opts = append(opts, params)
 	}
 
@@ -114,6 +116,7 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 			emit(Event{Kind: "cancelled"})
 			return "", context.Canceled
 		}
+		runErr = apiErrorDetail(runErr)
 		emit(Event{Kind: "error", Err: runErr})
 		return "", fmt.Errorf("maf run: %w", runErr)
 	}
@@ -126,11 +129,25 @@ func (e *Engine) runMAF(ctx context.Context, ag *agents.Agent, agentKey, session
 	return finalText.String(), nil
 }
 
-// chatParams passes per-agent sampling settings through to the Chat
-// Completions request when set.
-func chatParams(ag *agents.Agent) mafgent.Option {
+// requestParams passes per-agent sampling settings through to the Chat
+// Completions or Responses request when set.
+func requestParams(ag *agents.Agent, useResponses bool) mafgent.Option {
 	if ag.Config.Temperature == nil && ag.Config.MaxTokens == nil && ag.Config.DisableReasoning == nil {
 		return nil
+	}
+	disable := ag.Config.DisableReasoning != nil && *ag.Config.DisableReasoning
+	if useResponses {
+		p := responses.ResponseNewParams{}
+		if ag.Config.Temperature != nil {
+			p.Temperature = openai.Float(*ag.Config.Temperature)
+		}
+		if ag.Config.MaxTokens != nil {
+			p.MaxOutputTokens = openai.Int(int64(*ag.Config.MaxTokens))
+		}
+		if disable {
+			p.Reasoning.Effort = shared.ReasoningEffortNone
+		}
+		return openaiprovider.ResponsesNewParams(p)
 	}
 	p := openai.ChatCompletionNewParams{}
 	if ag.Config.Temperature != nil {
@@ -139,12 +156,27 @@ func chatParams(ag *agents.Agent) mafgent.Option {
 	if ag.Config.MaxTokens != nil {
 		p.MaxTokens = openai.Int(int64(*ag.Config.MaxTokens))
 	}
-	if ag.Config.DisableReasoning != nil && *ag.Config.DisableReasoning {
+	if disable {
 		// Reasoning deployments reject tool use on /chat/completions at the
 		// default effort; "none" turns them into plain tool-calling chat models.
 		p.ReasoningEffort = shared.ReasoningEffortNone
 	}
 	return openaiprovider.ChatCompletionNewParams(p)
+}
+
+// apiErrorDetail appends the endpoint's error message (e.g. Azure's
+// "Unsupported value: 'reasoning_effort'...") to an OpenAI API error, whose
+// Error() only reports the HTTP status.
+func apiErrorDetail(err error) error {
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.Message == "" {
+		return err
+	}
+	detail := apiErr.Message
+	if apiErr.Param != "" {
+		detail += " (param: " + apiErr.Param + ")"
+	}
+	return fmt.Errorf("%w: %s", err, detail)
 }
 
 // mafResultText flattens a function result for the WS event.
@@ -177,11 +209,12 @@ func runOneShotMAF(ctx context.Context, prov *llm.OpenAIProvider, ag *agents.Age
 		maf.ChatConfig{
 			Model:        model,
 			Instructions: instructions,
+			Responses:    prov.UseResponses(),
 		},
 	)
 	resp, err := a.RunText(ctx, prompt).Collect()
 	if err != nil {
-		return "", err
+		return "", apiErrorDetail(err)
 	}
 	for c := range resp.Contents() {
 		if failure, ok := c.(*message.ErrorContent); ok {

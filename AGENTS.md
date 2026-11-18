@@ -111,6 +111,12 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   agent's `config.json` may pin a provider/model/temperature/max_tokens too
   (per-request override > agent config > default);
   `agent.ProviderLookup` (`providers.Store.GetLLM`) resolves names.
+  Each provider picks its wire API (`api`: `chat_completions` default, or
+  `responses` → MAF `NewResponsesAgent` with store disabled, so history stays
+  SQLite-owned). Use `responses` for reasoning models that reject function
+  tools on Chat Completions (e.g. Azure gpt-6.1-sol, which also rejects
+  `reasoning_effort: none`). Endpoint error messages are appended to the
+  bare SDK status error (`apiErrorDetail`).
   **API keys are encrypted at rest** (`internal/crypto`, AES-256-GCM, `enc:v1:`
   envelope in the JSON) using a key from `AGENTICGO_SECRET_KEY` (base64, 32 bytes)
   or a generated `data/secret.key` (0600). Keys are decrypted transparently on

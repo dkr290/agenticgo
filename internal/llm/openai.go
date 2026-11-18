@@ -25,6 +25,7 @@ type OpenAIProvider struct {
 	apiKey     string
 	model      string
 	maxRetries int
+	api        string
 	client     openai.Client // used only for ListModels (Providers UI test)
 	log        logger.Logger
 }
@@ -66,6 +67,19 @@ func (p *OpenAIProvider) SetLogger(l logger.Logger) {
 // SDK default (2). Applies to the agent-run client built from
 // RequestOptions; the ListModels test client is unaffected.
 func (p *OpenAIProvider) SetMaxRetries(n int) { p.maxRetries = n }
+
+// Wire APIs an OpenAI-compatible provider can use for agent runs.
+const (
+	APIChatCompletions = "chat_completions"
+	APIResponses       = "responses"
+)
+
+// SetAPI selects the wire API for agent runs; anything other than
+// APIResponses means Chat Completions.
+func (p *OpenAIProvider) SetAPI(api string) { p.api = api }
+
+// UseResponses reports whether agent runs should use the Responses API.
+func (p *OpenAIProvider) UseResponses() bool { return p.api == APIResponses }
 
 // Name implements Provider.
 func (p *OpenAIProvider) Name() string { return "openai-compatible" }

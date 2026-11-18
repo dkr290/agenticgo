@@ -44,11 +44,18 @@ type Provider struct {
 	// (screenshots, pictures). There is no reliable API to detect this, so it
 	// is set manually. An agent's config may override it (agents.AgentConfig.Vision).
 	Vision bool `json:"vision,omitempty"`
+	// API selects the OpenAI wire API used for agent runs: "chat_completions"
+	// (default; works with every OpenAI-compatible server) or "responses"
+	// (/v1/responses — required by reasoning models such as Azure gpt-6.1-sol,
+	// which reject function tools on Chat Completions).
+	API string `json:"api,omitempty" enum:"chat_completions,responses" doc:"Wire API for agent runs (default chat_completions)"`
 }
 
 // LLM builds an llm.Provider for this configuration.
 func (p *Provider) LLM() llm.Provider {
-	return llm.NewOpenAI(p.BaseURL, p.APIKey, p.Model)
+	op := llm.NewOpenAI(p.BaseURL, p.APIKey, p.Model)
+	op.SetAPI(p.API)
+	return op
 }
 
 // Store is a thread-safe JSON-file-backed provider store. API keys are
@@ -187,8 +194,9 @@ func (s *Store) GetLLM(name string) (llm.Provider, error) {
 			return nil, err
 		}
 	}
-	s.log.Debug("providers: resolved LLM", "name", name, "base_url", p.BaseURL, "model", p.Model)
+	s.log.Debug("providers: resolved LLM", "name", name, "base_url", p.BaseURL, "model", p.Model, "api", p.API)
 	op := llm.NewOpenAI(p.BaseURL, p.APIKey, p.Model)
+	op.SetAPI(p.API)
 	op.SetLogger(s.log)
 	op.SetMaxRetries(s.maxRetries)
 	return op, nil
@@ -222,6 +230,9 @@ func (s *Store) Upsert(p Provider) (err error) {
 	}
 	if p.Type == "" {
 		p.Type = "openai-compatible"
+	}
+	if p.API != "" && p.API != llm.APIChatCompletions && p.API != llm.APIResponses {
+		return fmt.Errorf("provider api must be %q or %q", llm.APIChatCompletions, llm.APIResponses)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

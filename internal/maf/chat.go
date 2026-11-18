@@ -24,6 +24,9 @@ type ChatConfig struct {
 	History       *HistoryProvider
 	MaxIterations int
 	DrainImages   func() []string
+	// Responses selects the OpenAI Responses API instead of Chat Completions.
+	// Runs stay stateless (store disabled): history is owned by SQLite.
+	Responses bool
 }
 
 // NewChatAgent composes MAF's OpenAI provider with its toolautocall middleware.
@@ -44,13 +47,22 @@ type ChatConfig struct {
 // agent.ResponseStream type while ProviderConfig.Run wants plain iter.Seq2.
 func NewChatAgent(client openai.Client, cfg ChatConfig) *agent.Agent {
 	zero := 0
-	provider := openaiprovider.NewChatCompletionsAgent(client, openaiprovider.AgentConfig{
+	providerCfg := openaiprovider.AgentConfig{
 		Model:        cfg.Model,
 		ToolAutoCall: &toolautocall.Config{MaximumIterationsPerRequest: &zero},
 		Config: agent.Config{
 			HistoryProvider: agent.NewHistoryProvider(agent.HistoryProviderConfig{SourceID: "single-completion"}),
 		},
-	})
+	}
+	var provider *agent.Agent
+	if cfg.Responses {
+		// No server-side state: every request carries the full SQLite history,
+		// so no previous_response_id is ever chained.
+		providerCfg.DisableStoreOutput = true
+		provider = openaiprovider.NewResponsesAgent(client, providerCfg)
+	} else {
+		provider = openaiprovider.NewChatCompletionsAgent(client, providerCfg)
+	}
 	runtime := agent.Config{
 		Name: cfg.Name, Tools: cfg.Tools,
 	}
