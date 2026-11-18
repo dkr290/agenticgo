@@ -8,7 +8,7 @@ Context for AI coding agents working on **agenticgo**.
 GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 **clean-room reimplementation of ideas** — do NOT copy GoClaw code (CC BY-NC).
 
-**Module path:** `github.com/dkr290/agenticgo`
+**Module path:** `banking-circle-sa.ghe.com/development/daai-aiops-agenticgo`
 
 ## Scope (what it does)
 
@@ -93,12 +93,12 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   before the next completion, retaining them on failure/cancellation; only the
   successful response tail is saved by `HistoryProvider.Invoked`. Incoming
   multimodal messages are preserved and their text is saved once by `Invoking`.
-  A narrow v0.2.1 compatibility layer assembles streamed tool calls from the
-  official OpenAI SDK accumulator (including interleaved and terminal-chunk
-  calls); MAF still owns request translation and the tool loop. Fetched images
-  remain in context throughout the run. MAF checks cancellation before dispatch;
-  function-invocation middleware captures tool outcomes so a cancelled batch
-  still emits completed results and cancellation results for unexecuted calls.
+  MAF (v0.3.x) owns request translation, streamed tool-call assembly
+  (packed/interleaved/terminal-chunk calls, upstream #1349) and the tool loop;
+  it checks cancellation before dispatch and preserves completed tool outcomes
+  when a batch is cancelled. Fetched images remain in context throughout the
+  run via the `toolLoop` retention middleware (the one remaining
+  agenticgo-specific adapter).
   Tool-round updates remain incremental even with non-streaming model requests,
   allowing SQLite checkpoints before later failures. All tools are MAF
   `tool.FuncTool`s: built-ins and core
@@ -270,12 +270,12 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   enabled MCP tools) whose slice serves both the LLM request and dispatch.
   `SetProviderLookup` enables per-request provider overrides;
   `SetMCPManager` enables per-agent MCP tools.
-- `internal/maf` — framework integration and compatibility middleware:
-  `NewChatAgent` composes MAF's OpenAI provider and toolautocall, repairs v0.2.1
-  streaming tool-call assembly, retains run-scoped images, and recovers cancelled
-  tool-batch results using MAF's function-invocation middleware. MAF owns dispatch
-  cancellation. The SQLite `HistoryProvider` and checkpoint middleware own
-  persistence and history repair. Also contains `llm.Message` ↔ `message.Message`
+- `internal/maf` — framework integration: `NewChatAgent` composes MAF's OpenAI
+  provider and toolautocall and retains run-scoped images across tool rounds
+  (`toolLoop`, the one remaining adapter). MAF (v0.3.x) owns streamed tool-call
+  assembly and dispatch cancellation, preserving completed tool-batch results
+  itself. The SQLite `HistoryProvider` and checkpoint middleware own persistence
+  and history repair. Also contains `llm.Message` ↔ `message.Message`
   translation, the MCP FuncTool wrapper, and the user-message builder.
 - `internal/server` — all REST routes are **Huma operations** registered in
   `routes.go` via `huma.Register` on a stdlib `http.ServeMux` (adapter
@@ -352,8 +352,8 @@ Per-agent workspaces are wired into the tool loop.
   self-generated. (chi was replaced by Huma; the router is now stdlib.)
 - Agent framework: `github.com/microsoft/agent-framework-go` — the agent loop,
   tool auto-invocation (`toolautocall`), and tool plumbing (`functool`) run on
-  it. Framework compatibility code lives in `internal/maf` (chat composition,
-  streaming repair, history bridge, message translation, MCP wrapper). The
+  it. Framework integration code lives in `internal/maf` (chat composition,
+  image retention, history bridge, message translation, MCP wrapper). The
   engine and typed tools also use MAF's public message/tool APIs.
 - LLM client: `github.com/openai/openai-go/v3` (official SDK, Chat Completions
   API with base-URL override — works with Ollama / LM Studio / LocalAI / vLLM /
@@ -398,9 +398,9 @@ curl -X POST localhost:18099/api/chat \
 - `cmd/agenticgo/main.go` — wiring
 - `internal/agent/agent.go` — `Engine` (provider resolution, system prompt,
   retention, `Evolve`) + `run_maf.go` (the MAF agent loop + one-shot runs)
-- `internal/maf/` — framework bridge: `chat.go` (MAF composition, streaming
-  compatibility, retained images, cancellation), `history.go` (HistoryProvider,
-  atomic checkpoints + translation), `mcp.go` (MCP tool FuncTool)
+- `internal/maf/` — framework bridge: `chat.go` (MAF composition, run-scoped
+  image retention), `history.go` (HistoryProvider, atomic checkpoints +
+  translation), `mcp.go` (MCP tool FuncTool)
 - `internal/agents/agents.go` — agent registry + context files
 - `internal/agenttemplates/agenttemplates.go` — `go:embed` initial context-file templates (`templates/`)
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition
