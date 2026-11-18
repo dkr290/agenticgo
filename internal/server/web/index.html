@@ -459,6 +459,11 @@
           <div><label>Model *</label><input id="pf-model" placeholder="qwen2.5"></div>
         </div>
         <label>Base URL *</label><input id="pf-baseurl" placeholder="http://localhost:11434/v1">
+        <label>API</label>
+        <select id="pf-api">
+          <option value="chat_completions">Chat Completions (/chat/completions) — any OpenAI-compatible server</option>
+          <option value="responses">Responses (/responses) — OpenAI/Azure reasoning models (e.g. gpt-6.1-sol)</option>
+        </select>
         <label>API Key</label>
         <div style="display:flex; gap:6px; align-items:center">
           <input id="pf-apikey" type="password" placeholder="(often unused for local servers)" style="flex:1">
@@ -1559,7 +1564,7 @@
         const tr = document.createElement('tr');
         tr.innerHTML = '<td class="namecell">' + esc(p.display_name || p.name) + (p.default ? ' <span class="pill accent">default</span>' : '') + '</td>' +
           '<td><span class="pill ok">' + esc(p.type) + '</span></td>' +
-          '<td><code>' + esc(p.base_url) + '</code></td><td><code>' + esc(p.model) + '</code>' + (p.vision ? ' <span class="pill" title="Supports images">👁 vision</span>' : '') + '</td>' +
+          '<td><code>' + esc(p.base_url) + '</code></td><td><code>' + esc(p.model) + '</code>' + (p.api === 'responses' ? ' <span class="pill" title="Uses the Responses API">responses</span>' : '') + (p.vision ? ' <span class="pill" title="Supports images">👁 vision</span>' : '') + '</td>' +
           '<td><button class="ghost" data-act="test">Test</button> <button class="ghost" data-act="edit">Edit</button></td>' +
           '<td><button class="danger" data-act="del">Delete</button></td>';
         tr.querySelector('[data-act=test]').addEventListener('click', () => {
@@ -1583,7 +1588,7 @@
     $('pf-display').value = p.display_name || ''; $('pf-name').value = p.name; $('pf-name').disabled = true;
     $('pf-model').value = p.model; $('pf-baseurl').value = p.base_url; $('pf-apikey').value = p.api_key || '';
     $('pf-apikey').type = 'password'; $('pf-apikey-eye').textContent = '👁';
-    $('pf-default').checked = !!p.default; $('pf-vision').checked = !!p.vision; $('pf-status').textContent = '';
+    $('pf-default').checked = !!p.default; $('pf-vision').checked = !!p.vision; $('pf-api').value = p.api || 'chat_completions'; $('pf-status').textContent = '';
     $('provider-form').style.display = '';
   }
   // Heuristic: prefill the vision box from the model name (user can override).
@@ -1597,14 +1602,14 @@
     $('pf-title').textContent = 'New provider';
     ['pf-display','pf-name','pf-model','pf-baseurl','pf-apikey'].forEach(id => { $(id).value=''; $(id).disabled=false; });
     $('pf-apikey').type = 'password'; $('pf-apikey-eye').textContent = '👁';
-    $('pf-default').checked = false; $('pf-vision').checked = false; $('pf-status').textContent = '';
+    $('pf-default').checked = false; $('pf-vision').checked = false; $('pf-api').value = 'chat_completions'; $('pf-status').textContent = '';
     $('provider-form').style.display = '';
   });
   $('pf-cancel').addEventListener('click', () => { $('provider-form').style.display = 'none'; });
   $('pf-save').addEventListener('click', () => {
     const body = { name: $('pf-name').value.trim(), display_name: $('pf-display').value.trim(),
       type: 'openai-compatible', base_url: $('pf-baseurl').value.trim(), api_key: $('pf-apikey').value,
-      model: $('pf-model').value.trim(), default: $('pf-default').checked, vision: $('pf-vision').checked };
+      model: $('pf-model').value.trim(), default: $('pf-default').checked, vision: $('pf-vision').checked, api: $('pf-api').value };
     if (!body.name || !body.base_url || !body.model) { toast('Name, base URL and model are required'); return; }
     api('/api/providers', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
       .then(() => { $('provider-form').style.display = 'none'; loadProviders(); updateChatProvider(); refreshAttach(); toast('Provider saved'); })
@@ -1622,7 +1627,7 @@
     // config; the server tests it ad-hoc instead of requiring a saved record.
     const body = { name: $('pf-name').value.trim(), display_name: $('pf-display').value.trim(),
       type: 'openai-compatible', base_url: $('pf-baseurl').value.trim(), api_key: $('pf-apikey').value,
-      model: $('pf-model').value.trim(), default: $('pf-default').checked, vision: $('pf-vision').checked };
+      model: $('pf-model').value.trim(), default: $('pf-default').checked, vision: $('pf-vision').checked, api: $('pf-api').value };
     if (!body.base_url) { toast('Base URL is required to test'); return; }
     $('pf-status').textContent = 'testing…';
     api('/api/providers/test', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })

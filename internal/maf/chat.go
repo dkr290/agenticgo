@@ -2,7 +2,6 @@ package maf
 
 import (
 	"context"
-	"crypto/rand"
 	"iter"
 	"slices"
 
@@ -25,39 +24,47 @@ type ChatConfig struct {
 	History       *HistoryProvider
 	MaxIterations int
 	DrainImages   func() []string
+	// Responses selects the OpenAI Responses API instead of Chat Completions.
+	// Runs stay stateless (store disabled): history is owned by SQLite.
+	Responses bool
 }
 
 // NewChatAgent composes MAF's OpenAI provider with its toolautocall middleware.
 // The single-completion agent has autocall and history storage disabled so the
-// outer agent is the sole owner of the lifecycle. This exposes the provider
-// boundary for the stream compatibility fix and run-scoped image context,
-// while MAF still owns request translation, invocation, and iteration limits.
+// outer agent is the sole owner of the lifecycle. MAF owns request translation,
+// streamed tool-call assembly, invocation, iteration limits, and cancellation —
+// since MAF v0.3.0 (upstream #1349) the provider assembles packed, interleaved,
+// and terminal-chunk tool calls itself and preserves completed tool outcomes on
+// cancellation, so the v0.2.1-era stream-repair and batch-recovery adapters are
+// gone. What remains agenticgo-specific:
 //
-// TODO(maf-upgrade): Re-check these adapters when upgrading MAF beyond v0.2.1:
-//
-//   - completionUpdates: the OpenAI provider still uses JustFinishedToolCall,
-//     which misses packed/terminal calls and mishandles interleaved deltas.
 //   - toolLoop image retention: injected images must remain at their original
 //     positions across subsequent model calls. MAF's MessageInjector alone
 //     does not retain them without adopting per-service-call history storage.
-//   - toolResults: MAF stops dispatch on cancellation, but discards the current
-//     batch's results. Its function middleware lets us recover completed calls
-//     and mark unexecuted calls as cancelled before checkpointing the batch.
+//   - HistoryProvider/CheckpointMiddleware: the SQLite persistence design.
 //
-// HistoryProvider/CheckpointMiddleware remain the SQLite persistence design.
-// MAF now owns cancellation checks before provider and tool dispatch.
+// The Run passthrough exists because provider.Run returns the named
+// agent.ResponseStream type while ProviderConfig.Run wants plain iter.Seq2.
 func NewChatAgent(client openai.Client, cfg ChatConfig) *agent.Agent {
 	zero := 0
-	provider := openaiprovider.NewChatCompletionsAgent(client, openaiprovider.AgentConfig{
+	providerCfg := openaiprovider.AgentConfig{
 		Model:        cfg.Model,
 		ToolAutoCall: &toolautocall.Config{MaximumIterationsPerRequest: &zero},
 		Config: agent.Config{
 			HistoryProvider: agent.NewHistoryProvider(agent.HistoryProviderConfig{SourceID: "single-completion"}),
 		},
-	})
+	}
+	var provider *agent.Agent
+	if cfg.Responses {
+		// No server-side state: every request carries the full SQLite history,
+		// so no previous_response_id is ever chained.
+		providerCfg.DisableStoreOutput = true
+		provider = openaiprovider.NewResponsesAgent(client, providerCfg)
+	} else {
+		provider = openaiprovider.NewChatCompletionsAgent(client, providerCfg)
+	}
 	runtime := agent.Config{
 		Name: cfg.Name, Tools: cfg.Tools,
-		FunctionMiddlewares: []agent.FunctionInvocationMiddleware{captureToolResult},
 	}
 	if cfg.Instructions != "" {
 		runtime.RunOptions = []agent.Option{agent.WithInstructions(cfg.Instructions)}
@@ -69,79 +76,16 @@ func NewChatAgent(client openai.Client, cfg ChatConfig) *agent.Agent {
 	return agent.New(agent.ProviderConfig{
 		ProviderName: "openai",
 		Run: func(ctx context.Context, messages []*message.Message, opts ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
-			return completionUpdates(provider.Run(ctx, messages, opts...))
-		},
-		Middlewares: []agent.Middleware{preserveToolResults(), toolLoop(cfg.MaxIterations, cfg.DrainImages)},
-	}, runtime)
-}
-
-// completionUpdates works around MAF v0.2.1's use of JustFinishedToolCall,
-// which can emit incomplete/duplicate calls for interleaved deltas and omit
-// calls in the terminal chunk. Use the SDK's fully accumulated call set only
-// after a successful stream. Text and usage still stream immediately. Remove
-// this adapter when the upstream provider handles these cases itself.
-func completionUpdates(stream agent.ResponseStream) iter.Seq2[*agent.ResponseUpdate, error] {
-	return func(yield func(*agent.ResponseUpdate, error) bool) {
-		var acc openai.ChatCompletionAccumulator
-		var last *agent.ResponseUpdate
-		for update, err := range stream {
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if update == nil {
-				continue
-			}
-			out := *update
-			out.Contents = nil
-			chunk, streaming := update.RawRepresentation.(openai.ChatCompletionChunk)
-			if streaming {
-				acc.AddChunk(chunk)
-				last = update
-			}
-			for _, c := range update.Contents {
-				switch c.(type) {
-				case *message.FunctionCallContent:
-					if streaming {
-						continue
-					}
-				case *message.ErrorContent:
-					if streaming {
-						continue // read the complete refusal from the accumulator below
+			return func(yield func(*agent.ResponseUpdate, error) bool) {
+				for update, err := range provider.Run(ctx, messages, opts...) {
+					if !yield(update, err) {
+						return
 					}
 				}
-				out.Contents = append(out.Contents, c)
 			}
-			if !yield(&out, nil) {
-				return
-			}
-		}
-		if last == nil || len(acc.Choices) == 0 {
-			return
-		}
-		completed := *last
-		completed.RawRepresentation = nil
-		completed.Contents = nil
-		msg := acc.Choices[0].Message
-		if msg.Refusal != "" {
-			completed.Contents = append(completed.Contents, &message.ErrorContent{Message: msg.Refusal, ErrorCode: "Refusal"})
-		}
-		for _, tc := range msg.ToolCalls {
-			if tc.Type != "function" {
-				continue
-			}
-			id := tc.ID
-			if id == "" {
-				id = "call_" + rand.Text()
-			}
-			completed.Contents = append(completed.Contents, &message.FunctionCallContent{
-				CallID: id, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
-			})
-		}
-		if len(completed.Contents) > 0 {
-			yield(&completed, nil)
-		}
-	}
+		},
+		Middlewares: []agent.Middleware{toolLoop(cfg.MaxIterations, cfg.DrainImages)},
+	}, runtime)
 }
 
 // toolLoop delegates the loop to MAF and retains injected images at their

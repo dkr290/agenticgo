@@ -7,6 +7,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -182,6 +183,95 @@ func TestRunMAFDisableReasoning(t *testing.T) {
 	}
 	if body := run("explicit-off"); body["reasoning_effort"] != nil {
 		t.Errorf("explicit false sent reasoning_effort: %v", body["reasoning_effort"])
+	}
+}
+
+// TestRunMAFResponsesAPI: a provider set to the Responses API sends agent
+// runs to /responses, statelessly, with per-agent settings mapped to the
+// Responses parameter names.
+func TestRunMAFResponsesAPI(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/responses") {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		resp := `{"id":"resp_1","object":"response","created_at":1,"status":"%s","model":"m","output":%s}`
+		msg := `[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}]`
+		for _, ev := range []string{
+			`{"type":"response.created","sequence_number":0,"response":` + fmt.Sprintf(resp, "in_progress", "[]") + `}`,
+			`{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"ok"}`,
+			`{"type":"response.completed","sequence_number":2,"response":` + fmt.Sprintf(resp, "completed", msg) + `}`,
+		} {
+			_, _ = w.Write([]byte("data: " + ev + "\n\n"))
+		}
+	}))
+	defer srv.Close()
+
+	e, ar := newTestEngine(t)
+	prov := llm.NewOpenAI(srv.URL+"/v1", "", "test-model")
+	prov.SetAPI(llm.APIResponses)
+	e.SetProviderLookup(&trackingLookup{p: prov})
+
+	temp, maxTok := 0.5, 100
+	if _, err := ar.UpdateConfig("demo", agents.AgentConfig{Temperature: &temp, MaxTokens: &maxTok}); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := e.Run(context.Background(), "demo", "s", "hi", "", nil, func(Event) {})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(reply, "ok") {
+		t.Errorf("reply = %q, want ok", reply)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("expected 1 /responses request, got %d", len(bodies))
+	}
+	b := bodies[0]
+	if b["store"] != false {
+		t.Errorf("store = %v, want false (history is owned by SQLite)", b["store"])
+	}
+	if b["previous_response_id"] != nil {
+		t.Errorf("unexpected previous_response_id %v", b["previous_response_id"])
+	}
+	if b["max_output_tokens"] != float64(100) || b["temperature"] != 0.5 {
+		t.Errorf("sampling params not mapped: %v", b)
+	}
+	if b["reasoning"] != nil {
+		t.Errorf("unset disable_reasoning sent reasoning: %v", b["reasoning"])
+	}
+}
+
+// TestRunMAFAPIErrorDetail: the endpoint's error message reaches the caller
+// instead of a bare "400 Bad Request".
+func TestRunMAFAPIErrorDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":{"message":"Unsupported value: 'reasoning_effort'","type":"invalid_request_error","param":"reasoning_effort","code":"unsupported_value"}}`))
+	}))
+	defer srv.Close()
+
+	e, _ := newTestEngine(t)
+	e.SetProviderLookup(&trackingLookup{p: llm.NewOpenAI(srv.URL+"/v1", "", "test-model")})
+	var evErr error
+	_, err := e.Run(context.Background(), "demo", "s", "hi", "", nil, func(ev Event) {
+		if ev.Kind == "error" {
+			evErr = ev.Err
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "Unsupported value: 'reasoning_effort' (param: reasoning_effort)") {
+		t.Fatalf("err = %v, want endpoint message", err)
+	}
+	if evErr == nil || !strings.Contains(evErr.Error(), "Unsupported value") {
+		t.Errorf("error event = %v, want endpoint message", evErr)
 	}
 }
 

@@ -42,6 +42,15 @@ type Config struct {
 	// MaxAgentIterations bounds the tool-use loop to avoid runaway agents.
 	MaxAgentIterations int
 
+	// LLMMaxRetries is how many times one LLM request is retried on transient
+	// failures (429 rate limits, 5xx) before the error surfaces
+	// (AGENTICGO_LLM_MAX_RETRIES, default 5). The SDK honors Retry-After
+	// headers, so a handful of retries rides out a saturated Azure OpenAI
+	// TPM window (large contexts re-send the whole prompt once per tool
+	// round, which burns through tokens-per-minute fast). 0 keeps the SDK
+	// default (2).
+	LLMMaxRetries int
+
 	// ---- Retention knobs (4) ------------------------------------------------
 	// There are TWO independent, per-agent memory stores, each with TWO limits
 	// (an age TTL and a count cap). A knob at 0 disables that one limit. When
@@ -130,6 +139,7 @@ func Load() (*Config, error) {
 	cfg.ExtraExecCommands = sanitizeCommands(splitList(getEnv("AGENTICGO_EXTRA_EXEC_COMMANDS", "")))
 
 	cfg.MaxAgentIterations = getEnvInt("AGENTICGO_MAX_ITERATIONS", 12)
+	cfg.LLMMaxRetries = getEnvInt("AGENTICGO_LLM_MAX_RETRIES", 5)
 	cfg.ObservationTTLDays = getEnvInt("AGENTICGO_OBSERVATION_TTL_DAYS", 14)
 	cfg.ObservationKeepLatest = getEnvInt("AGENTICGO_OBSERVATION_KEEP", 200)
 	cfg.ObservationInject = getEnvInt("AGENTICGO_OBSERVATION_INJECT", 1)
