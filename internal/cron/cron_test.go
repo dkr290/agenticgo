@@ -141,7 +141,7 @@ func TestEnabledArmsAndDisabledDoesNot(t *testing.T) {
 	}
 
 	// Smoke-test the fire path: the runner is invoked.
-	s.fire(off.ID, off.Agent, off.Prompt)
+	s.fire(off.ID, off.Agent, off.Prompt, 0)
 	if fired != 1 {
 		t.Fatalf("expected fire to invoke runner once, got %d", fired)
 	}
