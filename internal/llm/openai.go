@@ -21,11 +21,12 @@ import (
 // (Ollama / LM Studio / vLLM / OpenAI / Azure Foundry's OpenAI-compatible
 // endpoint).
 type OpenAIProvider struct {
-	baseURL string
-	apiKey  string
-	model   string
-	client  openai.Client // used only for ListModels (Providers UI test)
-	log     logger.Logger
+	baseURL    string
+	apiKey     string
+	model      string
+	maxRetries int
+	client     openai.Client // used only for ListModels (Providers UI test)
+	log        logger.Logger
 }
 
 // NewOpenAI creates a provider for an OpenAI-compatible endpoint. Local
@@ -58,6 +59,14 @@ func (p *OpenAIProvider) SetLogger(l logger.Logger) {
 	p.log = l
 }
 
+// SetMaxRetries configures how many times one LLM request is retried on
+// transient failures (429 rate limits, 5xx) before the error surfaces. The
+// SDK honors Retry-After headers, so a handful of retries rides out a
+// saturated Azure OpenAI TPM window instead of failing the turn. 0 keeps the
+// SDK default (2). Applies to the agent-run client built from
+// RequestOptions; the ListModels test client is unaffected.
+func (p *OpenAIProvider) SetMaxRetries(n int) { p.maxRetries = n }
+
 // Name implements Provider.
 func (p *OpenAIProvider) Name() string { return "openai-compatible" }
 
@@ -72,10 +81,14 @@ func (p *OpenAIProvider) RequestOptions() []option.RequestOption {
 	if key == "" {
 		key = "unused" // required by the SDK, ignored by local servers
 	}
-	return []option.RequestOption{
+	opts := []option.RequestOption{
 		option.WithBaseURL(p.baseURL),
 		option.WithAPIKey(key),
 	}
+	if p.maxRetries > 0 {
+		opts = append(opts, option.WithMaxRetries(p.maxRetries))
+	}
+	return opts
 }
 
 // ListModels lists the model IDs the endpoint advertises (Providers UI

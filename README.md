@@ -304,6 +304,7 @@ node --test internal/server/web_test.cjs
 | `AGENTICGO_EXTRA_EXEC_COMMANDS` | *(empty)* | Extra, dangerous commands baked into the deployment image (e.g. `kubectl,git,jq`). Not runnable by default — each agent must enable them via `config.json` `enabled_commands` (Agents → Extra Dangerous Exec Commands tab). |
 | `AGENTICGO_TOOL_ALLOWLIST` | *(empty = all)* | Restrict which tools are exposed |
 | `AGENTICGO_MAX_ITERATIONS` | `12` | Max agent loop iterations |
+| `AGENTICGO_LLM_MAX_RETRIES` | `5` | Retries per LLM request on transient failures (429/5xx); the SDK honors `Retry-After`, so a few retries ride out a saturated Azure OpenAI TPM window. `0` keeps the SDK default (`2`). |
 | `AGENTICGO_OBSERVATION_TTL_DAYS` | `14` | Prune observations older than this many days. `0` disables age-based pruning. |
 | `AGENTICGO_OBSERVATION_KEEP` | `200` | Cap observations per agent at cleanup time. `0` disables the count limit. |
 | `AGENTICGO_OBSERVATION_INJECT` | `1` | Default number of recent observations injected into an agent's prompt (1 = only the latest; 0 = none). Overridable per agent via `config.json` `observation_inject`. |

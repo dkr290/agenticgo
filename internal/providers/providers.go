@@ -55,11 +55,12 @@ func (p *Provider) LLM() llm.Provider {
 // encrypted at rest (encKey); they are decrypted transparently on read so
 // callers and the UI keep working with plaintext keys.
 type Store struct {
-	path   string
-	mu     sync.RWMutex
-	list   []*Provider
-	log    logger.Logger
-	encKey crypto.Key
+	path       string
+	mu         sync.RWMutex
+	list       []*Provider
+	log        logger.Logger
+	encKey     crypto.Key
+	maxRetries int
 }
 
 // Open loads (or initializes) the provider store at path. encKey encrypts
@@ -115,6 +116,15 @@ func (s *Store) SetLogger(l logger.Logger) {
 		l = logger.Nop()
 	}
 	s.log = l
+}
+
+// SetMaxRetries wires the per-request retry budget for transient LLM
+// failures (429/5xx, see llm.OpenAIProvider.SetMaxRetries) into every
+// provider the store builds. Set once at startup.
+func (s *Store) SetMaxRetries(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxRetries = n
 }
 
 // List returns all providers, sorted by name.
@@ -180,6 +190,7 @@ func (s *Store) GetLLM(name string) (llm.Provider, error) {
 	s.log.Debug("providers: resolved LLM", "name", name, "base_url", p.BaseURL, "model", p.Model)
 	op := llm.NewOpenAI(p.BaseURL, p.APIKey, p.Model)
 	op.SetLogger(s.log)
+	op.SetMaxRetries(s.maxRetries)
 	return op, nil
 }
 

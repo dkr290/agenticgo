@@ -115,7 +115,13 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   envelope in the JSON) using a key from `AGENTICGO_SECRET_KEY` (base64, 32 bytes)
   or a generated `data/secret.key` (0600). Keys are decrypted transparently on
   load, so callers and the UI still work with plaintext; legacy plaintext keys in
-  `providers.json` are migrated on first boot.
+  `providers.json` are migrated on first boot. Transient LLM failures (429/5xx)
+  are retried per request via `AGENTICGO_LLM_MAX_RETRIES` (default 5, 0 = SDK
+  default 2; wired `config` → `providers.Store.SetMaxRetries` →
+  `OpenAIProvider.SetMaxRetries` → `option.WithMaxRetries` in
+  `RequestOptions()`). The SDK honors `Retry-After`, so a handful of retries
+  rides out a saturated Azure OpenAI TPM window — large contexts re-send the
+  whole prompt once per tool round, which burns tokens-per-minute fast.
 - **Logging**: `internal/logger` defines a small `Logger` interface (Info/Error/
   Debug/Warn with slog-style key/value pairs) backed by stdlib `log/slog`
   (human-readable text to stderr). Set `AGENTICGO_DEBUG=true` to enable debug

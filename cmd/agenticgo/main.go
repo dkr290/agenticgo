@@ -81,6 +81,7 @@ func main() {
 		log.Fatalf("providers: %v", err)
 	}
 	providerStore.SetLogger(lg)
+	providerStore.SetMaxRetries(cfg.LLMMaxRetries)
 
 	// MCP server manager (data/mcp_servers.json). Connections are manual:
 	// use the Connect button on the MCP Servers page to spawn/dial a server
