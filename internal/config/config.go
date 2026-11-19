@@ -51,12 +51,13 @@ type Config struct {
 	// default (2).
 	LLMMaxRetries int
 
-	// ---- Retention knobs (4) ------------------------------------------------
+	// ---- Retention knobs (5) ------------------------------------------------
 	// There are TWO independent, per-agent memory stores, each with TWO limits
-	// (an age TTL and a count cap). A knob at 0 disables that one limit. When
-	// ANY of the four is non-zero, both the lazy per-Run prune and the
-	// background sweeper (StartRetentionSweeper) enforce them. NONE of these
-	// ever touch the GUI-uploaded knowledge-base documents (knowledge_docs).
+	// (an age TTL and a count cap), plus a count cap for published reports. A
+	// knob at 0 disables that one limit. When ANY of the five is non-zero, both
+	// the lazy per-Run prune and the background sweeper (StartRetentionSweeper)
+	// enforce them. NONE of these ever touch the GUI-uploaded knowledge-base
+	// documents (knowledge_docs).
 	//
 	//   Observations = the `observations` table: high-churn, timestamped state
 	//     snapshots recorded via the record_observation tool (e.g. a k8s cron
@@ -84,14 +85,21 @@ type Config struct {
 	KnowledgeTTLDays    int // AGENTICGO_KNOWLEDGE_TTL_DAYS (default 0 = no age prune)
 	KnowledgeKeepLatest int // AGENTICGO_KNOWLEDGE_KEEP      (default 0 = no count cap)
 
+	//   Reports = files an agent writes to reports/ in its workspace. They
+	//     are published read-only (rendered at /reports/<agent>/<file>, so a
+	//     notification can link to the full report) and capped to the newest
+	//     N files per agent by modification time. The cap also bounds what is
+	//     exposed. Pruned before and after every run and by the sweeper.
+	ReportsKeep int // AGENTICGO_REPORTS_KEEP (default 5; 0 = keep all)
+
 	// RetentionSweepMinutes is how often a background sweeper prunes stale
-	// knowledge/observations for ALL agents (including idle ones), in minutes.
-	// Without it, retention only runs lazily at the start of an agent's own
+	// knowledge/observations/reports for ALL agents (including idle ones), in
+	// minutes. Without it, retention only runs lazily around an agent's own
 	// Run — so a dormant agent's expired rows linger until it next runs. The
 	// sweeper only ever starts when at least one retention knob
-	// (Observation/Knowledge TTL or Keep) is non-zero; with all of them at 0
-	// there is nothing to expire, so no sweeper runs. 0 disables the sweeper
-	// (keep the lazy on-run behavior only).
+	// (Observation/Knowledge TTL or Keep, Reports keep) is non-zero; with all
+	// of them at 0 there is nothing to expire, so no sweeper runs. 0 disables
+	// the sweeper (keep the lazy on-run behavior only).
 	RetentionSweepMinutes int
 
 	// SecretKey is the base64-encoded 32-byte master key used to encrypt
@@ -157,6 +165,8 @@ func Load() (*Config, error) {
 	// agent's self-educated knowledge.
 	cfg.KnowledgeTTLDays = getEnvInt("AGENTICGO_KNOWLEDGE_TTL_DAYS", 0)
 	cfg.KnowledgeKeepLatest = getEnvInt("AGENTICGO_KNOWLEDGE_KEEP", 0)
+	// Published reports (workspace reports/): keep only the newest N per agent.
+	cfg.ReportsKeep = getEnvInt("AGENTICGO_REPORTS_KEEP", 5)
 	// Background retention sweep (all agents, incl. idle). Only ever takes
 	// effect when at least one retention knob above is non-zero; see
 	// Engine.StartRetentionSweeper.

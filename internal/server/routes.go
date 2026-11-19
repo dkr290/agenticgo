@@ -48,6 +48,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	s.registerContextFileRoutes(api)
 	s.registerSkillRoutes(api)
 	s.registerImageRoutes(api)
+	s.registerReportRoutes(api)
 	s.registerEvolveRoutes(api)
 	s.registerKnowledgeRoutes(api)
 	s.registerObservationRoutes(api)
@@ -515,6 +516,75 @@ func (s *Server) registerImageRoutes(api huma.API) {
 		out := &visionOutput{}
 		out.Body.Vision = s.engine.EffectiveVision(ag, input.Provider)
 		return out, nil
+	})
+}
+
+// --- Reports (workspace reports/, published read-only) ---
+
+// registerReportRoutes adds the read-only report API. The shareable rendered
+// page (/reports/{key}/{name}) is HTML, not REST, so it lives on the plain mux
+// (see handleReportPage).
+func (s *Server) registerReportRoutes(api huma.API) {
+	tag := []string{"Reports"}
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-reports",
+		Method:      http.MethodGet,
+		Path:        "/api/agents/{key}/reports",
+		Summary:     "List agent reports",
+		Description: "Lists the files the agent wrote to reports/ in its workspace, newest first, with links to the rendered page and the raw file. Only the newest AGENTICGO_REPORTS_KEEP reports are kept.",
+		Tags:        tag,
+	}, func(ctx context.Context, input *struct {
+		Key string `path:"key" doc:"Agent key"`
+	}) (*reportListOutput, error) {
+		list, err := s.agents.ListReports(input.Key)
+		if err != nil {
+			return nil, s.logErr(s.reportError(err))
+		}
+		out := &reportListOutput{}
+		out.Body.Keep = s.cfg.ReportsKeep
+		out.Body.Reports = make([]reportInfo, 0, len(list))
+		for _, rp := range list {
+			out.Body.Reports = append(out.Body.Reports, reportInfo{
+				Name:     rp.Name,
+				Size:     rp.Size,
+				Modified: rp.Modified,
+				URL:      reportPageURL(input.Key, rp.Name),
+				RawURL:   reportRawURL(input.Key, rp.Name),
+			})
+		}
+		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "read-report",
+		Method:      http.MethodGet,
+		Path:        "/api/agents/{key}/reports/{name}",
+		Summary:     "Read a report (raw)",
+		Description: "Returns one report's raw content as text/plain. Share /reports/{key}/{name} for the rendered page.",
+		Tags:        tag,
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Raw report content",
+				Content: map[string]*huma.MediaType{
+					"text/plain": {Schema: &huma.Schema{Type: huma.TypeString}},
+				},
+			},
+		},
+	}, func(ctx context.Context, input *struct {
+		Key  string `path:"key" doc:"Agent key"`
+		Name string `path:"name" doc:"Report file name"`
+	}) (*reportRawOutput, error) {
+		data, _, err := s.agents.ReadReport(input.Key, input.Name)
+		if err != nil {
+			return nil, s.logErr(s.reportError(err))
+		}
+		return &reportRawOutput{
+			ContentType:  "text/plain; charset=utf-8",
+			NoSniff:      "nosniff",
+			CacheControl: "no-store",
+			Body:         data,
+		}, nil
 	})
 }
 
@@ -1369,12 +1439,12 @@ func (s *Server) registerPromptRoutes(api huma.API) {
 	tag := []string{"System Prompt"}
 
 	huma.Register(api, huma.Operation{
-		OperationID:   "get-system-prompt",
-		Method:        http.MethodGet,
-		Path:          "/api/agents/{key}/prompt",
-		Summary:       "Preview the full system prompt for an agent",
-		Description:   "Returns the complete system prompt that would be sent to the LLM for this agent — base prompt + context files + skills + knowledge docs list + reference images list + observations + extra commands + accumulated knowledge.",
-		Tags:          tag,
+		OperationID: "get-system-prompt",
+		Method:      http.MethodGet,
+		Path:        "/api/agents/{key}/prompt",
+		Summary:     "Preview the full system prompt for an agent",
+		Description: "Returns the complete system prompt that would be sent to the LLM for this agent — base prompt + context files + skills + knowledge docs list + reference images list + observations + extra commands + accumulated knowledge.",
+		Tags:        tag,
 	}, func(ctx context.Context, input *struct {
 		Key string `path:"key" doc:"Agent key"`
 	}) (*promptOutput, error) {

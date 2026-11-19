@@ -169,6 +169,7 @@
     <div class="section">Data</div>
     <div class="item" data-page="memory"><span class="icon">🧠</span> Memory</div>
     <div class="item" data-page="kb"><span class="icon">📚</span> Knowledge Base</div>
+    <div class="item" data-page="reports"><span class="icon">📄</span> Reports</div>
     <div class="section">System</div>
     <div class="item" data-page="providers"><span class="icon">🧠</span> Providers</div>
   </div>
@@ -443,6 +444,19 @@
     </div>
   </div>
 
+  <!-- Reports -->
+  <div class="page" id="page-reports">
+    <div class="page-head"><h1>Reports</h1><div class="sub">Reports agents publish by writing files to <code>reports/</code> in their workspace — the same pages they link to from notifications. Only the newest are kept per agent (<code>AGENTICGO_REPORTS_KEEP</code>).</div></div>
+    <div class="page-body">
+      <div class="toolbar">
+        <select id="rep-agent" style="max-width:220px"></select>
+        <div class="spacer"></div>
+        <button class="ghost" id="rep-refresh">Refresh</button>
+      </div>
+      <div id="rep-list"></div>
+    </div>
+  </div>
+
   <!-- Providers -->
   <div class="page" id="page-providers">
     <div class="page-head"><h1>Providers</h1><div class="sub">OpenAI-compatible endpoints (Ollama, LM Studio, vLLM, OpenAI). The default provider backs chats unless one is picked.</div></div>
@@ -515,7 +529,7 @@
 
   // ---------- navigation ----------
   let currentAgent = null;
-  const pages = ['overview','chat','history','agents','agent-detail','skills','tools','commands','mcp','cron','memory','kb','providers'];
+  const pages = ['overview','chat','history','agents','agent-detail','skills','tools','commands','mcp','cron','memory','kb','reports','providers'];
   function show(page) {
     pages.forEach(p => $('page-' + p).classList.toggle('active', p === page));
     document.querySelectorAll('.nav .item').forEach(i => i.classList.toggle('active', i.dataset.page === page));
@@ -529,6 +543,7 @@
     if (page === 'cron') loadCron();
     if (page === 'memory') loadMemoryPage();
     if (page === 'kb') loadKBPage();
+    if (page === 'reports') loadReportsPage();
     if (page === 'providers') loadProviders();
     if (page === 'chat') return fillChatAgents().then(() => { updateChatProvider(); refreshAttach(); });
     return Promise.resolve();
@@ -1563,6 +1578,40 @@
         .catch(e => toast('Save failed: ' + e.message));
     });
   });
+
+  // ---------- reports page ----------
+  // Files agents publish to reports/ in their workspace. Open shows the
+  // rendered page — the same link agents share in notifications.
+  function loadReportsPage(){
+    api('/api/agents').then(list => {
+      const sel = $('rep-agent'); const prev = sel.value || currentAgent;
+      sel.innerHTML = '';
+      (list||[]).forEach(a => { const o=document.createElement('option'); o.value=a.key; o.textContent=a.name+' ('+a.key+')'; sel.appendChild(o); });
+      if (prev) sel.value = prev;
+      if (sel.value) loadReports();
+    }).catch(()=>{});
+  }
+  $('rep-agent').addEventListener('change', loadReports);
+  $('rep-refresh').addEventListener('click', loadReports);
+  function loadReports(){
+    const agent = $('rep-agent').value; if (!agent) return;
+    const el = $('rep-list');
+    api('/api/agents/' + encodeURIComponent(agent) + '/reports').then(res => {
+      const list = (res && res.reports) || [];
+      const keep = res && res.keep > 0
+        ? 'Only the latest ' + res.keep + ' reports are kept per agent.'
+        : 'All reports are kept (AGENTICGO_REPORTS_KEEP=0).';
+      if (!list.length) { el.innerHTML = '<div class="empty">No reports for this agent yet. ' + esc(keep) + '</div>'; return; }
+      el.innerHTML = '<div class="sub" style="margin-bottom:10px">' + esc(keep) + '</div>' +
+        '<table class="list"><thead><tr><th>Report</th><th>Updated</th><th>Size</th><th></th></tr></thead><tbody>' +
+        list.map(r => '<tr><td><a href="' + esc(r.url) + '" target="_blank" rel="noopener noreferrer">' + esc(r.name) + '</a></td>' +
+          '<td>' + esc(new Date(r.modified).toLocaleString()) + '</td>' +
+          '<td>' + Math.max(1, Math.round(r.size / 1024)) + ' KB</td>' +
+          '<td><a href="' + esc(r.url) + '" target="_blank" rel="noopener noreferrer">Open</a> · ' +
+          '<a href="' + esc(r.raw_url) + '" target="_blank" rel="noopener noreferrer">Raw</a></td></tr>').join('') +
+        '</tbody></table>';
+    }).catch(() => { el.innerHTML = '<div class="empty">Failed to load reports.</div>'; });
+  }
 
   // ---------- providers ----------
   let editingProvider = null;

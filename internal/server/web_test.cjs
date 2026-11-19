@@ -111,3 +111,23 @@ test('LLM reset uses the capability-preserving endpoint', async () => {
   assert.equal(reset.url, '/api/agents/demo/llm-config');
   assert.deepEqual(JSON.parse(reset.opts.body), {});
 });
+
+test('Reports page lists the selected agent\'s reports with escaped names', async () => {
+  const {$, context, fixtures} = await app();
+  const name = '<img src=x onerror=alert(1)>.md';
+  fixtures.set('/api/agents/demo/reports', {keep:5, reports:[{
+    name, size:16845, modified:'2026-11-19T10:02:00Z',
+    url:'/reports/demo/' + encodeURIComponent(name), raw_url:'/api/agents/demo/reports/' + encodeURIComponent(name),
+  }]});
+  context.showPage('reports'); await flush();
+  assert.equal($('rep-agent').value, 'demo');
+  const html = $('rep-list').innerHTML;
+  assert.ok(html.includes('href="/reports/demo/' + encodeURIComponent(name) + '"'));
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;.md'));
+  assert.ok(!html.includes('<img'));
+  assert.ok(html.includes('Only the latest 5 reports are kept'));
+
+  fixtures.set('/api/agents/demo/reports', {keep:0, reports:[]});
+  $('rep-refresh').click(); await flush();
+  assert.ok($('rep-list').innerHTML.includes('All reports are kept'));
+});

@@ -10,6 +10,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/openai/openai-go/v3 v3.98.0
 	github.com/robfig/cron/v3 v3.0.1
+	github.com/yuin/goldmark v1.8.7
 	modernc.org/sqlite v1.61.0
 )
 

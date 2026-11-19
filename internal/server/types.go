@@ -4,6 +4,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/mcp"
 	"github.com/dkr290/agenticgo/internal/providers"
@@ -126,6 +128,35 @@ type visionOutput struct {
 	Body struct {
 		Vision bool `json:"vision" doc:"Whether the effective provider/model accepts image attachments"`
 	}
+}
+
+// --- Reports (workspace reports/, published read-only) ---
+
+// reportInfo is one published report of an agent.
+type reportInfo struct {
+	Name     string    `json:"name" example:"security-audit-2026-11-19-1002.md"`
+	Size     int64     `json:"size" example:"16845" doc:"Size in bytes"`
+	Modified time.Time `json:"modified" doc:"Last modification time (UTC)"`
+	URL      string    `json:"url" example:"/reports/demo/security-audit-2026-11-19-1002.md" doc:"Rendered HTML page — the link to share"`
+	RawURL   string    `json:"raw_url" example:"/api/agents/demo/reports/security-audit-2026-11-19-1002.md" doc:"Raw file content"`
+}
+
+// reportListOutput lists an agent's reports, newest first.
+type reportListOutput struct {
+	Body struct {
+		Keep    int          `json:"keep" example:"5" doc:"How many reports are kept per agent (AGENTICGO_REPORTS_KEEP; 0 = all)"`
+		Reports []reportInfo `json:"reports"`
+	}
+}
+
+// reportRawOutput is one report's raw content. It is always served as
+// text/plain with nosniff: the agent wrote it, so it must never render as
+// HTML on the agenticgo origin.
+type reportRawOutput struct {
+	ContentType  string `header:"Content-Type"`
+	NoSniff      string `header:"X-Content-Type-Options"`
+	CacheControl string `header:"Cache-Control"`
+	Body         []byte
 }
 
 // --- Evolve ---
