@@ -1439,12 +1439,12 @@ func (s *Server) registerPromptRoutes(api huma.API) {
 	tag := []string{"System Prompt"}
 
 	huma.Register(api, huma.Operation{
-		OperationID:   "get-system-prompt",
-		Method:        http.MethodGet,
-		Path:          "/api/agents/{key}/prompt",
-		Summary:       "Preview the full system prompt for an agent",
-		Description:   "Returns the complete system prompt that would be sent to the LLM for this agent — base prompt + context files + skills + knowledge docs list + reference images list + observations + extra commands + accumulated knowledge.",
-		Tags:          tag,
+		OperationID: "get-system-prompt",
+		Method:      http.MethodGet,
+		Path:        "/api/agents/{key}/prompt",
+		Summary:     "Preview the full system prompt for an agent",
+		Description: "Returns the complete system prompt that would be sent to the LLM for this agent — base prompt + context files + skills + knowledge docs list + reference images list + observations + extra commands + accumulated knowledge.",
+		Tags:        tag,
 	}, func(ctx context.Context, input *struct {
 		Key string `path:"key" doc:"Agent key"`
 	}) (*promptOutput, error) {
