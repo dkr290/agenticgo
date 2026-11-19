@@ -47,7 +47,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   Titles are listed in the system prompt so the agent knows to search.
 - **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
   Pages: Overview, Chat, Chat History, Agents (per-agent Files/Skills/MCP Tools/
-  Knowledge/Images/Config tabs), Skills, Built-in Tools, MCP Servers,
+  Knowledge/Images/Reports/Config tabs), Skills, Built-in Tools, MCP Servers,
   Cron, Providers. Past conversations live on the dedicated
   **Chat History** page (not the sidebar, so long histories don't bloat the
   nav): a table of all sessions (`GET /api/sessions`) with an agent dropdown
@@ -161,6 +161,17 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   data-URLs, and sent as OpenAI `image_url` content parts. Non-vision models have
   attach blocked up front and any images dropped in `Engine.Run`, so they never
   error. Resolution: `Engine.EffectiveVision` (agent override > provider flag).
+- **Reports (published, read-only)**: files an agent writes to `reports/` in its
+  workspace (via `write_file`) are published so notifications can link to the
+  full report: `GET /reports/{key}/{name}` renders one as a standalone HTML
+  page (goldmark, GitHub-flavored Markdown; other extensions as `<pre>` text),
+  `GET /api/agents/{key}/reports` lists them newest first (with `url` /
+  `raw_url`), and `GET /api/agents/{key}/reports/{name}` returns the raw file
+  as `text/plain`. Agents → Reports tab lists them with Open/Raw links. Only
+  regular, non-hidden files directly in `reports/` count; the newest
+  `AGENTICGO_REPORTS_KEEP` (default 5, 0 = keep all) by modification time are
+  kept — `Registry.PruneReports` runs before and after every `Engine.Run` and on
+  the retention sweeper. A pruned report's link returns 404 explaining the cap.
 - **Security**: filesystem tools use `os.Root` to enforce the workspace boundary,
   including symlinks. Standard `exec` commands run through Linux bubblewrap with
   only a writable workspace/private tmp, read-only system binaries/libraries,
@@ -190,7 +201,8 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
     an agent's own `Run` AND on a background sweeper (`Engine.StartRetentionSweeper`,
     wired in `main.go`) so expired rows are deleted on a schedule even for idle agents.
     The sweeper interval is `AGENTICGO_RETENTION_SWEEP_MINUTES` (default 60; 0 = off) and
-    it only ever starts when at least one retention knob is non-zero — with all of them
+    it only ever starts when at least one retention knob (including
+    `AGENTICGO_REPORTS_KEEP`) is non-zero — with all of them
     at 0 there is nothing to expire, so no sweeper runs. Retention is separate from
     `knowledge_docs` (GUI-uploaded), which is never auto-pruned.
   - `observations` — high-churn, timestamped findings from recurring agents (e.g. a
@@ -242,6 +254,13 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   knowledge to 0 / 0. A zero TTL disables age pruning even with a positive count cap.
 - Cron skips overlapping executions of the same job and cancels/waits on shutdown.
 - REST document reads/deletes must include the agent key in the SQL predicate.
+- Agent-written files are never served as active HTML. Reports resolve through
+  `os.Root` (workspace → `reports/`), names must be a single plain segment
+  (`ValidReportName`), and only regular files are read — symlinks and
+  directories are not found. The raw API is always `text/plain` + `nosniff`;
+  the rendered page relies on goldmark's safe defaults (raw HTML dropped,
+  `javascript:`/`data:` links neutralized) plus a CSP of `default-src 'none'`
+  with the page stylesheet allowed by hash. Keep both when changing either.
 
 ## Architecture map (how it fits together)
 
@@ -254,6 +273,7 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 - `internal/agents` — file-based agent CRUD + context files. `Registry` owns the
   `AgentsDir`. `Agent.SystemPrompt()` composes context files. `Registry.Create`
   seeds the initial context files from `internal/agenttemplates`.
+  `reports.go` lists, reads and prunes the published workspace `reports/`.
 - `internal/agenttemplates` — embedded (`go:embed`) initial context-file
   templates (`templates/*.md`); `Render(name, Data)` substitutes `{{.Name}}` /
   `{{.Role}}` for SOUL.md / IDENTITY.md.
@@ -293,7 +313,9 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   connect failure keeps the legacy `{"error","server"}` 502 body via the
   custom `connectError` (`huma.StatusError` + `ContentTypeFilter`). Optional
   request-body fields carry `omitempty` or Huma 422-rejects requests the UI
-  sends. The `/ws` WebSocket chat and the embedded SPA stay on the plain mux.
+  sends. The `/ws` WebSocket chat, the rendered report page
+  (`/reports/{key}/{name}`, `reports.go`) and the embedded SPA stay on the
+  plain mux.
   The agent key (and optional provider name) flows through WS messages and
   API paths.
 - `internal/store` — SQLite. `messages`, `knowledge`, and `observations` tables all
@@ -321,6 +343,8 @@ data/
                                   #   + observation_inject (recent-observation count)
       images/                  # reference images for vision models (Images tab)
       workspace/               # per-agent tool jail
+        reports/               # published reports (Reports tab, /reports/<key>/<file>;
+                               #   newest AGENTICGO_REPORTS_KEEP kept)
 ```
 
 ## Explicit non-goals (do not add without being asked)
@@ -373,6 +397,8 @@ Per-agent workspaces are wired into the tool loop.
 - DI: **manual wiring in `cmd/agenticgo/main.go`** — no FX/DI framework yet.
 - UI: plain HTML/JS embedded with `go:embed` in `internal/server/web/` (must live
   inside the `server` package for the embed pattern to resolve).
+- Markdown rendering (report pages only): `github.com/yuin/goldmark` with the
+  GFM extension, in its default safe mode — never enable `html.WithUnsafe()`.
 
 ## Conventions
 
@@ -408,6 +434,8 @@ curl -X POST localhost:18099/api/chat \
   image retention), `history.go` (HistoryProvider, atomic checkpoints +
   translation), `mcp.go` (MCP tool FuncTool)
 - `internal/agents/agents.go` — agent registry + context files
+- `internal/agents/reports.go` — published workspace reports: list/read
+  (`os.Root`, regular files only) and `PruneReports` (newest N)
 - `internal/agenttemplates/agenttemplates.go` — `go:embed` initial context-file templates (`templates/`)
 - `internal/skills/skills.go` — SKILL.md loader + prompt composition
 - `internal/providers/providers.go` — named provider configs (JSON store)
@@ -429,4 +457,6 @@ curl -X POST localhost:18099/api/chat \
 - `internal/server/routes.go` — every REST endpoint as a `huma.Register` operation
 - `internal/server/types.go` — shared request/response types (`doc`/`example`
   tags feed the generated OpenAPI spec)
+- `internal/server/reports.go` — rendered report page (`/reports/{key}/{name}`,
+  goldmark + strict CSP) and report URL/error helpers
 - `internal/server/web/index.html` — the whole UI (single file, no build step)

@@ -243,9 +243,10 @@ func (e *Engine) BuildSystemPrompt(ctx context.Context, ag *agents.Agent) string
 
 // pruneRetention applies the configured retention limits for one agent:
 // age-based expiry (TTL) and/or a count cap on the newest entries, for both
-// observations and self-educated knowledge. Best-effort — failures are
-// non-fatal. Each knob at 0 disables that limit. Shared by Run (lazy, per
-// running agent) and StartRetentionSweeper (background, all agents).
+// observations and self-educated knowledge, plus the published-reports cap.
+// Best-effort — failures are non-fatal. Each knob at 0 disables that limit.
+// Shared by Run (lazy, per running agent) and StartRetentionSweeper
+// (background, all agents).
 func (e *Engine) pruneRetention(ctx context.Context, agentKey string) {
 	if e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 {
 		var cutoff int64
@@ -261,13 +262,24 @@ func (e *Engine) pruneRetention(ctx context.Context, agentKey string) {
 		}
 		_ = e.store.PruneKnowledge(ctx, agentKey, cutoff, e.cfg.KnowledgeKeepLatest)
 	}
+	e.pruneReports(agentKey)
+}
+
+// pruneReports keeps only the newest ReportsKeep files in the agent's
+// workspace reports/ directory (0 = keep all). Best-effort, like the other
+// limits.
+func (e *Engine) pruneReports(agentKey string) {
+	if e.cfg.ReportsKeep > 0 {
+		_, _ = e.agents.PruneReports(agentKey, e.cfg.ReportsKeep)
+	}
 }
 
 // retentionEnabled reports whether any retention knob is non-zero. When all
 // are 0 there is nothing to expire, so neither Run nor the sweeper prunes.
 func (e *Engine) retentionEnabled() bool {
 	return e.cfg.ObservationTTLDays > 0 || e.cfg.ObservationKeepLatest > 0 ||
-		e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0
+		e.cfg.KnowledgeTTLDays > 0 || e.cfg.KnowledgeKeepLatest > 0 ||
+		e.cfg.ReportsKeep > 0
 }
 
 // StartRetentionSweeper launches a background goroutine that periodically
@@ -338,16 +350,20 @@ func (e *Engine) Run(ctx context.Context, agentKey, session, userMessage, provid
 	}
 
 	// Retention: prune stale observations so recurring agents don't accumulate
-	// misleading historical state, and bound self-educated knowledge so a
-	// long-lived agent can't grow it without limit. Best-effort; failures are
-	// non-fatal. Each knob at 0 disables that limit.
+	// misleading historical state, bound self-educated knowledge so a
+	// long-lived agent can't grow it without limit, and cap published reports.
+	// Best-effort; failures are non-fatal. Each knob at 0 disables that limit.
 	e.pruneRetention(ctx, agentKey)
 
 	op, ok := provider.(*llm.OpenAIProvider)
 	if !ok {
 		return "", fmt.Errorf("chat requires an OpenAI-compatible provider, got %T", provider)
 	}
-	return e.runMAF(ctx, ag, agentKey, session, userMessage, op, images, vision, emit)
+	reply, err := e.runMAF(ctx, ag, agentKey, session, userMessage, op, images, vision, emit)
+	// The run may have written a new report: apply the reports cap now rather
+	// than at the next run or sweep.
+	e.pruneReports(agentKey)
+	return reply, err
 }
 
 // runTools builds the per-run tool set for an agent: the single source of

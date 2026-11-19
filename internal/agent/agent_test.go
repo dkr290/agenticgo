@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dkr290/agenticgo/internal/agents"
 	"github.com/dkr290/agenticgo/internal/config"
@@ -512,6 +515,7 @@ func TestRetentionEnabledGating(t *testing.T) {
 	// All knobs zero => nothing to expire.
 	e.cfg.ObservationTTLDays, e.cfg.ObservationKeepLatest = 0, 0
 	e.cfg.KnowledgeTTLDays, e.cfg.KnowledgeKeepLatest = 0, 0
+	e.cfg.ReportsKeep = 0
 	if e.retentionEnabled() {
 		t.Fatal("all knobs at 0 must disable retention")
 	}
@@ -522,9 +526,11 @@ func TestRetentionEnabledGating(t *testing.T) {
 		func() { e.cfg.KnowledgeKeepLatest = 1000 },
 		func() { e.cfg.ObservationTTLDays = 14 },
 		func() { e.cfg.ObservationKeepLatest = 200 },
+		func() { e.cfg.ReportsKeep = 5 },
 	} {
 		e.cfg.ObservationTTLDays, e.cfg.ObservationKeepLatest = 0, 0
 		e.cfg.KnowledgeTTLDays, e.cfg.KnowledgeKeepLatest = 0, 0
+		e.cfg.ReportsKeep = 0
 		set()
 		if !e.retentionEnabled() {
 			t.Fatal("a single non-zero knob must enable retention")
@@ -572,6 +578,90 @@ func TestRetentionSweeperSweepsAllAgents(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("agent %q must be capped to 2 entries, got %d (%v)", key, len(got), got)
 		}
+	}
+}
+
+// seedReports writes n reports with ascending, past modification times
+// (old-1.md is the oldest) into the agent's workspace reports/ directory.
+func seedReports(t *testing.T, ar *agents.Registry, agentKey string, n int) {
+	t.Helper()
+	dir := filepath.Join(ar.Root(), agentKey, "workspace", agents.ReportsDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 1; i <= n; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("old-%d.md", i))
+		if err := os.WriteFile(p, []byte("report"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mod := base.Add(time.Duration(i) * time.Hour)
+		if err := os.Chtimes(p, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func reportNamesFor(t *testing.T, ar *agents.Registry, agentKey string) []string {
+	t.Helper()
+	list, err := ar.ListReports(agentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, r := range list {
+		names = append(names, r.Name)
+	}
+	return names
+}
+
+// TestRetentionCapsReportsForAllAgents verifies the sweeper path keeps only
+// the newest ReportsKeep reports per agent, including idle agents, and that
+// ReportsKeep=0 keeps everything.
+func TestRetentionCapsReportsForAllAgents(t *testing.T) {
+	e, ar := newTestEngine(t)
+	ctx := context.Background()
+	if _, err := ar.Create("idle", "Idle", "never runs", "", agents.AgentConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"demo", "idle"} {
+		seedReports(t, ar, key, 4)
+	}
+
+	e.cfg.ReportsKeep = 0
+	e.pruneRetention(ctx, "demo")
+	if got := reportNamesFor(t, ar, "demo"); len(got) != 4 {
+		t.Fatalf("ReportsKeep=0 must keep everything, got %v", got)
+	}
+
+	e.cfg.ReportsKeep = 2
+	for _, key := range []string{"demo", "idle"} {
+		e.pruneRetention(ctx, key)
+		if got, want := reportNamesFor(t, ar, key), []string{"old-4.md", "old-3.md"}; !slices.Equal(got, want) {
+			t.Fatalf("agent %q reports = %v, want %v", key, got, want)
+		}
+	}
+}
+
+// TestRunCapsReportsWrittenDuringTheRun verifies a report written by the run
+// itself is counted immediately: the cap is applied again after the run, so
+// the oldest report goes and the new one stays.
+func TestRunCapsReportsWrittenDuringTheRun(t *testing.T) {
+	e, ar := newTestEngine(t)
+	e.cfg.ReportsKeep = 2
+	seedReports(t, ar, "demo", 2)
+	e.SetProviderLookup(&trackingLookup{p: scriptedProvider(t, func(call int, _ map[string]any) []string {
+		if call == 1 {
+			return sseToolCall("call_1", "write_file", `{"path":"reports/new.md","content":"# New report"}`)
+		}
+		return sseText("Report written.")
+	})})
+
+	if _, err := e.Run(context.Background(), "demo", "s1", "write the report", "", nil, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := reportNamesFor(t, ar, "demo"), []string{"new.md", "old-2.md"}; !slices.Equal(got, want) {
+		t.Fatalf("reports after run = %v, want %v", got, want)
 	}
 }
 

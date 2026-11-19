@@ -79,8 +79,10 @@ func New(cfg *config.Config, eng *agent.Engine, ar *agents.Registry, st *store.S
 	api := humago.New(mux, humaCfg)
 	s.registerRoutes(api)
 
-	// Non-REST surface: WebSocket chat and the embedded chat UI.
+	// Non-REST surface: WebSocket chat, the shareable rendered report page
+	// (HTML, linked from notifications) and the embedded chat UI.
 	mux.HandleFunc("GET /ws", s.handleWS)
+	mux.HandleFunc("GET /reports/{key}/{name}", s.handleReportPage)
 
 	static, err := fs.Sub(webFS, "web")
 	if err != nil {

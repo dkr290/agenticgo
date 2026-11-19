@@ -26,7 +26,7 @@ single static Go binary or a Docker container. Kubernetes manifests are on the r
   Knowledge Base page. They're **full-text indexed over content** (SQLite FTS5) so the
   agent recalls them via the `search_docs` tool — not bulk-injected into prompts.
 - **Sidebar Web UI** — dark, GoClaw-inspired SPA (no build step): Overview, Chat,
-  Agents (with a per-agent Files/Skills/Knowledge/Config editor), Skills (with ZIP upload),
+  Agents (with a per-agent Files/Skills/Knowledge/Reports/Config editor), Skills (with ZIP upload),
   Built-in Tools, MCP Servers, Cron, Memory, Knowledge Base, and Providers.
 - **Agent loop** — the model can call tools, observe results, and iterate until it
   answers (capped to prevent runaway loops).
@@ -69,6 +69,11 @@ single static Go binary or a Docker container. Kubernetes manifests are on the r
   (`robfig/cron`): each enabled job runs its agent on its own cron session. The Cron page
   shows live status (armed / next run). Overlapping ticks of the same job are skipped;
   shutdown cancels and waits for active jobs. Chat turns sharing an agent/session are serialized.
+- **Reports** — files an agent writes to `reports/` in its workspace are published
+  read-only so a notification (e.g. a Teams card) can link to the full report:
+  `/reports/<agent>/<file>` renders Markdown as a readable page (tables, lists, links),
+  the Agents → Reports tab lists them, and only the newest `AGENTICGO_REPORTS_KEEP`
+  (default 5) are kept per agent.
 
 ## Agent layout on disk
 
@@ -88,6 +93,7 @@ data/
     config.json          # LLM settings + enabled_skills/tools/commands/builtin_tools
     images/              # reference images for vision-capable models
     workspace/           # per-agent file jail for tools
+      reports/           # published reports (newest AGENTICGO_REPORTS_KEEP kept)
 ```
 
 ### SKILL.md format
@@ -311,6 +317,7 @@ node --test internal/server/web_test.cjs
 | `AGENTICGO_KNOWLEDGE_INJECT` | `25` | How many recent curated-knowledge entries are injected into an agent's prompt (app-wide). `0` disables injection while keeping memory searchable. |
 | `AGENTICGO_KNOWLEDGE_TTL_DAYS` | `0` (off) | **Opt-in age-based retention** for self-educated knowledge. `0` = never expire by age (the default — nothing is deleted). Example: `365` deletes entries older than ~1 year on the next run. Affects only the agent's `knowledge` (self-educated learnings) — never the GUI-uploaded knowledge-base documents. |
 | `AGENTICGO_KNOWLEDGE_KEEP` | `0` (off) | **Opt-in count-based retention.** `0` = no cap (the default). Example: `1000` keeps only the newest 1000 entries per agent at cleanup time. Set either or both retention limits; both apply age-then-count. Leave both `0` to keep everything forever. |
+| `AGENTICGO_REPORTS_KEEP` | `5` | How many published reports (files in the agent's workspace `reports/`) each agent keeps, newest by modification time. Older ones are deleted before and after every run and by the background sweep. `0` keeps all. |
 | `AGENTICGO_SYSTEM_PROMPT` | built-in | Base system prompt (prepended to every agent) |
 | `AGENTICGO_RETENTION_SWEEP_MINUTES` | `60` | Background retention interval for all agents. `0` disables the sweeper; per-run pruning still applies. |
 | `AGENTICGO_DEBUG` | `false` | Enable debug logs. |
@@ -355,6 +362,7 @@ call Evolve after each run.** It can save lessons during the normal loop through
 | Curated knowledge | `memory_save` or Evolve | Default: no automatic deletion | Newest 25 injected by default; other entries searchable with `memory_search` |
 | Conversation history | Engine saves messages and tool results | No automatic deletion or retention env var | Latest 40 message rows loaded for a normal run, omitting incomplete tool exchanges |
 | Uploaded knowledge-base documents | Knowledge Base UI/API | No automatic deletion | Titles in the prompt; content recalled through `search_docs` and `read_doc` |
+| Published reports (`reports/` in the workspace) | The agent via `write_file` | Newest 5 files per agent (`AGENTICGO_REPORTS_KEEP`) | Not injected; readable with `read_file`, and published at `/reports/<agent>/<file>` |
 
 Observations and knowledge are **per agent**, shared across that agent's chat
 sessions and cron jobs. Each cron job has its own persistent conversation named
@@ -383,6 +391,7 @@ applied separately to each agent:
 | `AGENTICGO_KNOWLEDGE_TTL_DAYS` | `0` | Disable knowledge age-based deletion |
 | `AGENTICGO_KNOWLEDGE_KEEP` | `0` | Disable the knowledge count limit |
 | `AGENTICGO_KNOWLEDGE_INJECT` | `25` | Inject no knowledge; entries remain searchable |
+| `AGENTICGO_REPORTS_KEEP` | `5` | Keep every published report |
 | `AGENTICGO_RETENTION_SWEEP_MINUTES` | `60` | Disable background cleanup; per-run cleanup still applies |
 
 **TTL and keep-count limits are independent.** Cleanup deletes entries older than
@@ -396,8 +405,10 @@ saved entries; multiple entries per run fill the limit faster.
 
 Cleanup runs at the start of an agent run and on the background sweep (every 60
 minutes by default). Expired or excess entries are removed at cleanup time, not
-immediately on every save. No background sweeper starts if all retention limits
-are disabled. Uploaded reference documents are never affected by these limits.
+immediately on every save. Reports are also capped right after each run, so a
+report written by the run counts immediately. No background sweeper starts if all
+retention limits are disabled. Uploaded reference documents are never affected by
+these limits.
 
 An agent's **Config → Observations injected** (`config.json` `observation_inject`)
 overrides `AGENTICGO_OBSERVATION_INJECT`; leaving it empty inherits the global
@@ -566,6 +577,16 @@ saved instructions. Edited context files are loaded on the next run.
 - `DELETE /api/agents/{key}/knowledge/{id}` — delete a knowledge entry (Memory page).
 - `GET /api/agents/{key}/observations` — recent observations (newest first).
 - `POST /api/agents/{key}/observations` — record one. Body: `{ "content": "..." }`.
+
+### Reports
+Files an agent writes to `reports/` in its workspace (newest `AGENTICGO_REPORTS_KEEP`
+kept). Only regular, non-hidden files directly in `reports/` are published.
+- `GET /reports/{key}/{name}` — the report as a readable HTML page (Markdown rendered;
+  other files as preformatted text). This is the link to share, e.g. in a Teams card.
+  Scripts and raw HTML in a report never run (safe Markdown rendering + strict CSP).
+- `GET /api/agents/{key}/reports` — list reports, newest first:
+  `{ "keep": 5, "reports": [{ "name", "size", "modified", "url", "raw_url" }] }`.
+- `GET /api/agents/{key}/reports/{name}` — raw file content (`text/plain`).
 
 ### Built-in tools
 - `GET /api/tools` — list registered built-in tools.
