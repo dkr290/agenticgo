@@ -8,7 +8,7 @@ Context for AI coding agents working on **agenticgo**.
 GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
 **clean-room reimplementation of ideas** — do NOT copy GoClaw code (CC BY-NC).
 
-**Module path:** `banking-circle-sa.ghe.com/development/daai-aiops-agenticgo`
+**Module path:** `github.com/dkr290/agenticgo`
 
 ## Scope (what it does)
 
