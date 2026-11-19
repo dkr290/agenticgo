@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Name}} · {{.Agent}}</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<header>
+  <div><strong>{{.Agent}}</strong> · {{.Name}}</div>
+  <div>Updated {{.Modified}} · <a href="{{.RawURL}}">Raw</a> · <a href="/">agenticgo</a></div>
+</header>
+<main>
+{{if .Plain}}<pre>{{.Text}}</pre>{{else}}{{.HTML}}{{end}}
+</main>
+</body>
+</html>

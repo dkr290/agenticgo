@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/sha256"
+	"embed"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -24,57 +25,36 @@ import (
 // javascript:/vbscript:/data: links are neutralized.
 var reportMarkdown = goldmark.New(goldmark.WithExtensions(extension.GFM))
 
-// reportCSS styles the rendered page. It is the page's only inline content
-// and is allowed by hash, so the CSP needs no 'unsafe-inline' at all.
-const reportCSS = `:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--muted:#656d76;--border:#d0d7de;--code:#f6f8fa;--link:#0969da}
-@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8d96a0;--border:#30363d;--code:#161b22;--link:#4493f8}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-header{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 16px;padding:12px 24px;border-bottom:1px solid var(--border);font-size:13px;color:var(--muted)}
-header strong{color:var(--fg)}
-main{max-width:1100px;margin:0 auto;padding:8px 24px 48px}
-a{color:var(--link)}
-h1,h2,h3,h4{line-height:1.25;margin:1.4em 0 .6em}
-h1,h2{padding-bottom:.3em;border-bottom:1px solid var(--border)}
-h1{font-size:1.7em}
-h2{font-size:1.35em}
-table{display:block;overflow-x:auto;border-collapse:collapse;margin:1em 0}
-th,td{border:1px solid var(--border);padding:6px 12px;text-align:left;vertical-align:top}
-th{background:var(--code)}
-code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;background:var(--code);border-radius:6px}
-code{padding:.15em .35em}
-pre{padding:12px 16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
-pre code{padding:0;background:none}
-blockquote{margin:1em 0;padding:0 1em;color:var(--muted);border-left:4px solid var(--border)}
-li{margin:.25em 0}`
+// reportPageFS holds the rendered report page — an html/template and its
+// stylesheet — as plain files embedded like web/, but not served directly.
+//
+//go:embed reportpage
+var reportPageFS embed.FS
 
-// reportPageCSP blocks scripts, images, frames, forms and every other
-// resource: an agent-written report can only ever display text.
-var reportPageCSP = func() string {
-	sum := sha256.Sum256([]byte(reportCSS))
-	return "default-src 'none'; style-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) +
+var (
+	reportPageTmpl = template.Must(template.ParseFS(reportPageFS, "reportpage/report.html"))
+	// reportCSS is the page's only inline content; it is allowed by hash, so
+	// the CSP needs no 'unsafe-inline' at all.
+	reportCSS = mustReadEmbedded(reportPageFS, "reportpage/report.css")
+	// reportPageCSP blocks scripts, images, frames, forms and every other
+	// resource: an agent-written report can only ever display text.
+	reportPageCSP = "default-src 'none'; style-src '" + cspHash(reportCSS) +
 		"'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-}()
+)
 
-var reportPageTmpl = template.Must(template.New("report").Parse(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Name}} · {{.Agent}}</title>
-<style>{{.CSS}}</style>
-</head>
-<body>
-<header>
-<div><strong>{{.Agent}}</strong> · {{.Name}}</div>
-<div>Updated {{.Modified}} · <a href="{{.RawURL}}">Raw</a> · <a href="/">agenticgo</a></div>
-</header>
-<main>
-{{if .Plain}}<pre>{{.Text}}</pre>{{else}}{{.HTML}}{{end}}
-</main>
-</body>
-</html>
-`))
+func mustReadEmbedded(fsys embed.FS, name string) string {
+	b, err := fsys.ReadFile(name)
+	if err != nil {
+		panic(fmt.Sprintf("embedded %s: %v", name, err))
+	}
+	return string(b)
+}
+
+// cspHash is the CSP source expression allowing exactly this inline content.
+func cspHash(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return "sha256-" + base64.StdEncoding.EncodeToString(sum[:])
+}
 
 type reportPageData struct {
 	Agent, Name, Modified, RawURL string

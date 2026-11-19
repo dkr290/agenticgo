@@ -47,8 +47,8 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   Titles are listed in the system prompt so the agent knows to search.
 - **Sidebar Web UI** (embedded HTML/JS SPA, no build step) + **WebSocket** API.
   Pages: Overview, Chat, Chat History, Agents (per-agent Files/Skills/MCP Tools/
-  Knowledge/Images/Reports/Config tabs), Skills, Built-in Tools, MCP Servers,
-  Cron, Providers. Past conversations live on the dedicated
+  Knowledge/Images/Config tabs), Skills, Built-in Tools, MCP Servers,
+  Cron, Memory, Knowledge Base, Reports, Providers. Past conversations live on the dedicated
   **Chat History** page (not the sidebar, so long histories don't bloat the
   nav): a table of all sessions (`GET /api/sessions`) with an agent dropdown
   and a name filter, click a row to reopen it in Chat with history loaded,
@@ -167,7 +167,10 @@ GoClaw (nextlevelbuilder/goclaw) / OpenClaw but intentionally minimal. It is a
   page (goldmark, GitHub-flavored Markdown; other extensions as `<pre>` text),
   `GET /api/agents/{key}/reports` lists them newest first (with `url` /
   `raw_url`), and `GET /api/agents/{key}/reports/{name}` returns the raw file
-  as `text/plain`. Agents → Reports tab lists them with Open/Raw links. Only
+  as `text/plain`. The **Reports** page (sidebar → Data) picks an agent from a
+  dropdown and lists its reports with Open/Raw links. The page's template and
+  stylesheet are plain files in `internal/server/reportpage/`, embedded with
+  `go:embed` (not served directly). Only
   regular, non-hidden files directly in `reports/` count; the newest
   `AGENTICGO_REPORTS_KEEP` (default 5, 0 = keep all) by modification time are
   kept — `Registry.PruneReports` runs before and after every `Engine.Run` and on
@@ -343,7 +346,7 @@ data/
                                   #   + observation_inject (recent-observation count)
       images/                  # reference images for vision models (Images tab)
       workspace/               # per-agent tool jail
-        reports/               # published reports (Reports tab, /reports/<key>/<file>;
+        reports/               # published reports (Reports page, /reports/<key>/<file>;
                                #   newest AGENTICGO_REPORTS_KEEP kept)
 ```
 
@@ -458,5 +461,6 @@ curl -X POST localhost:18099/api/chat \
 - `internal/server/types.go` — shared request/response types (`doc`/`example`
   tags feed the generated OpenAPI spec)
 - `internal/server/reports.go` — rendered report page (`/reports/{key}/{name}`,
-  goldmark + strict CSP) and report URL/error helpers
+  goldmark + strict CSP) and report URL/error helpers; its template and
+  stylesheet live in `internal/server/reportpage/` (`go:embed`)
 - `internal/server/web/index.html` — the whole UI (single file, no build step)

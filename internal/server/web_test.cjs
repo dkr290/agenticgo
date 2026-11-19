@@ -5,9 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const html = fs.readFileSync(path.join(__dirname, 'web/index.html'), 'utf8');
-const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
-const agentTabNames = [...html.matchAll(/data-atab="([^"]+)"/g)].map(m => m[1]);
+const script = fs.readFileSync(path.join(__dirname, 'web/index.html'), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const flush = () => new Promise(setImmediate);
 
 async function app() {
@@ -27,10 +25,8 @@ async function app() {
   }
   const elements = new Map(), requests = [], sockets = [], fixtures = new Map();
   const $ = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-  // Agent detail tab buttons, so tests can click them like a user would.
-  const agentTabs = agentTabNames.map(name => { const el = new Element(); el.dataset.atab = name; return el; });
   const context = {
-    document: {getElementById: $, querySelectorAll: sel => sel === '[data-atab]' ? agentTabs : [], createElement: () => new Element()},
+    document: {getElementById: $, querySelectorAll: () => [], createElement: () => new Element()},
     location: {protocol: 'http:', host: 'example.invalid'},
     setTimeout: () => 1, clearTimeout: () => {}, confirm: () => true,
     fetch: async (url, opts) => {
@@ -49,7 +45,7 @@ async function app() {
   context.window=context;
   vm.runInNewContext(script, context);
   await flush();
-  return {$, requests, sockets, context, fixtures, agentTabs};
+  return {$, requests, sockets, context, fixtures};
 }
 
 test('initial vision status enables attach and reconnect unlocks chat', async () => {
@@ -116,24 +112,22 @@ test('LLM reset uses the capability-preserving endpoint', async () => {
   assert.deepEqual(JSON.parse(reset.opts.body), {});
 });
 
-test('Reports tab links to the rendered page and escapes names', async () => {
-  const {$, context, fixtures, agentTabs} = await app();
-  const reportsTab = agentTabs.find(t => t.dataset.atab === 'reports');
+test('Reports page lists the selected agent\'s reports with escaped names', async () => {
+  const {$, context, fixtures} = await app();
   const name = '<img src=x onerror=alert(1)>.md';
   fixtures.set('/api/agents/demo/reports', {keep:5, reports:[{
     name, size:16845, modified:'2026-11-19T10:02:00Z',
     url:'/reports/demo/' + encodeURIComponent(name), raw_url:'/api/agents/demo/reports/' + encodeURIComponent(name),
   }]});
-  context.showPage('agents'); await flush();
-  $('agents-grid').children[0].click(); await flush();
-  reportsTab.click(); await flush();
-  const html = $('atab-reports').innerHTML;
+  context.showPage('reports'); await flush();
+  assert.equal($('rep-agent').value, 'demo');
+  const html = $('rep-list').innerHTML;
   assert.ok(html.includes('href="/reports/demo/' + encodeURIComponent(name) + '"'));
   assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;.md'));
   assert.ok(!html.includes('<img'));
   assert.ok(html.includes('Only the latest 5 reports are kept'));
 
   fixtures.set('/api/agents/demo/reports', {keep:0, reports:[]});
-  reportsTab.click(); await flush();
-  assert.ok($('atab-reports').innerHTML.includes('All reports are kept'));
+  $('rep-refresh').click(); await flush();
+  assert.ok($('rep-list').innerHTML.includes('All reports are kept'));
 });

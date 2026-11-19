@@ -26,8 +26,8 @@ single static Go binary or a Docker container. Kubernetes manifests are on the r
   Knowledge Base page. They're **full-text indexed over content** (SQLite FTS5) so the
   agent recalls them via the `search_docs` tool — not bulk-injected into prompts.
 - **Sidebar Web UI** — dark, GoClaw-inspired SPA (no build step): Overview, Chat,
-  Agents (with a per-agent Files/Skills/Knowledge/Reports/Config editor), Skills (with ZIP upload),
-  Built-in Tools, MCP Servers, Cron, Memory, Knowledge Base, and Providers.
+  Agents (with a per-agent Files/Skills/Knowledge/Config editor), Skills (with ZIP upload),
+  Built-in Tools, MCP Servers, Cron, Memory, Knowledge Base, Reports, and Providers.
 - **Agent loop** — the model can call tools, observe results, and iterate until it
   answers (capped to prevent runaway loops).
 - **Providers** — manage multiple OpenAI-compatible endpoints (Ollama, LM Studio, vLLM,
@@ -72,7 +72,7 @@ single static Go binary or a Docker container. Kubernetes manifests are on the r
 - **Reports** — files an agent writes to `reports/` in its workspace are published
   read-only so a notification (e.g. a Teams card) can link to the full report:
   `/reports/<agent>/<file>` renders Markdown as a readable page (tables, lists, links),
-  the Agents → Reports tab lists them, and only the newest `AGENTICGO_REPORTS_KEEP`
+  the **Reports** page (sidebar → Data) lists them per agent, and only the newest `AGENTICGO_REPORTS_KEEP`
   (default 5) are kept per agent.
 
 ## Agent layout on disk
@@ -636,6 +636,7 @@ agenticgo/
 │   ├── mcp/              # MCP client: server registry, discovery, CallTool
 │   ├── cron/             # cron scheduler: JSON-persisted jobs + robfig/cron runner
 │   └── server/           # HTTP + WebSocket + embedded SPA
+│       ├── reportpage/   # report page template + stylesheet (embedded, not served)
 │       └── web/          # sidebar SPA (embedded via go:embed)
 ├── go.mod                # module github.com/dkr290/agenticgo
 └── README.md
