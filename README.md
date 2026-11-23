@@ -184,6 +184,29 @@ runs directly as PID 1 and handles `SIGTERM` for graceful shutdown. It runs as
 **UID/GID 10001**, listens on 8080, and stores all application data under `/data`.
 The default timezone is UTC; set `TZ` to change the default cron timezone.
 
+Published images (`ghcr.io/<owner>/agenticgo`) are **multi-arch**: each release
+pushes one manifest list with both `linux/amd64` and `linux/arm64` variants, so
+`docker pull` automatically selects the right architecture on ARM64 hosts
+(Apple Silicon, Raspberry Pi, AWS Graviton, etc.). The arm64 variant is built the
+same way: the Go binary is cross-compiled from the native build stage via
+`TARGETARCH` (`CGO_ENABLED=0`) and the runtime base is the multi-arch
+`debian:bookworm-slim`.
+
+To build both architectures locally (from any host):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t agenticgo:local .
+```
+
+To cross-build a single architecture (e.g. arm64 from an x86 host):
+
+```bash
+docker buildx build --platform linux/arm64 -t agenticgo:local .
+```
+
+On an native ARM64 host a plain `docker build` already targets the matching
+architecture.
+
 If you want Docker to reap orphaned descendants of exec/MCP commands, add
 `--init` to `docker run`; the image itself starts the Go binary directly.
 
