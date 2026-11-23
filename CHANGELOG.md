@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/dkr290/agenticgo/compare/v0.4.0...v0.5.0) (2026-11-23)
+
+
+### Features
+
+* **ci:** build and push multi-arch (amd64 + arm64) Docker images ([#60](https://github.com/dkr290/agenticgo/issues/60)) ([6af57f2](https://github.com/dkr290/agenticgo/commit/6af57f2caaa4c3ec599e141ad6ad40624398744f))
+* **dummy:** commit for ci ([#58](https://github.com/dkr290/agenticgo/issues/58)) ([5174588](https://github.com/dkr290/agenticgo/commit/5174588f428ed8245f610d2e7cb34a4ed554a390))
+
 ## [0.4.0](https://github.com/dkr290/agenticgo/compare/v0.3.0...v0.4.0) (2026-11-18)
 
 
